@@ -175,6 +175,13 @@ class ControllerState:
         for t in self.topics:
             symdiff = to_set(self.topic_configs[t]) ^ to_set(
                 other.topic_configs[t])
+
+            # We temporarily ignore the change in the source type of cleanup.policy
+            # as it changes from DYNAMIC_TOPIC_CONFIG to DEFAULT_CONFIG in the bugfix in this commit.
+            # This can be removed in a later commit.
+            symdiff -= set({('cleanup.policy', ('delete',
+                                                'DYNAMIC_TOPIC_CONFIG'))})
+
             assert len(symdiff) == 0, f"configs differ, symdiff: {symdiff}"
 
             partitions = self.topic_partitions[t]
