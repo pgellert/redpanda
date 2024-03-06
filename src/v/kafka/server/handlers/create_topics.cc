@@ -15,6 +15,7 @@
 #include "config/configuration.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/timeout.h"
+#include "kafka/server/handlers/configs/config_response_utils.h"
 #include "kafka/server/handlers/topics/topic_utils.h"
 #include "kafka/server/handlers/topics/types.h"
 #include "kafka/server/quota_manager.h"
@@ -114,9 +115,8 @@ append_topic_configs(request_context& ctx, create_topics_response& response) {
         auto cfg = ctx.metadata_cache().get_topic_cfg(
           model::topic_namespace_view{model::kafka_namespace, ct_result.name});
         if (cfg) {
-            auto config_map = from_cluster_type(cfg->properties);
-            ct_result.configs = {
-              properties_to_result_configs(std::move(config_map))};
+            ct_result.configs = std::make_optional(
+              make_configs(ctx.metadata_cache(), *cfg));
             ct_result.topic_config_error_code = kafka::error_code::none;
         } else {
             // Topic was sucessfully created but metadata request did not
