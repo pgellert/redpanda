@@ -247,7 +247,7 @@ ss::future<response_ptr> describe_configs_handler::handle(
               resource,
               result,
               ctx.metadata_cache(),
-              *topic_config,
+              topic_config->properties,
               request.data.include_synonyms,
               request.data.include_documentation);
             break;

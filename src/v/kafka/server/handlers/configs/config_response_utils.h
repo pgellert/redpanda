@@ -12,6 +12,7 @@
 #pragma once
 
 #include "cluster/metadata_cache.h"
+#include "cluster/types.h"
 #include "config/configuration.h"
 #include "config/data_directory_path.h"
 #include "config/node_config.h"
@@ -420,7 +421,7 @@ static inline void report_topic_config(
   const describe_configs_resource& resource,
   describe_configs_result& result,
   const cluster::metadata_cache& metadata_cache,
-  const cluster::topic_configuration& topic_config,
+  const cluster::topic_properties& topic_properties,
   bool include_synonyms,
   bool include_documentation) {
     /**
@@ -432,7 +433,7 @@ static inline void report_topic_config(
       config::shard_local_cfg().log_compression_type.name(),
       metadata_cache.get_default_compression(),
       topic_property_compression,
-      topic_config.properties.compression,
+      topic_properties.compression,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -445,7 +446,7 @@ static inline void report_topic_config(
       config::shard_local_cfg().log_cleanup_policy.name(),
       metadata_cache.get_default_cleanup_policy_bitflags(),
       topic_property_cleanup_policy,
-      topic_config.properties.cleanup_policy_bitflags,
+      topic_properties.cleanup_policy_bitflags,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -453,20 +454,20 @@ static inline void report_topic_config(
       &describe_as_string<model::cleanup_policy_bitflags>);
 
     const std::string_view docstring{
-      topic_config.properties.is_compacted()
+      topic_properties.is_compacted()
         ? config::shard_local_cfg().compacted_log_segment_size.desc()
         : config::shard_local_cfg().log_segment_size.desc()};
     add_topic_config_if_requested(
       resource,
       result,
-      topic_config.properties.is_compacted()
+      topic_properties.is_compacted()
         ? config::shard_local_cfg().compacted_log_segment_size.name()
         : config::shard_local_cfg().log_segment_size.name(),
-      topic_config.properties.is_compacted()
+      topic_properties.is_compacted()
         ? metadata_cache.get_default_compacted_topic_segment_size()
         : metadata_cache.get_default_segment_size(),
       topic_property_segment_size,
-      topic_config.properties.segment_size,
+      topic_properties.segment_size,
       include_synonyms,
       maybe_make_documentation(include_documentation, docstring),
       &describe_as_string<size_t>);
@@ -477,7 +478,7 @@ static inline void report_topic_config(
       config::shard_local_cfg().log_retention_ms.name(),
       metadata_cache.get_default_retention_duration(),
       topic_property_retention_duration,
-      topic_config.properties.retention_duration,
+      topic_properties.retention_duration,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -489,7 +490,7 @@ static inline void report_topic_config(
       config::shard_local_cfg().retention_bytes.name(),
       metadata_cache.get_default_retention_bytes(),
       topic_property_retention_bytes,
-      topic_config.properties.retention_bytes,
+      topic_properties.retention_bytes,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -501,7 +502,7 @@ static inline void report_topic_config(
       config::shard_local_cfg().log_message_timestamp_type.name(),
       metadata_cache.get_default_timestamp_type(),
       topic_property_timestamp_type,
-      topic_config.properties.timestamp_type,
+      topic_properties.timestamp_type,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -514,7 +515,7 @@ static inline void report_topic_config(
       config::shard_local_cfg().kafka_batch_max_bytes.name(),
       metadata_cache.get_default_batch_max_bytes(),
       topic_property_max_message_bytes,
-      topic_config.properties.batch_max_bytes,
+      topic_properties.batch_max_bytes,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -529,9 +530,9 @@ static inline void report_topic_config(
       model::is_fetch_enabled(
         metadata_cache.get_default_shadow_indexing_mode()),
       topic_property_remote_read,
-      topic_config.properties.shadow_indexing.has_value() ? std::make_optional(
-        model::is_fetch_enabled(*topic_config.properties.shadow_indexing))
-                                                          : std::nullopt,
+      topic_properties.shadow_indexing.has_value() ? std::make_optional(
+        model::is_fetch_enabled(*topic_properties.shadow_indexing))
+                                                   : std::nullopt,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -546,9 +547,9 @@ static inline void report_topic_config(
       model::is_archival_enabled(
         metadata_cache.get_default_shadow_indexing_mode()),
       topic_property_remote_write,
-      topic_config.properties.shadow_indexing.has_value() ? std::make_optional(
-        model::is_archival_enabled(*topic_config.properties.shadow_indexing))
-                                                          : std::nullopt,
+      topic_properties.shadow_indexing.has_value() ? std::make_optional(
+        model::is_archival_enabled(*topic_properties.shadow_indexing))
+                                                   : std::nullopt,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -562,7 +563,7 @@ static inline void report_topic_config(
       topic_property_retention_local_target_bytes,
       metadata_cache.get_default_retention_local_target_bytes(),
       topic_property_retention_local_target_bytes,
-      topic_config.properties.retention_local_target_bytes,
+      topic_properties.retention_local_target_bytes,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -575,7 +576,7 @@ static inline void report_topic_config(
       std::make_optional(
         metadata_cache.get_default_retention_local_target_ms()),
       topic_property_retention_local_target_ms,
-      topic_config.properties.retention_local_target_ms,
+      topic_properties.retention_local_target_ms,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -589,7 +590,7 @@ static inline void report_topic_config(
           storage::ntp_config::default_remote_delete,
           topic_property_remote_delete,
           override_if_not_default(
-            std::make_optional<bool>(topic_config.properties.remote_delete),
+            std::make_optional<bool>(topic_properties.remote_delete),
             storage::ntp_config::default_remote_delete),
           true,
           maybe_make_documentation(
@@ -605,7 +606,7 @@ static inline void report_topic_config(
       topic_property_segment_ms,
       metadata_cache.get_default_segment_ms(),
       topic_property_segment_ms,
-      topic_config.properties.segment_ms,
+      topic_properties.segment_ms,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -625,7 +626,7 @@ static inline void report_topic_config(
           topic_property_record_key_schema_id_validation_compat,
           metadata_cache.get_default_record_key_schema_id_validation(),
           topic_property_record_key_schema_id_validation_compat,
-          topic_config.properties.record_key_schema_id_validation_compat,
+          topic_properties.record_key_schema_id_validation_compat,
           include_synonyms,
           maybe_make_documentation(include_documentation, key_validation),
           &describe_as_string<bool>,
@@ -637,7 +638,7 @@ static inline void report_topic_config(
           topic_property_record_key_subject_name_strategy_compat,
           metadata_cache.get_default_record_key_subject_name_strategy(),
           topic_property_record_key_subject_name_strategy_compat,
-          topic_config.properties.record_key_subject_name_strategy_compat,
+          topic_properties.record_key_subject_name_strategy_compat,
           include_synonyms,
           maybe_make_documentation(
             include_documentation,
@@ -653,7 +654,7 @@ static inline void report_topic_config(
           topic_property_record_value_schema_id_validation_compat,
           metadata_cache.get_default_record_value_schema_id_validation(),
           topic_property_record_value_schema_id_validation_compat,
-          topic_config.properties.record_value_schema_id_validation_compat,
+          topic_properties.record_value_schema_id_validation_compat,
           include_synonyms,
           maybe_make_documentation(include_documentation, val_validation),
           &describe_as_string<bool>,
@@ -665,7 +666,7 @@ static inline void report_topic_config(
           topic_property_record_value_subject_name_strategy_compat,
           metadata_cache.get_default_record_value_subject_name_strategy(),
           topic_property_record_value_subject_name_strategy_compat,
-          topic_config.properties.record_value_subject_name_strategy_compat,
+          topic_properties.record_value_subject_name_strategy_compat,
           include_synonyms,
           maybe_make_documentation(
             include_documentation,
@@ -683,7 +684,7 @@ static inline void report_topic_config(
           topic_property_record_key_schema_id_validation,
           metadata_cache.get_default_record_key_schema_id_validation(),
           topic_property_record_key_schema_id_validation,
-          topic_config.properties.record_key_schema_id_validation,
+          topic_properties.record_key_schema_id_validation,
           include_synonyms,
           maybe_make_documentation(include_documentation, key_validation),
           &describe_as_string<bool>,
@@ -695,7 +696,7 @@ static inline void report_topic_config(
           topic_property_record_key_subject_name_strategy,
           metadata_cache.get_default_record_key_subject_name_strategy(),
           topic_property_record_key_subject_name_strategy,
-          topic_config.properties.record_key_subject_name_strategy,
+          topic_properties.record_key_subject_name_strategy,
           include_synonyms,
           maybe_make_documentation(
             include_documentation,
@@ -712,7 +713,7 @@ static inline void report_topic_config(
           topic_property_record_value_schema_id_validation,
           metadata_cache.get_default_record_value_schema_id_validation(),
           topic_property_record_value_schema_id_validation,
-          topic_config.properties.record_value_schema_id_validation,
+          topic_properties.record_value_schema_id_validation,
           include_synonyms,
           maybe_make_documentation(include_documentation, val_validation),
           &describe_as_string<bool>,
@@ -724,7 +725,7 @@ static inline void report_topic_config(
           topic_property_record_value_subject_name_strategy,
           metadata_cache.get_default_record_value_subject_name_strategy(),
           topic_property_record_value_subject_name_strategy,
-          topic_config.properties.record_value_subject_name_strategy,
+          topic_properties.record_value_subject_name_strategy,
           include_synonyms,
           maybe_make_documentation(
             include_documentation,
@@ -747,7 +748,7 @@ static inline void report_topic_config(
       topic_property_initial_retention_local_target_bytes,
       metadata_cache.get_default_initial_retention_local_target_bytes(),
       topic_property_initial_retention_local_target_bytes,
-      topic_config.properties.initial_retention_local_target_bytes,
+      topic_properties.initial_retention_local_target_bytes,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -760,7 +761,7 @@ static inline void report_topic_config(
       topic_property_initial_retention_local_target_ms,
       metadata_cache.get_default_initial_retention_local_target_ms(),
       topic_property_initial_retention_local_target_ms,
-      topic_config.properties.initial_retention_local_target_ms,
+      topic_properties.initial_retention_local_target_ms,
       include_synonyms,
       maybe_make_documentation(
         include_documentation,
@@ -770,12 +771,12 @@ static inline void report_topic_config(
 
 static inline std::vector<creatable_topic_configs> make_configs(
   const cluster::metadata_cache& metadata_cache,
-  const cluster::topic_configuration& cfg) {
+  const cluster::topic_properties& topic_config) {
     describe_configs_resource resource{};
     describe_configs_result describe_result{};
 
     report_topic_config(
-      resource, describe_result, metadata_cache, cfg, false, false);
+      resource, describe_result, metadata_cache, topic_config, false, false);
 
     std::vector<creatable_topic_configs> result;
     result.reserve(describe_result.configs.size());
