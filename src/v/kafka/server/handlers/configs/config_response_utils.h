@@ -45,63 +45,17 @@
 
 namespace kafka {
 
+// Visible for unit testing
 template<typename T>
 using config_value_mapper_t = std::function<ss::sstring(const T&)>;
 
-bool config_property_requested(
-  const std::optional<std::vector<ss::sstring>>& configuration_keys,
-  const std::string_view property_name);
-
-template<typename T>
-void add_config(
-  describe_configs_result& result,
-  std::string_view name,
-  T value,
-  describe_configs_source source);
-
-template<typename T>
-void add_config_if_requested(
-  const describe_configs_resource& resource,
-  describe_configs_result& result,
-  std::string_view name,
-  T value,
-  describe_configs_source source);
-
+// Visible for unit testing
 template<typename T>
 static inline ss::sstring describe_as_string(const T& t) {
     return ssx::sformat("{}", t);
 }
 
-template<typename T, typename Func>
-void add_broker_config(
-  describe_configs_result& result,
-  std::string_view name,
-  const config::property<T>& property,
-  bool include_synonyms,
-  std::optional<ss::sstring> documentation,
-  Func&& describe_f);
-
-template<typename T, typename Func>
-void add_broker_config_if_requested(
-  const describe_configs_resource& resource,
-  describe_configs_result& result,
-  std::string_view name,
-  const config::property<T>& property,
-  bool include_synonyms,
-  std::optional<ss::sstring> documentation,
-  Func&& describe_f);
-
-template<typename T, typename Func>
-void add_topic_config(
-  describe_configs_result& result,
-  std::string_view default_name,
-  const T& default_value,
-  std::string_view override_name,
-  const std::optional<T>& overrides,
-  bool include_synonyms,
-  std::optional<ss::sstring> documentation,
-  Func&& describe_f);
-
+// Visible for unit testing
 template<typename T>
 void add_topic_config_if_requested(
   const describe_configs_resource& resource,
@@ -115,16 +69,7 @@ void add_topic_config_if_requested(
   config_value_mapper_t<T>&& describe_f,
   bool hide_default_override = false);
 
-template<typename T>
-void add_topic_config(
-  describe_configs_result& result,
-  std::string_view default_name,
-  const std::optional<T>& default_value,
-  std::string_view override_name,
-  const tristate<T>& overrides,
-  bool include_synonyms,
-  std::optional<ss::sstring> documentation);
-
+// Visible for unit testing
 template<typename T>
 void add_topic_config_if_requested(
   const describe_configs_resource& resource,
@@ -135,12 +80,6 @@ void add_topic_config_if_requested(
   const tristate<T>& overrides,
   bool include_synonyms,
   std::optional<ss::sstring> documentation);
-
-ss::sstring
-kafka_endpoint_format(const std::vector<model::broker_endpoint>& endpoints);
-
-ss::sstring kafka_authn_endpoint_format(
-  const std::vector<config::broker_authn_endpoint>& endpoints);
 
 void report_topic_config(
   const describe_configs_resource& resource,
