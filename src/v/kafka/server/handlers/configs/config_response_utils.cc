@@ -281,7 +281,7 @@ override_if_not_default(const std::optional<T>& override, const T& def) {
     }
 }
 
-template<typename T, typename Func>
+template<typename T>
 void add_topic_config_if_requested(
   const describe_configs_resource& resource,
   describe_configs_result& result,
@@ -291,7 +291,7 @@ void add_topic_config_if_requested(
   const std::optional<T>& overrides,
   bool include_synonyms,
   std::optional<ss::sstring> documentation,
-  Func&& describe_f,
+  config_value_mapper_t<T>&& describe_f,
   bool hide_default_override) {
     if (config_property_requested(resource.configuration_keys, override_name)) {
         std::optional<T> overrides_val;
@@ -309,7 +309,7 @@ void add_topic_config_if_requested(
           overrides_val,
           include_synonyms,
           documentation,
-          std::forward<Func>(describe_f));
+          std::forward<config_value_mapper_t<T>>(describe_f));
     }
 }
 
@@ -422,7 +422,7 @@ void report_topic_config(
     /**
      * Kafka properties
      */
-    add_topic_config_if_requested(
+    add_topic_config_if_requested<model::compression>(
       resource,
       result,
       config::shard_local_cfg().log_compression_type.name(),
@@ -435,7 +435,7 @@ void report_topic_config(
         config::shard_local_cfg().log_compression_type.desc()),
       &describe_as_string<model::compression>);
 
-    add_topic_config_if_requested(
+    add_topic_config_if_requested<model::cleanup_policy_bitflags>(
       resource,
       result,
       config::shard_local_cfg().log_cleanup_policy.name(),
@@ -452,7 +452,7 @@ void report_topic_config(
       topic_properties.is_compacted()
         ? config::shard_local_cfg().compacted_log_segment_size.desc()
         : config::shard_local_cfg().log_segment_size.desc()};
-    add_topic_config_if_requested(
+    add_topic_config_if_requested<size_t>(
       resource,
       result,
       topic_properties.is_compacted()
@@ -491,7 +491,7 @@ void report_topic_config(
         include_documentation,
         config::shard_local_cfg().retention_bytes.desc()));
 
-    add_topic_config_if_requested(
+    add_topic_config_if_requested<model::timestamp_type>(
       resource,
       result,
       config::shard_local_cfg().log_message_timestamp_type.name(),
@@ -504,7 +504,7 @@ void report_topic_config(
         config::shard_local_cfg().log_message_timestamp_type.desc()),
       &describe_as_string<model::timestamp_type>);
 
-    add_topic_config_if_requested(
+    add_topic_config_if_requested<uint32_t>(
       resource,
       result,
       config::shard_local_cfg().kafka_batch_max_bytes.name(),
@@ -518,7 +518,7 @@ void report_topic_config(
       &describe_as_string<uint32_t>);
 
     // Shadow indexing properties
-    add_topic_config_if_requested(
+    add_topic_config_if_requested<bool>(
       resource,
       result,
       topic_property_remote_read,
@@ -535,7 +535,7 @@ void report_topic_config(
       &describe_as_string<bool>,
       true);
 
-    add_topic_config_if_requested(
+    add_topic_config_if_requested<bool>(
       resource,
       result,
       topic_property_remote_write,
@@ -615,7 +615,7 @@ void report_topic_config(
 
     switch (config::shard_local_cfg().enable_schema_id_validation()) {
     case pandaproxy::schema_registry::schema_id_validation_mode::compat: {
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<bool>(
           resource,
           result,
           topic_property_record_key_schema_id_validation_compat,
@@ -627,7 +627,8 @@ void report_topic_config(
           &describe_as_string<bool>,
           validation_hide_default_override);
 
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<
+          pandaproxy::schema_registry::subject_name_strategy>(
           resource,
           result,
           topic_property_record_key_subject_name_strategy_compat,
@@ -643,7 +644,7 @@ void report_topic_config(
           [](auto sns) { return ss::sstring(to_string_view_compat(sns)); },
           validation_hide_default_override);
 
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<bool>(
           resource,
           result,
           topic_property_record_value_schema_id_validation_compat,
@@ -655,7 +656,8 @@ void report_topic_config(
           &describe_as_string<bool>,
           validation_hide_default_override);
 
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<
+          pandaproxy::schema_registry::subject_name_strategy>(
           resource,
           result,
           topic_property_record_value_subject_name_strategy_compat,
@@ -673,7 +675,7 @@ void report_topic_config(
         [[fallthrough]];
     }
     case pandaproxy::schema_registry::schema_id_validation_mode::redpanda: {
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<bool>(
           resource,
           result,
           topic_property_record_key_schema_id_validation,
@@ -685,7 +687,8 @@ void report_topic_config(
           &describe_as_string<bool>,
           validation_hide_default_override);
 
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<
+          pandaproxy::schema_registry::subject_name_strategy>(
           resource,
           result,
           topic_property_record_key_subject_name_strategy,
@@ -702,7 +705,7 @@ void report_topic_config(
             pandaproxy::schema_registry::subject_name_strategy>,
           validation_hide_default_override);
 
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<bool>(
           resource,
           result,
           topic_property_record_value_schema_id_validation,
@@ -714,7 +717,8 @@ void report_topic_config(
           &describe_as_string<bool>,
           validation_hide_default_override);
 
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<
+          pandaproxy::schema_registry::subject_name_strategy>(
           resource,
           result,
           topic_property_record_value_subject_name_strategy,
@@ -785,6 +789,163 @@ std::vector<creatable_topic_configs> make_configs(
     }
 
     return result;
+}
+
+void report_broker_config(
+  const describe_configs_resource& resource,
+  describe_configs_result& result,
+  bool include_synonyms,
+  bool include_documentation) {
+    if (!result.resource_name.empty()) {
+        int32_t broker_id = -1;
+        auto res = std::from_chars(
+          result.resource_name.data(),
+          result.resource_name.data() + result.resource_name.size(), // NOLINT
+          broker_id);
+        if (res.ec == std::errc()) {
+            if (broker_id != *config::node().node_id()) {
+                result.error_code = error_code::invalid_request;
+                result.error_message = ssx::sformat(
+                  "Unexpected broker id {} expected {}",
+                  broker_id,
+                  *config::node().node_id());
+                return;
+            }
+        } else {
+            result.error_code = error_code::invalid_request;
+            result.error_message = ssx::sformat(
+              "Broker id must be an integer but received {}",
+              result.resource_name);
+            return;
+        }
+    }
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "listeners",
+      config::node().kafka_api,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation, config::node().kafka_api.desc()),
+      &kafka_authn_endpoint_format);
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "advertised.listeners",
+      config::node().advertised_kafka_api_property(),
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        config::node().advertised_kafka_api_property().desc()),
+      &kafka_endpoint_format);
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "log.segment.bytes",
+      config::shard_local_cfg().log_segment_size,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        config::shard_local_cfg().log_segment_size.desc()),
+      &describe_as_string<size_t>);
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "log.retention.bytes",
+      config::shard_local_cfg().retention_bytes,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        config::shard_local_cfg().retention_bytes.desc()),
+      [](std::optional<size_t> sz) {
+          return ssx::sformat("{}", sz ? sz.value() : -1);
+      });
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "log.retention.ms",
+      config::shard_local_cfg().log_retention_ms,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        config::shard_local_cfg().log_retention_ms.desc()),
+      [](const std::optional<std::chrono::milliseconds>& ret) {
+          return ssx::sformat("{}", ret.value_or(-1ms).count());
+      });
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "num.partitions",
+      config::shard_local_cfg().default_topic_partitions,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        config::shard_local_cfg().default_topic_partitions.desc()),
+      &describe_as_string<int32_t>);
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "default.replication.factor",
+      config::shard_local_cfg().default_topic_replication,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        config::shard_local_cfg().default_topic_replication.desc()),
+      &describe_as_string<int16_t>);
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "log.dirs",
+      config::node().data_directory,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation, config::node().data_directory.desc()),
+      [](const config::data_directory_path& path) {
+          return path.as_sstring();
+      });
+
+    add_broker_config_if_requested(
+      resource,
+      result,
+      "auto.create.topics.enable",
+      config::shard_local_cfg().auto_create_topics_enabled,
+      include_synonyms,
+      maybe_make_documentation(
+        include_documentation,
+        config::shard_local_cfg().auto_create_topics_enabled.desc()),
+      &describe_as_string<bool>);
+}
+
+int64_t describe_retention_duration(
+  tristate<std::chrono::milliseconds>& overrides,
+  std::optional<std::chrono::milliseconds> def) {
+    if (overrides.is_disabled()) {
+        return -1;
+    }
+    if (overrides.has_optional_value()) {
+        return overrides.value().count();
+    }
+
+    return def ? def->count() : -1;
+}
+int64_t describe_retention_bytes(
+  tristate<size_t>& overrides, std::optional<size_t> def) {
+    if (overrides.is_disabled()) {
+        return -1;
+    }
+    if (overrides.has_optional_value()) {
+        return overrides.value();
+    }
+
+    return def.value_or(-1);
 }
 
 } // namespace kafka

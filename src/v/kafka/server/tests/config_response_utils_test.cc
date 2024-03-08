@@ -42,13 +42,13 @@ kafka::describe_configs_source get_config_source(
 BOOST_AUTO_TEST_CASE(add_topic_config_if_requested_tristate) {
     using namespace kafka;
     auto verify_tristate_config = [](
-                                    std::optional<int> default_value,
-                                    tristate<int> override_value,
+                                    std::optional<size_t> default_value,
+                                    tristate<size_t> override_value,
                                     std::optional<ss::sstring> expected_value) {
         describe_configs_resource resource{};
         describe_configs_result result{};
 
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<size_t>(
           resource,
           result,
           "test-global-broker-config-name",
@@ -63,27 +63,27 @@ BOOST_AUTO_TEST_CASE(add_topic_config_if_requested_tristate) {
     };
 
     // clang-format off
-    verify_tristate_config(std::make_optional(2), tristate<int>(1), std::make_optional("1"));
-    verify_tristate_config(std::make_optional(2), tristate<int>(std::nullopt), std::make_optional("2"));
-    verify_tristate_config(std::make_optional(2), tristate<int>(), std::make_optional("-1"));
+    verify_tristate_config(std::make_optional(2), tristate<size_t>(1), std::make_optional("1"));
+    verify_tristate_config(std::make_optional(2), tristate<size_t>(std::nullopt), std::make_optional("2"));
+    verify_tristate_config(std::make_optional(2), tristate<size_t>(), std::make_optional("-1"));
 
-    verify_tristate_config(std::nullopt, tristate<int>(1), std::make_optional("1"));
-    verify_tristate_config(std::nullopt, tristate<int>(std::nullopt), std::make_optional("-1"));
-    verify_tristate_config(std::nullopt, tristate<int>(), std::make_optional("-1"));
+    verify_tristate_config(std::nullopt, tristate<size_t>(1), std::make_optional("1"));
+    verify_tristate_config(std::nullopt, tristate<size_t>(std::nullopt), std::make_optional("-1"));
+    verify_tristate_config(std::nullopt, tristate<size_t>(), std::make_optional("-1"));
     // clang-format on
 }
 
 BOOST_AUTO_TEST_CASE(add_topic_config_if_requested_optional) {
     using namespace kafka;
     auto verify_optional_config = [](
-                                    int default_value,
-                                    std::optional<int> override_value,
+                                    size_t default_value,
+                                    std::optional<size_t> override_value,
                                     std::optional<ss::sstring> expected_value,
                                     bool hide_default_override) {
         describe_configs_resource resource{};
         describe_configs_result result{};
 
-        add_topic_config_if_requested(
+        add_topic_config_if_requested<size_t>(
           resource,
           result,
           "test-global-broker-config-name",
@@ -92,7 +92,7 @@ BOOST_AUTO_TEST_CASE(add_topic_config_if_requested_optional) {
           override_value,
           false,
           std::nullopt,
-          &describe_as_string<int>,
+          &describe_as_string<size_t>,
           hide_default_override);
 
         BOOST_CHECK_EQUAL(
@@ -115,7 +115,7 @@ BOOST_AUTO_TEST_CASE(add_topic_config_if_requested_optional_hide_default) {
           describe_configs_resource resource{};
           describe_configs_result result{};
 
-          add_topic_config_if_requested(
+          add_topic_config_if_requested<size_t>(
             resource,
             result,
             "test-global-broker-config-name",
@@ -124,7 +124,7 @@ BOOST_AUTO_TEST_CASE(add_topic_config_if_requested_optional_hide_default) {
             std::make_optional(2),
             false,
             std::nullopt,
-            &describe_as_string<int>,
+            &describe_as_string<size_t>,
             hide_default_override);
 
           BOOST_CHECK_EQUAL(

@@ -45,6 +45,9 @@
 
 namespace kafka {
 
+template<typename T>
+using config_value_mapper_t = std::function<ss::sstring(const T&)>;
+
 bool config_property_requested(
   const std::optional<std::vector<ss::sstring>>& configuration_keys,
   const std::string_view property_name);
@@ -99,7 +102,7 @@ void add_topic_config(
   std::optional<ss::sstring> documentation,
   Func&& describe_f);
 
-template<typename T, typename Func>
+template<typename T>
 void add_topic_config_if_requested(
   const describe_configs_resource& resource,
   describe_configs_result& result,
@@ -109,7 +112,7 @@ void add_topic_config_if_requested(
   const std::optional<T>& overrides,
   bool include_synonyms,
   std::optional<ss::sstring> documentation,
-  Func&& describe_f,
+  config_value_mapper_t<T>&& describe_f,
   bool hide_default_override = false);
 
 template<typename T>
@@ -139,7 +142,6 @@ kafka_endpoint_format(const std::vector<model::broker_endpoint>& endpoints);
 ss::sstring kafka_authn_endpoint_format(
   const std::vector<config::broker_authn_endpoint>& endpoints);
 
-
 void report_topic_config(
   const describe_configs_resource& resource,
   describe_configs_result& result,
@@ -151,5 +153,11 @@ void report_topic_config(
 std::vector<creatable_topic_configs> make_configs(
   const cluster::metadata_cache& metadata_cache,
   const cluster::topic_properties& topic_config);
+
+void report_broker_config(
+  const describe_configs_resource& resource,
+  describe_configs_result& result,
+  bool include_synonyms,
+  bool include_documentation);
 
 } // namespace kafka
