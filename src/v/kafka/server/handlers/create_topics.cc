@@ -92,24 +92,6 @@ using validators = make_validator_types<
   vcluster_id_validator,
   write_caching_configs_validator>;
 
-static std::vector<creatable_topic_configs>
-properties_to_result_configs(config_map_t config_map) {
-    std::vector<creatable_topic_configs> configs;
-    configs.reserve(config_map.size());
-    std::transform(
-      config_map.begin(),
-      config_map.end(),
-      std::back_inserter(configs),
-      [](auto& cfg) {
-          return creatable_topic_configs{
-            .name = cfg.first,
-            .value = {std::move(cfg.second)},
-            .config_source = kafka::describe_configs_source::default_config,
-          };
-      });
-    return configs;
-}
-
 static void
 append_topic_configs(request_context& ctx, create_topics_response& response) {
     for (auto& ct_result : response.data.topics) {
