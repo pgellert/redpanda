@@ -104,8 +104,13 @@ static std::optional<std::string_view> get_client_quota_id(
         return std::nullopt;
     }
     for (const auto& group_and_limit : group_quota) {
-        if (client_id->starts_with(
-              std::string_view(group_and_limit.second.clients_prefix))) {
+        if (
+          client_id->starts_with(
+            std::string_view(group_and_limit.second.clients_prefix))
+          || *client_id
+               == group_and_limit.second
+                    .clients_prefix) { // TODO: use .second.client_id for exact
+                                       // matching
             return group_and_limit.first;
         }
     }

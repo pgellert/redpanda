@@ -25,6 +25,7 @@
 
 #include <fmt/format.h>
 
+#include <math.h>
 #include <optional>
 #include <type_traits>
 
@@ -72,6 +73,7 @@ public:
         auto [i, _] = _parser.read_unsigned_varint();
         return i;
     }
+    double read_double() { return std::bit_cast<double>(read_int64()); }
 
     static ss::sstring apply_control_validation(ss::sstring val) {
         validate_no_control(val);
@@ -449,6 +451,15 @@ public:
         /// This type is not prepended with its size
         _out->append(uuid.view().data(), uuid::length);
         return uuid::length;
+    }
+
+    uint32_t write(double v) {
+        // _out->append(reinterpret_cast<const char*>(&v), sizeof(v));
+        // return sizeof(v);
+
+        // TODO: why does this not work as expected??
+
+        return serialize_int<int64_t>(std::bit_cast<int64_t>(v));
     }
 
     uint32_t write(bytes_view bv) {

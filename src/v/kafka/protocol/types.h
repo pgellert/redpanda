@@ -156,4 +156,19 @@ std::ostream& operator<<(std::ostream&, describe_configs_type t);
 
 inline const kafka::protocol_type consumer_group_protocol_type("consumer");
 
+/*
+ * Data type for the match type of describe client quotas requests.
+ */
+enum class describe_client_quotas_match_type : int8_t {
+    /// Return only values matching the specified match field
+    exact_name = 0,
+    /// Return only the default value (ignoring the match field)
+    default_name = 1,
+    /// Return only the specified values, that is everything but the default
+    /// value (ignoring the match field)
+    any_specified_name = 2,
+};
+
+std::ostream& operator<<(std::ostream&, describe_client_quotas_match_type t);
+
 } // namespace kafka

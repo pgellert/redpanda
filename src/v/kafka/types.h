@@ -136,6 +136,26 @@ struct partition_info {
     std::optional<model::node_id> leader;
 };
 
+namespace entity_type {
+
+/// The entity type corresponding to the cliend.id Kafka header field
+const ss::sstring client_id = ss::sstring{"client-id"};
+
+} // namespace entity_type
+
+namespace quota_type {
+
+/// Maximum allowed rate of produce requests (bytes/sec)
+const ss::sstring producer_byte_rate = ss::sstring{"producer_byte_rate"};
+
+/// Maximum allowed rate of fetch requests (bytes/sec)
+const ss::sstring consumer_byte_rate = ss::sstring{"consumer_byte_rate"};
+
+/// Maximum allowed rate of partition mutations (partitions/sec)
+const ss::sstring controller_mutation_rate = ss::sstring{
+  "controller_mutation_rate"};
+} // namespace quota_type
+
 } // namespace kafka
 
 /*
