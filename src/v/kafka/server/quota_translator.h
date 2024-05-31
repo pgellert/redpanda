@@ -47,6 +47,9 @@ struct quota_limits {
     std::optional<uint64_t> produce_limit;
     std::optional<uint64_t> fetch_limit;
     std::optional<uint64_t> partition_mutation_limit;
+
+    friend bool operator==(const quota_limits&, const quota_limits&) = default;
+    friend std::ostream& operator<<(std::ostream& os, const quota_limits& l);
 };
 
 /// quota_translator is responsible for providing quota_manager with a

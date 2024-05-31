@@ -17,6 +17,17 @@
 
 namespace kafka {
 
+std::ostream& operator<<(std::ostream& os, const quota_limits& l) {
+    fmt::print(
+      os,
+      "limits{{produce_limit: {}, fetch_limit: {}, "
+      "partition_mutation_limit: {}}}",
+      l.produce_limit,
+      l.fetch_limit,
+      l.partition_mutation_limit);
+    return os;
+}
+
 quota_translator::quota_translator()
   : _default_target_produce_tp_rate(
     config::shard_local_cfg().target_quota_byte_rate.bind())
