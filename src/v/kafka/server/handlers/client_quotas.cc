@@ -9,13 +9,16 @@
  * by the Apache License, Version 2.0
  */
 
+#include "client_quota_frontend.h"
 #include "client_quota_serde.h"
 #include "client_quota_store.h"
+#include "kafka/protocol/exceptions.h"
 #include "kafka/protocol/schemata/alter_client_quotas_request.h"
 #include "kafka/protocol/schemata/alter_client_quotas_response.h"
 #include "kafka/protocol/schemata/describe_client_quotas_request.h"
 #include "kafka/protocol/schemata/describe_client_quotas_response.h"
 #include "kafka/server/client_quota_translator.h"
+#include "kafka/server/errors.h"
 #include "kafka/server/handlers/alter_client_quotas.h"
 #include "kafka/server/handlers/describe_client_quotas.h"
 
@@ -34,6 +37,26 @@ constexpr std::string_view to_string_view(client_quota_type t) {
     }
 }
 
+template<typename E>
+std::enable_if_t<std::is_enum_v<E>, std::optional<E>>
+  from_string_view(std::string_view);
+
+template<>
+constexpr std::optional<client_quota_type>
+from_string_view<client_quota_type>(std::string_view v) {
+    return string_switch<std::optional<client_quota_type>>(v)
+      .match(
+        to_string_view(client_quota_type::produce_quota),
+        client_quota_type::produce_quota)
+      .match(
+        to_string_view(client_quota_type::fetch_quota),
+        client_quota_type::fetch_quota)
+      .match(
+        to_string_view(client_quota_type::partition_mutation_quota),
+        client_quota_type::partition_mutation_quota)
+      .default_match(std::nullopt);
+}
+
 template<typename T>
 requires std::
   is_same_v<std::remove_cvref_t<T>, cluster::client_quota::entity_value>
@@ -45,17 +68,6 @@ requires std::
         return std::forward<T>(val).consumer_byte_rate;
     case client_quota_type::partition_mutation_quota:
         return std::forward<T>(val).controller_mutation_rate;
-    }
-}
-
-void make_error_response(
-  alter_client_quotas_request& req, alter_client_quotas_response& resp) {
-    for (const auto& entry [[maybe_unused]] : req.data.entries) {
-        resp.data.entries.push_back(
-          kafka::alter_client_quotas_response_entry_data{
-            .error_code = error_code::unsupported_version,
-            .error_message = "Unsupported version - not yet implemented",
-          });
     }
 }
 
@@ -178,16 +190,81 @@ ss::future<response_ptr> describe_client_quotas_handler::handle(
 template<>
 ss::future<response_ptr> alter_client_quotas_handler::handle(
   request_context ctx, ss::smp_service_group) {
+    using entity_key = cluster::client_quota::entity_key;
+    using entity_value = cluster::client_quota::entity_value;
+
     alter_client_quotas_request request;
     request.decode(ctx.reader(), ctx.header().version);
     log_request(ctx.header(), request);
 
-    // TODO: implement the AlterClientQuotas API
-    // ctx.quota_store().get_quota(...);
-    // ctx.quota_frontend().alter_quotas(...);
+    cluster::client_quota::alter_delta_cmd_data cmd;
+    constexpr auto make_part = [](const auto& entity) {
+        entity_key::part part;
+        if (entity.entity_type == "client-id") {
+            if (entity.entity_name.value_or("") == "") {
+                part.part.emplace<entity_key::part::client_id_default_match>();
+            } else {
+                part.part.emplace<entity_key::part::client_id_match>(
+                  entity_key::part::client_id_match{
+                    .value = entity.entity_name.value_or("")});
+            }
+        } else if (entity.entity_type == "client-id-prefix") {
+            part.part.emplace<entity_key::part::client_id_prefix_match>(
+              entity_key::part::client_id_prefix_match{
+                .value = entity.entity_name.value_or("")});
+        } else {
+            throw kafka::exception(
+              kafka::error_code::invalid_config,
+              fmt::format("Unknown entity_type: {}", entity.entity_type));
+        }
+        return part;
+    };
 
+    for (const auto& entry : request.data.entries) {
+        entity_key key;
+        entity_value val;
+        key.parts.reserve(entry.entity.size());
+        for (const auto& entity : entry.entity) {
+            key.parts.emplace(make_part(entity));
+        }
+        for (const auto& op : entry.ops) {
+            auto cqt = from_string_view<client_quota_type>(op.key);
+            if (!cqt) {
+                continue;
+            }
+            get_entity_value_field(cqt.value(), val) = op.value;
+        }
+        cmd.upsert.push_back({.key = std::move(key), .value = val});
+    }
+
+    auto err = co_await ctx.quota_frontend().alter_quotas(
+      cmd, model::timeout_clock::now() + 5s);
     alter_client_quotas_response response;
-    make_error_response(request, response);
+
+    kafka::error_code ec = kafka::error_code::none;
+    ss::sstring msg;
+
+    if (err) {
+        ec = [](std::error_code err) {
+            if (err.category() == cluster::error_category()) {
+                return map_topic_error_code(
+                  static_cast<cluster::errc>(err.value()));
+            } else {
+                return kafka::error_code::unknown_server_error;
+            }
+        }(err);
+        msg = err.message();
+    }
+    for (const auto& entry : request.data.entries) {
+        response.data.entries.push_back(alter_client_quotas_response_entry_data{
+          .error_code = ec, .error_message = msg});
+
+        response.data.entries.back().entity.reserve(entry.entity.size());
+        for (const auto& e : entry.entity) {
+            response.data.entries.back().entity.emplace_back(
+              e.entity_type, e.entity_name, e.unknown_tags);
+        }
+    }
 
     co_return co_await ctx.respond(std::move(response));
 }
