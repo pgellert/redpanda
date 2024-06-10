@@ -43,18 +43,13 @@ const entity_key key3{
 };
 
 const entity_value val0{
-  .consumer_byte_rate = 10240,
-};
+  .entries = {{entity_value::key::consumer_byte_rate, 10240}}};
 const entity_value val1{
-  .producer_byte_rate = 51200,
-};
+  .entries = {{entity_value::key::producer_byte_rate, 51200}}};
 const entity_value val2{
-  .producer_byte_rate = 25600,
-  .consumer_byte_rate = 20480,
-};
-const entity_value val3{
-  .producer_byte_rate = 12345,
-};
+  .entries = {
+    {entity_value::key::producer_byte_rate, 25600},
+    {entity_value::key::consumer_byte_rate, 20480}}};
 
 BOOST_AUTO_TEST_CASE(quota_store_set_get_remove) {
     store st;

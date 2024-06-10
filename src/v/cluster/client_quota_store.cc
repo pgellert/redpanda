@@ -9,11 +9,22 @@
 
 #include "client_quota_store.h"
 
+#include "client_quota_serde.h"
+
 namespace cluster::client_quota {
 
 void store::set_quota(const entity_key& key, const entity_value& value) {
     if (!value.is_empty()) {
-        _quotas.insert_or_assign(key, value);
+        auto& q = _quotas[key];
+        for (const auto& entry : value.entries) {
+            switch (entry.op) {
+            case entity_value::operation::remove:
+                q.entries.erase();
+                break;
+            case entity_value::operation::upsert:
+                break;
+            }
+        }
     } else {
         _quotas.erase(key);
     }

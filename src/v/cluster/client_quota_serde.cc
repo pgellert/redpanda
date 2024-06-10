@@ -47,14 +47,20 @@ std::ostream& operator<<(std::ostream& os, const entity_key& key) {
     return os;
 }
 
+std::ostream& operator<<(std::ostream& os, const entity_value::entry& entry) {
+    switch (entry.op) {
+    case entity_value::operation::upsert:
+        fmt::print(
+          os, "upsert: {}={}", to_string_view(entry.type), entry.value);
+        return os;
+    case entity_value::operation::remove:
+        fmt::print(os, "remove: {}", to_string_view(entry.type));
+        return os;
+    }
+}
+
 std::ostream& operator<<(std::ostream& os, const entity_value& value) {
-    fmt::print(
-      os,
-      "{{producer_byte_rate: {}, consumer_byte_rate: {}, "
-      "controller_mutation_rate: {}}}",
-      value.producer_byte_rate,
-      value.consumer_byte_rate,
-      value.controller_mutation_rate);
+    fmt::print(os, "{}", value.entries);
     return os;
 }
 

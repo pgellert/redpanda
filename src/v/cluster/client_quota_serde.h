@@ -16,6 +16,7 @@
 
 #include <absl/container/flat_hash_set.h>
 
+#include <cstdint>
 #include <iosfwd>
 #include <vector>
 
@@ -128,21 +129,71 @@ struct entity_key
     absl::flat_hash_set<part> parts;
 };
 
-/// entity_value describes the quotas applicable to an entity_key
+/// entity_value describes the quotas diff for an entity_key
 struct entity_value
   : serde::envelope<entity_value, serde::version<0>, serde::compat_version<0>> {
+    enum key : int8_t {
+        producer_byte_rate = 0,
+        consumer_byte_rate,
+        controller_mutation_rate,
+    };
+
+    enum operation : int8_t {
+        upsert = 0,
+        remove,
+    };
+
+    struct entry
+      : serde::
+          envelope<entity_value, serde::version<0>, serde::compat_version<0>> {
+        constexpr entry() noexcept = default;
+        constexpr entry(operation op, key type, uint64_t value) noexcept
+          : op(op)
+          , type(type)
+          , value(value) {}
+        constexpr entry(key type, uint64_t value) noexcept
+          : entry(operation::upsert, type, value) {}
+
+        friend bool operator<=>(const entry&, const entry&) = default;
+        friend std::ostream& operator<<(std::ostream&, const entry&);
+
+        constexpr auto serde_fields() { return std::tie(op, type, value); }
+
+        template<typename H>
+        constexpr friend H AbslHashValue(H h, const entry& e) {
+            switch (e.op) {
+            case entity_value::operation::upsert:
+                return H::combine(std::move(h), e.op, e.type, e.value);
+            case entity_value::operation::remove:
+                return H::combine(std::move(h), e.op, e.type);
+            }
+        }
+
+        operation op{};
+        key type{};
+        uint64_t value{};
+    };
+
     friend bool operator==(const entity_value&, const entity_value&) = default;
     friend std::ostream& operator<<(std::ostream&, const entity_value&);
 
-    bool is_empty() const {
-        return !producer_byte_rate && !consumer_byte_rate
-               && !controller_mutation_rate;
-    }
+    auto serde_fields() { return std::tie(entries); }
 
-    std::optional<uint64_t> producer_byte_rate;
-    std::optional<uint64_t> consumer_byte_rate;
-    std::optional<uint64_t> controller_mutation_rate;
+    bool is_empty() const { return entries.empty(); }
+
+    absl::flat_hash_set<entry> entries;
 };
+
+constexpr std::string_view to_string_view(entity_value::key e) {
+    switch (e) {
+    case cluster::client_quota::entity_value::key::producer_byte_rate:
+        return "producer_byte_rate";
+    case cluster::client_quota::entity_value::key::consumer_byte_rate:
+        return "consumer_byte_rate";
+    case cluster::client_quota::entity_value::key::controller_mutation_rate:
+        return "controller_mutation_rate";
+    }
+}
 
 struct alter_delta_cmd_data
   : serde::envelope<
