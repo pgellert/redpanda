@@ -32,24 +32,25 @@ namespace {
 
 using cluster::client_quota::entity_key;
 using cluster::client_quota::entity_value;
+using cluster::client_quota::entity_value_diff;
 
 template<typename E>
 std::enable_if_t<std::is_enum_v<E>, std::optional<E>>
   from_string_view(std::string_view);
 
 template<>
-constexpr std::optional<entity_value::key>
-from_string_view<entity_value::key>(std::string_view v) {
-    return string_switch<std::optional<entity_value::key>>(v)
+constexpr std::optional<entity_value_diff::key>
+from_string_view<entity_value_diff::key>(std::string_view v) {
+    return string_switch<std::optional<entity_value_diff::key>>(v)
       .match(
-        to_string_view(entity_value::key::producer_byte_rate),
-        entity_value::key::producer_byte_rate)
+        to_string_view(entity_value_diff::key::producer_byte_rate),
+        entity_value_diff::key::producer_byte_rate)
       .match(
-        to_string_view(entity_value::key::consumer_byte_rate),
-        entity_value::key::consumer_byte_rate)
+        to_string_view(entity_value_diff::key::consumer_byte_rate),
+        entity_value_diff::key::consumer_byte_rate)
       .match(
-        to_string_view(entity_value::key::controller_mutation_rate),
-        entity_value::key::controller_mutation_rate)
+        to_string_view(entity_value_diff::key::controller_mutation_rate),
+        entity_value_diff::key::controller_mutation_rate)
       .default_match(std::nullopt);
 }
 
@@ -86,16 +87,26 @@ using values_data
 
 values_data get_value_data(const entity_value& val) {
     values_data ret;
-    ret.reserve(val.entries.size());
 
-    for (const auto& entry : val.entries) {
-        switch (entry.op) {
-        case entity_value::operation::remove:
-            break;
-        case entity_value::operation::upsert:
-            ret.emplace_back(
-              ss::sstring(to_string_view(entry.type)), entry.value);
-        }
+    if (val.producer_byte_rate) {
+        ret.emplace_back(
+          ss::sstring(
+            to_string_view(entity_value_diff::key::producer_byte_rate)),
+          *val.producer_byte_rate);
+    }
+
+    if (val.consumer_byte_rate) {
+        ret.emplace_back(
+          ss::sstring(
+            to_string_view(entity_value_diff::key::consumer_byte_rate)),
+          *val.consumer_byte_rate);
+    }
+
+    if (val.controller_mutation_rate) {
+        ret.emplace_back(
+          ss::sstring(
+            to_string_view(entity_value_diff::key::controller_mutation_rate)),
+          *val.controller_mutation_rate);
     }
     return ret;
 }
@@ -165,7 +176,7 @@ ss::future<response_ptr> alter_client_quotas_handler::handle(
     for (const auto& entry : request.data.entries) {
         auto& entry_res = response.data.entries.emplace_back();
         entity_key key;
-        entity_value val;
+        entity_value_diff diff;
         key.parts.reserve(entry.entity.size());
         for (const auto& entity : entry.entity) {
             auto part = make_part(entity);
@@ -181,22 +192,21 @@ ss::future<response_ptr> alter_client_quotas_handler::handle(
             continue;
         }
         for (const auto& op : entry.ops) {
-            auto cqt = from_string_view<entity_value::key>(op.key);
+            auto cqt = from_string_view<entity_value_diff::key>(op.key);
             if (!cqt) {
                 entry_res.error_code = kafka::error_code::invalid_config;
                 entry_res.error_message = fmt::format(
                   "Unknown key: {}", op.key);
                 break;
             }
-            val.entries.emplace(
-              op.remove ? entity_value::operation::remove
-                        : entity_value::operation::upsert,
+            diff.entries.emplace(
+              op.remove ? entity_value_diff::operation::remove
+                        : entity_value_diff::operation::upsert,
               *cqt,
               op.value);
         }
         if (entry_res.error_code == error_code::none) {
-            cmd.upsert.push_back(
-              {.key = std::move(key), .value = std::move(val)});
+            cmd.ops.push_back({.key = std::move(key), .diff = std::move(diff)});
         }
     }
 

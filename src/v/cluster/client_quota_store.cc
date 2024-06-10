@@ -15,16 +15,7 @@ namespace cluster::client_quota {
 
 void store::set_quota(const entity_key& key, const entity_value& value) {
     if (!value.is_empty()) {
-        auto& q = _quotas[key];
-        for (const auto& entry : value.entries) {
-            switch (entry.op) {
-            case entity_value::operation::remove:
-                q.entries.erase();
-                break;
-            case entity_value::operation::upsert:
-                break;
-            }
-        }
+        _quotas.insert_or_assign(key, value);
     } else {
         _quotas.erase(key);
     }
@@ -56,11 +47,39 @@ void store::clear() { _quotas.clear(); }
 const store::container_type& store::all_quotas() const { return _quotas; }
 
 void store::apply_delta(const alter_delta_cmd_data& data) {
-    for (auto& [key, value] : data.upsert) {
-        set_quota(key, value);
-    }
-    for (auto& [key] : data.remove) {
-        remove_quota(key);
+    for (auto& [key, value] : data.ops) {
+        auto& q = _quotas[key];
+        for (const auto& entry : value.entries) {
+            switch (entry.op) {
+            case entity_value_diff::operation::remove:
+                switch (entry.type) {
+                case entity_value_diff::key::producer_byte_rate:
+                    q.producer_byte_rate.reset();
+                    break;
+                case entity_value_diff::key::consumer_byte_rate:
+                    q.consumer_byte_rate.reset();
+                    break;
+                case entity_value_diff::key::controller_mutation_rate:
+                    q.controller_mutation_rate.reset();
+                    break;
+                }
+                break;
+            case entity_value_diff::operation::upsert:
+                switch (entry.type) {
+                case entity_value_diff::key::producer_byte_rate:
+                    q.producer_byte_rate = entry.value;
+                    break;
+                case entity_value_diff::key::consumer_byte_rate:
+                    q.consumer_byte_rate = entry.value;
+                    break;
+                case entity_value_diff::key::controller_mutation_rate:
+                    q.controller_mutation_rate = entry.value;
+                    break;
+                }
+                break;
+            }
+        }
+        set_quota(key, q);
     }
     _quotas.rehash(0);
 }
