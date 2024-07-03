@@ -742,7 +742,7 @@ ss::future<> partition::update_configuration(topic_properties properties) {
     if (
       old_ntp_config.is_archival_enabled() != new_archival
       || old_ntp_config.is_read_replica_mode_enabled()
-           != new_ntp_config.read_replica
+           != new_ntp_config.read_replica.value_or(false)
       || old_compaction_status != new_compaction_status) {
         cloud_storage_changed = true;
     }
