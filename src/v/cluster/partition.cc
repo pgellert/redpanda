@@ -730,20 +730,40 @@ ss::future<> partition::update_configuration(topic_properties properties) {
     // Before applying change, consider whether it changes cloud storage
     // mode
     bool cloud_storage_changed = false;
+
+    bool old_archival = old_ntp_config.is_archival_enabled();
     bool new_archival = new_ntp_config.shadow_indexing_mode
                         && model::is_archival_enabled(
                           new_ntp_config.shadow_indexing_mode.value());
+
+    bool old_read_replica = old_ntp_config.is_read_replica_mode_enabled();
+    bool new_read_replica = new_ntp_config.read_replica.value_or(false);
 
     bool old_compaction_status = old_ntp_config.has_compacted_override();
     bool new_compaction_status
       = new_ntp_config.cleanup_policy_bitflags.has_value()
         && model::is_compaction_enabled(
           new_ntp_config.cleanup_policy_bitflags.value());
-    if (
-      old_ntp_config.is_archival_enabled() != new_archival
-      || old_ntp_config.is_read_replica_mode_enabled()
-           != new_ntp_config.read_replica.value_or(false)
-      || old_compaction_status != new_compaction_status) {
+
+    if (old_archival != new_archival) {
+        vlog(
+          clusterlog.debug,
+          "[{}] updating archiver for topic config change in "
+          "archival_enabled",
+          _raft->ntp());
+        cloud_storage_changed = true;
+    } else if (old_read_replica != new_read_replica) {
+        vlog(
+          clusterlog.debug,
+          "[{}] updating archiver for topic config change in "
+          "read_replica",
+          _raft->ntp());
+        cloud_storage_changed = true;
+    } else if (old_compaction_status != new_compaction_status) {
+        vlog(
+          clusterlog.debug,
+          "[{}] updating archiver for topic config change in compaction",
+          _raft->ntp());
         cloud_storage_changed = true;
     }
 
@@ -755,34 +775,14 @@ ss::future<> partition::update_configuration(topic_properties properties) {
         _topic_cfg->properties = std::move(properties);
     }
 
+    // Pass the configuration update to the raft layer
     _raft->notify_config_update();
 
     // If this partition's cloud storage mode changed, rebuild the archiver.
-    // This must happen after raft update, because it reads raft's
+    // This must happen after the raft+storage update, because it reads raft's
     // ntp_config to decide whether to construct an archiver.
     if (cloud_storage_changed) {
-        vlog(
-          clusterlog.debug,
-          "update_configuration[{}]: updating archiver for config {}",
-          new_ntp_config,
-          _raft->ntp());
-
-        auto archiver_reset_guard = co_await ssx::with_timeout_abortable(
-          ss::get_units(_archiver_reset_mutex, 1),
-          ss::lowres_clock::now() + archiver_reset_mutex_timeout,
-          _as);
-
-        if (_archiver) {
-            _upload_housekeeping.local().deregister_jobs(
-              _archiver->get_housekeeping_jobs());
-            co_await _archiver->stop();
-            _archiver = nullptr;
-        }
-        maybe_construct_archiver();
-        if (_archiver) {
-            _archiver->notify_topic_config();
-            co_await _archiver->start();
-        }
+        co_await restart_archiver(true);
     } else {
         vlog(
           clusterlog.trace,
@@ -798,6 +798,27 @@ ss::future<> partition::update_configuration(topic_properties properties) {
             // configuration changes.
             _archiver->notify_topic_config();
         }
+    }
+}
+
+ss::future<> partition::restart_archiver(bool should_notify_topic_config) {
+    auto archiver_reset_guard = co_await ssx::with_timeout_abortable(
+      ss::get_units(_archiver_reset_mutex, 1),
+      ss::lowres_clock::now() + archiver_reset_mutex_timeout,
+      _as);
+
+    if (_archiver) {
+        _upload_housekeeping.local().deregister_jobs(
+          _archiver->get_housekeeping_jobs());
+        co_await _archiver->stop();
+        _archiver = nullptr;
+    }
+    maybe_construct_archiver();
+    if (_archiver) {
+        if (should_notify_topic_config) {
+            _archiver->notify_topic_config();
+        }
+        co_await _archiver->start();
     }
 }
 
