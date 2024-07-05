@@ -146,7 +146,7 @@ error_info no_reference_found_for(
     // fmt v8 doesn't support formatting for elements in a range
     auto fmt_refs = schema.def().refs()
                     | std::views::transform([](auto const& ref) {
-                          return fmt::format("{{{:e}}}", ref);
+                          return fmt::format("{{{}}}", ref);
                       });
     return {
       error_code::schema_empty,

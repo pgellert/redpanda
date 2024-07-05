@@ -65,7 +65,12 @@ std::ostream& operator<<(
 }
 
 std::ostream& operator<<(std::ostream& os, const schema_reference& ref) {
-    fmt::print(os, "{:l}", ref);
+    fmt::print(
+      os,
+      "name='{}', subject='{}', version={}",
+      ref.name,
+      ref.sub,
+      ref.version);
     return os;
 }
 
