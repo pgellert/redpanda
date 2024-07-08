@@ -74,12 +74,8 @@ create_topic_properties_update(alter_configs_resource& resource) {
     update.properties.segment_size.op = op_t::remove;
     update.properties.timestamp_type.op = op_t::remove;
     update.properties.retention_bytes.op = op_t::remove;
-    update.properties.retention_duration.op = op_t::remove;
     update.properties.shadow_indexing.op = op_t::remove;
-
-    update.custom_properties.replication_factor.op = op_t::none;
-    update.custom_properties.data_policy.op = op_t::none;
-
+    update.properties.retention_duration.op = op_t::remove;
     update.properties.record_key_schema_id_validation.op = op_t::remove;
     update.properties.record_key_schema_id_validation_compat.op = op_t::remove;
     update.properties.record_key_subject_name_strategy.op = op_t::remove;
@@ -90,6 +86,9 @@ create_topic_properties_update(alter_configs_resource& resource) {
     update.properties.record_value_subject_name_strategy.op = op_t::remove;
     update.properties.record_value_subject_name_strategy_compat.op
       = op_t::remove;
+
+    update.custom_properties.replication_factor.op = op_t::none;
+    update.custom_properties.data_policy.op = op_t::none;
 
     schema_id_validation_config_parser schema_id_validation_config_parser{
       update.properties};
