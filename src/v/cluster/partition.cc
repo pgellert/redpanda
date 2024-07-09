@@ -750,12 +750,12 @@ ss::future<> partition::update_configuration(topic_properties properties) {
 
     // Before applying change, consider whether it changes cloud storage
     // mode
+    // TODO: restart archiver whenever the shadow indexing cluster
+    // configs change
     bool cloud_storage_changed = false;
 
-    bool old_archival = old_ntp_config.is_archival_enabled();
-    bool new_archival = new_ntp_config.shadow_indexing_mode
-                        && model::is_archival_enabled(
-                          new_ntp_config.shadow_indexing_mode.value());
+    auto old_archival = old_ntp_config.get_shadow_indexing_mode_override();
+    auto new_archival = new_ntp_config.shadow_indexing_mode;
 
     auto old_retention_ms = old_ntp_config.has_overrides()
                               ? old_ntp_config.get_overrides().retention_time

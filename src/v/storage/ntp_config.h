@@ -201,16 +201,80 @@ public:
         return config::shard_local_cfg().log_retention_ms();
     }
 
+    std::optional<model::shadow_indexing_mode>
+    get_shadow_indexing_mode_override() const {
+        return _overrides != nullptr ? _overrides->shadow_indexing_mode
+                                     : std::nullopt;
+    }
+
+    model::shadow_indexing_mode get_shadow_indexing_mode() const {
+        auto override_value = get_shadow_indexing_mode_override();
+        if (override_value.has_value()) {
+            return *override_value;
+        }
+
+        auto arch_enabled
+          = config::shard_local_cfg().cloud_storage_enable_remote_write();
+        auto si_enabled
+          = config::shard_local_cfg().cloud_storage_enable_remote_read();
+
+        model::shadow_indexing_mode mode
+          = model::shadow_indexing_mode::disabled;
+        if (arch_enabled) {
+            mode = model::shadow_indexing_mode::archival;
+        }
+        if (si_enabled) {
+            mode = mode == model::shadow_indexing_mode::archival
+                     ? model::shadow_indexing_mode::full
+                     : model::shadow_indexing_mode::fetch;
+        }
+        return mode;
+    }
+
     bool is_archival_enabled() const {
-        return _overrides != nullptr && _overrides->shadow_indexing_mode
-               && model::is_archival_enabled(
-                 _overrides->shadow_indexing_mode.value());
+        auto si_override = get_shadow_indexing_mode_override();
+        if (si_override) {
+            return model::is_archival_enabled(*si_override);
+        }
+
+        // TODO: there's another bug here now. If remote.write was not specified
+        // as a topic-level override but remote.read was, we would expect to
+        // fall back to the cluster-level default for remote.write. However, we
+        // can't do this here because at this point we can't differentiate
+        // between whether remote.write was explicitly set to false or if it was
+        // omitted.
+        // Potentially we could change the shadow_indexing_mode enum to encode
+        // more information about the original configs, or replace the
+        // shadow_indexing_mode topic property with separate properties for
+        // remote read and write.
+        // if (si_override && model::is_archival_enabled(*si_override)) {
+        //     return true;
+        // }
+
+        return config::shard_local_cfg().cloud_storage_enable_remote_write();
     }
 
     bool is_remote_fetch_enabled() const {
-        return _overrides != nullptr && _overrides->shadow_indexing_mode
-               && model::is_fetch_enabled(
-                 _overrides->shadow_indexing_mode.value());
+        auto si_override = get_shadow_indexing_mode_override();
+        if (si_override) {
+            return model::is_fetch_enabled(*si_override);
+        }
+
+        // TODO: there's another bug here now. If remote.read was not specified
+        // as a topic-level override but remote.write was, we would expect to
+        // fall back to the cluster-level default for remote.read. However, we
+        // can't do this here because at this point we can't differentiate
+        // between whether remote.read was explicitly set to false or if it was
+        // omitted.
+        // Potentially we could change the shadow_indexing_mode enum to encode
+        // more information about the original configs, or replace the
+        // shadow_indexing_mode topic property with separate properties for
+        // remote read and write.
+        // if (si_override && model::is_fetch_enabled(*si_override)) {
+        //     return true;
+        // }
+
+        return config::shard_local_cfg().cloud_storage_enable_remote_read();
     }
 
     bool is_read_replica_mode_enabled() const {
@@ -223,10 +287,7 @@ public:
      * both reads and writes to S3, and is not a read replica.
      */
     bool is_tiered_storage() const {
-        return _overrides != nullptr
-               && !_overrides->read_replica.value_or(false)
-               && _overrides->shadow_indexing_mode
-                    == model::shadow_indexing_mode::full;
+        return get_shadow_indexing_mode() == model::shadow_indexing_mode::full;
     }
 
     bool remote_delete() const {

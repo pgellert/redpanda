@@ -117,32 +117,21 @@ get_bool_value(const config_map_t& config, std::string_view key) {
     return std::nullopt;
 }
 
-static model::shadow_indexing_mode
+static std::optional<model::shadow_indexing_mode>
 get_shadow_indexing_mode(const config_map_t& config) {
     auto arch_enabled = get_bool_value(config, topic_property_remote_write);
     auto si_enabled = get_bool_value(config, topic_property_remote_read);
 
-    // If topic properties are missing, patch them with the cluster config.
-    if (!arch_enabled) {
-        arch_enabled
-          = config::shard_local_cfg().cloud_storage_enable_remote_write();
-    }
-
-    if (!si_enabled) {
-        si_enabled
-          = config::shard_local_cfg().cloud_storage_enable_remote_read();
-    }
-
     model::shadow_indexing_mode mode = model::shadow_indexing_mode::disabled;
-    if (*arch_enabled) {
+    if (arch_enabled.has_value() && arch_enabled) {
         mode = model::shadow_indexing_mode::archival;
     }
-    if (*si_enabled) {
+    if (si_enabled.has_value() && si_enabled) {
         mode = mode == model::shadow_indexing_mode::archival
                  ? model::shadow_indexing_mode::full
                  : model::shadow_indexing_mode::fetch;
     }
-    return mode;
+    return std::nullopt;
 }
 
 // Special case for options where Kafka allows -1

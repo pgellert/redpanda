@@ -122,18 +122,6 @@ needs_linearizable_barrier(const std::vector<topic_result>& results) {
 ss::future<std::vector<topic_result>> topics_frontend::create_topics(
   custom_assignable_topic_configuration_vector topics,
   model::timeout_clock::time_point timeout) {
-    for (auto& tp : topics) {
-        /**
-         * Note that a manually created topic will have this assigned already by
-         * kafka/server/handlers/topics/types.cc::to_cluster_type, dependent on
-         * client-provided topic properties.
-         */
-        if (!tp.cfg.properties.shadow_indexing.has_value()) {
-            tp.cfg.properties.shadow_indexing
-              = _metadata_cache.get_default_shadow_indexing_mode();
-        }
-    }
-
     vlog(clusterlog.info, "Create topics {}", topics);
     // make sure that STM is up to date (i.e. we have the most recent state
     // available) before allocating topics
