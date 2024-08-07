@@ -1282,8 +1282,13 @@ bool is_positive_combinator_superset(
     case p_combinator::allOf:
         switch (newer_comb) {
         case p_combinator::oneOf:
-            // The old schema may not be satisfied
-            return false;
+            [[fallthrough]];
+        case p_combinator::anyOf:
+            if (newer_schemas.Size() == 1) {
+                break; // Continue to match the subschemas
+            } else {
+                return false;
+            }
         case p_combinator::allOf:
             if (older_schemas.Size() > newer_schemas.Size()) {
                 // older has more restrictions than newer, not compatible
@@ -1291,8 +1296,6 @@ bool is_positive_combinator_superset(
             } else {
                 break; // Continue to match the subschemas
             }
-        case p_combinator::anyOf:
-            return false;
         }
         break;
     case p_combinator::anyOf:

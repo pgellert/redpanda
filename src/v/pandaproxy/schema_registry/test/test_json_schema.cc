@@ -963,6 +963,16 @@ static constexpr auto compatibility_test_cases = std::to_array<
     .writer_schema = R"({"allOf": [{"type": "number"}, {"type": "string"}]})",
     .reader_is_compatible_with_writer = true,
   },
+  {
+    .reader_schema = R"({"allOf": [{"type": "number"}, {"type": "string"}]})",
+    .writer_schema = R"({"oneOf": [{"type": "number"}]})",
+    .reader_is_compatible_with_writer = true,
+  },
+  {
+    .reader_schema = R"({"allOf": [{"type": "number"}, {"type": "string"}]})",
+    .writer_schema = R"({"anyOf": [{"type": "number"}]})",
+    .reader_is_compatible_with_writer = true,
+  },
   // dialects
   {
     .reader_schema = R"({"$schema": "http://json-schema.org/draft-06/schema"})",
