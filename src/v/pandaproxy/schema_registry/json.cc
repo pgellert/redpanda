@@ -1266,33 +1266,14 @@ bool is_positive_combinator_superset(
                 break; // Continue to match the subschemas
             }
         case p_combinator::allOf:
-            if (older_schemas.Size() == 1) {
-                // older has only one subschema, newer is "allOf" so it can be
-                // compatible if any one of the subschemas matches older
-                return std::ranges::any_of(
-                  newer_schemas, [&](json::Value const& s) {
-                      return is_superset(*older_schemas.Begin(), s);
-                  });
-            } else if (newer_schemas.Size() == 1) {
-                // older has multiple schemas but only one can be valid. it's
-                // compatible if the only subschema in newer is compatible with
-                // one in older
-                return std::ranges::any_of(
-                  older_schemas, [&](json::Value const& s) {
-                      return is_superset(s, *newer_schemas.Begin());
-                  });
+            if (older_schemas.Size() == 1 || newer_schemas.Size() == 1) {
+                break; // Continue to match the subschemas
             } else {
                 return false;
             }
         case p_combinator::anyOf:
             if (newer_schemas.Size() == 1) {
-                // older has multiple schemas but only one can be valid. it's
-                // compatible if the only subschema in newer is compatible with
-                // one in older
-                return std::ranges::any_of(
-                  older_schemas, [&](json::Value const& s) {
-                      return is_superset(s, *newer_schemas.Begin());
-                  });
+                break; // Continue to match the subschemas
             } else {
                 return false;
             }
