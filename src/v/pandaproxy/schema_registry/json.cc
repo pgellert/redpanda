@@ -1250,58 +1250,85 @@ bool is_positive_combinator_superset(
     auto newer_schemas
       = newer.FindMember(to_keyword(newer_comb))->value.GetArray();
 
-    if (older_comb != p_combinator::anyOf && older_comb != newer_comb) {
-        // different combinators, and older is not "anyOf". there might some
-        // compatible combinations:
-
-        if (older_schemas.Size() == 1 && newer_schemas.Size() == 1) {
-            // both combinators have only one subschema, so the actual
-            // combinator does not matter. compare subschemas directly
-            return is_superset(*older_schemas.Begin(), *newer_schemas.Begin());
-        }
-
-        // either older or newer - or both - has more than one subschema
-
-        if (older_schemas.Size() == 1 && newer_comb == p_combinator::allOf) {
-            // older has only one subschema, newer is "allOf" so it can be
-            // compatible if any one of the subschemas matches older
-            return std::ranges::any_of(
-              newer_schemas, [&](json::Value const& s) {
-                  return is_superset(*older_schemas.Begin(), s);
-              });
-        }
-
-        if (older_comb == p_combinator::oneOf && newer_schemas.Size() == 1) {
-            // older has multiple schemas but only one can be valid. it's
-            // compatible if the only subschema in newer is compatible with one
-            // in older
-            return std::ranges::any_of(
-              older_schemas, [&](json::Value const& s) {
-                  return is_superset(s, *newer_schemas.Begin());
-              });
-        }
-
-        // different combinators, not a special case. not compatible
-        return false;
+    if (older_schemas.Size() == 1 && newer_schemas.Size() == 1) {
+        // both combinators have only one subschema, so the actual
+        // combinator does not matter. compare subschemas directly
+        return is_superset(*older_schemas.Begin(), *newer_schemas.Begin());
     }
 
-    // same combinator for older and newer, or older is "anyOf"
-
-    // size differences between older_schemas and newer_schemas have different
-    // meaning based on combinator.
-    // TODO a denormalized schema could fail this check while being compatible
-    if (older_schemas.Size() > newer_schemas.Size()) {
-        if (older_comb == p_combinator::allOf) {
-            // older has more restrictions than newer, not compatible
+    switch (older_comb) {
+    case p_combinator::oneOf:
+        switch (newer_comb) {
+        case p_combinator::oneOf:
+            if (older_schemas.Size() < newer_schemas.Size()) {
+                return false;
+            } else {
+                break; // Continue to match the subschemas
+            }
+        case p_combinator::allOf:
+            if (older_schemas.Size() == 1) {
+                // older has only one subschema, newer is "allOf" so it can be
+                // compatible if any one of the subschemas matches older
+                return std::ranges::any_of(
+                  newer_schemas, [&](json::Value const& s) {
+                      return is_superset(*older_schemas.Begin(), s);
+                  });
+            } else if (newer_schemas.Size() == 1) {
+                // older has multiple schemas but only one can be valid. it's
+                // compatible if the only subschema in newer is compatible with
+                // one in older
+                return std::ranges::any_of(
+                  older_schemas, [&](json::Value const& s) {
+                      return is_superset(s, *newer_schemas.Begin());
+                  });
+            } else {
+                return false;
+            }
+        case p_combinator::anyOf:
+            if (newer_schemas.Size() == 1) {
+                // older has multiple schemas but only one can be valid. it's
+                // compatible if the only subschema in newer is compatible with
+                // one in older
+                return std::ranges::any_of(
+                  older_schemas, [&](json::Value const& s) {
+                      return is_superset(s, *newer_schemas.Begin());
+                  });
+            } else {
+                return false;
+            }
+        }
+        break;
+    case p_combinator::allOf:
+        switch (newer_comb) {
+        case p_combinator::oneOf:
+            // The old schema may not be satisfied
+            return false;
+        case p_combinator::allOf:
+            if (older_schemas.Size() > newer_schemas.Size()) {
+                // older has more restrictions than newer, not compatible
+                return false;
+            } else {
+                break; // Continue to match the subschemas
+            }
+        case p_combinator::anyOf:
             return false;
         }
-    } else if (older_schemas.Size() < newer_schemas.Size()) {
-        if (
-          newer_comb == p_combinator::anyOf
-          || newer_comb == p_combinator::oneOf) {
-            // newer has more degrees of freedom than older, not compatible
-            return false;
+        break;
+    case p_combinator::anyOf:
+        switch (newer_comb) {
+        case p_combinator::oneOf:
+            [[fallthrough]];
+        case p_combinator::anyOf:
+            if (older_schemas.Size() < newer_schemas.Size()) {
+                // newer has more degrees of freedom than older, not compatible
+                return false;
+            } else {
+                break; // Continue to match the subschemas
+            }
+        case p_combinator::allOf:
+            break; // Continue to match the subschemas
         }
+        break;
     }
 
     // sizes are compatible, now we need to check that every schema from

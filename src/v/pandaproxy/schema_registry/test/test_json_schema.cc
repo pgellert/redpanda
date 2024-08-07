@@ -878,6 +878,18 @@ static constexpr auto compatibility_test_cases = std::to_array<
     .reader_is_compatible_with_writer = true,
   },
   {
+    .reader_schema
+    = R"({"anyOf": [{"type": "number"}, {"type": "string"}, {"type": "boolean"}]})",
+    .writer_schema = R"({"allOf": [{"type": "integer"}, {"type": "boolean"}]})",
+    .reader_is_compatible_with_writer = true,
+  },
+  {
+    .reader_schema = R"({"anyOf": [{"type": "number"}, {"type": "boolean"}]})",
+    .writer_schema
+    = R"({"allOf": [{"type": "integer"}, {"type": "string"}, {"type": "boolean"}]})",
+    .reader_is_compatible_with_writer = true,
+  },
+  {
     .reader_schema = R"({"oneOf": [{"type": "number"}, {"type": "string"}]})",
     .writer_schema = R"({"anyOf": [{"type": "integer"}]})",
     .reader_is_compatible_with_writer = true,
