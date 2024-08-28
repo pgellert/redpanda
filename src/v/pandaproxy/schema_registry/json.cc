@@ -18,6 +18,7 @@
 #include "json/schema.h"
 #include "json/stringbuffer.h"
 #include "json/writer.h"
+#include "pandaproxy/schema_registry/compatibility.h"
 #include "pandaproxy/schema_registry/error.h"
 #include "pandaproxy/schema_registry/errors.h"
 #include "pandaproxy/schema_registry/sharded_store.h"
@@ -50,12 +51,15 @@
 #include <re2/re2.h>
 
 #include <exception>
+#include <filesystem>
 #include <ranges>
 #include <string_view>
 
 namespace pandaproxy::schema_registry {
 
 namespace {
+
+using json_compatibility_result = raw_compatibility_result;
 
 // this is the list of supported dialects
 enum class json_schema_dialect {
@@ -365,8 +369,11 @@ result<document_context> parse_json(iobuf buf) {
 // a schema O is a superset of another schema N if every schema that is valid
 // for N is also valid for O. precondition: older and newer are both valid
 // schemas
-bool is_superset(
-  context const& ctx, json::Value const& older, json::Value const& newer);
+raw_compatibility_result is_superset(
+  context const& ctx,
+  json::Value const& older,
+  json::Value const& newer,
+  std::filesystem::path p);
 
 // close the implementation in a namespace to keep it contained
 namespace is_superset_impl {
@@ -614,12 +621,16 @@ extract_property_and_gate_check(
 //  value  |  value  | is_same or predicate
 template<typename VPred>
 requires std::is_invocable_r_v<bool, VPred, double, double>
-bool is_numeric_property_value_superset(
+raw_compatibility_result is_numeric_property_value_superset(
   json::Value const& older,
   json::Value const& newer,
   std::string_view prop_name,
   VPred&& value_predicate,
+  json_incompatibility changed_err,
+  json_incompatibility added_err,
   std::optional<double> default_value = std::nullopt) {
+    raw_compatibility_result res;
+
     // get value or default_value
     auto get_value = [&](json::Value const& v) -> std::optional<double> {
         auto it = v.FindMember(
@@ -655,26 +666,27 @@ bool is_numeric_property_value_superset(
               std::forward<VPred>(value_predicate),
               *older_value,
               *newer_value)) {
-            return false;
+            res.emplace<json_incompatibility>(changed_err);
         }
     } else if (older_value.has_value() /* && !newer_value.has_value() */) {
         if (!default_value.has_value() || *older_value != *default_value) {
             // Non-default value was removed
-            return false;
+            res.emplace<json_incompatibility>(added_err);
         }
     }
 
     // Value only in newer or neither
-    return true;
+    return res;
 }
 
 enum class additional_field_for { object, array };
 
-bool is_additional_superset(
+raw_compatibility_result is_additional_superset(
   context const& ctx,
   json::Value const& older,
   json::Value const& newer,
-  additional_field_for field_type) {
+  additional_field_for field_type,
+  std::filesystem::path p) {
     // "additional___" can be either true (if omitted it's true), false
     // or a schema. The check is performed with this table.
     // older ap | newer ap | compatible
@@ -704,7 +716,22 @@ bool is_additional_superset(
             }
         }
     };
-
+    auto narrowed_errt = [&] {
+        switch (field_type) {
+        case additional_field_for::object:
+            return json_incompatibility_type::additional_properties_narrowed;
+        case additional_field_for::array:
+            return json_incompatibility_type::additional_items_narrowed;
+        }
+    }();
+    auto removed_errt = [&] {
+        switch (field_type) {
+        case additional_field_for::object:
+            return json_incompatibility_type::additional_properties_removed;
+        case additional_field_for::array:
+            return json_incompatibility_type::additional_items_removed;
+        }
+    }();
     // helper to parse additional__
     auto get_additional_props = [&](json_schema_dialect d, json::Value const& v)
       -> std::variant<bool, json::Value const*> {
@@ -717,69 +744,111 @@ bool is_additional_superset(
         }
         return &it->value;
     };
+    auto additional_path = [&] {
+        switch (field_type) {
+        case additional_field_for::object:
+            return p / "additionalProperties";
+        case additional_field_for::array:
+            // Even for draft 202012 "additionalItems" is used not "items"
+            return p / "additionalItems";
+        }
+    }();
 
     // poor man's case matching. this is an optimization in case both
     // additionalProperties are boolean
     return std::visit(
       ss::make_visitor(
-        [](bool older, bool newer) {
-            if (older == newer) {
+        [&additional_path, removed_errt](bool older, bool newer) {
+            if (older == newer || older) {
                 // same value is compatible
-                return true;
+                return raw_compatibility_result{};
             }
             // older=true  -> newer=false - compatible
             // older=false -> newer=true  - not compatible
-            return older;
+            return raw_compatibility_result::of<json_incompatibility>(
+              std::move(additional_path), removed_errt);
         },
-        [&ctx](bool older, json::Value const* newer) {
+        [&ctx, &additional_path, removed_errt](
+          bool older, json::Value const* newer) {
             if (older) {
                 // true is compatible with any schema
-                return true;
+                return raw_compatibility_result{};
             }
             // likely false, but need to check
-            return is_superset(ctx, get_false_schema(), *newer);
+            if (is_superset(ctx, get_false_schema(), *newer, "").has_error()) {
+                return raw_compatibility_result::of<json_incompatibility>(
+                  std::move(additional_path), removed_errt);
+            }
+            return raw_compatibility_result{};
         },
-        [&ctx](json::Value const* older, bool newer) {
+        [&ctx, &additional_path, narrowed_errt](
+          json::Value const* older, bool newer) {
             if (!newer) {
                 // any schema is compatible with false
-                return true;
+                return raw_compatibility_result{};
             }
             // convert newer to {} and check against that
-            return is_superset(ctx, *older, get_true_schema());
+            if (is_superset(ctx, *older, get_true_schema(), "").has_error()) {
+                return raw_compatibility_result::of<json_incompatibility>(
+                  std::move(additional_path), narrowed_errt);
+            }
+            return raw_compatibility_result{};
         },
-        [&ctx](json::Value const* older, json::Value const* newer) {
+        [&ctx,
+         &additional_path](json::Value const* older, json::Value const* newer) {
             // check subschemas for compatibility
-            return is_superset(ctx, *older, *newer);
+            return is_superset(ctx, *older, *newer, std::move(additional_path));
         }),
       get_additional_props(ctx.older.dialect(), older),
       get_additional_props(ctx.newer.dialect(), newer));
 }
 
-bool is_string_superset(json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_string_superset(
+  json::Value const& older, json::Value const& newer, std::filesystem::path p) {
+    raw_compatibility_result res;
+
     // note: "format" is not part of the checks
-    if (!is_numeric_property_value_superset(
-          older, newer, "minLength", std::less_equal<>{}, 0)) {
-        // older is less strict
-        return false;
-    }
-    if (!is_numeric_property_value_superset(
-          older, newer, "maxLength", std::greater_equal<>{})) {
-        // older is less strict
-        return false;
-    }
+
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "minLength",
+      std::less_equal<>{},
+      {p / "minLength", json_incompatibility_type::min_length_increased},
+      {p / "minLength", json_incompatibility_type::min_length_added},
+      0));
+
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "maxLength",
+      std::greater_equal<>{},
+      {p / "maxLength", json_incompatibility_type::max_length_decreased},
+      {p / "maxLength", json_incompatibility_type::max_length_added}));
 
     auto [maybe_gate_value, older_val_p, newer_val_p]
       = extract_property_and_gate_check(older, newer, "pattern");
     if (maybe_gate_value.has_value()) {
-        return maybe_gate_value.value();
+        if (!maybe_gate_value.value()) {
+            res.emplace<json_incompatibility>(
+              p / "pattern", json_incompatibility_type::pattern_added);
+        }
+        return res;
     }
 
     // both have "pattern". check if they are the same, the only
     // possible_value_accepted
-    return as_string_view(*older_val_p) == as_string_view(*newer_val_p);
+    if (as_string_view(*older_val_p) != as_string_view(*newer_val_p)) {
+        res.emplace<json_incompatibility>(
+          p / "pattern", json_incompatibility_type::pattern_changed);
+    }
+    return res;
 }
 
-bool is_numeric_superset(json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_numeric_superset(
+  json::Value const& older, json::Value const& newer, std::filesystem::path p) {
+    raw_compatibility_result res;
+
     // preconditions:
     // newer["type"]=="number" implies older["type"]=="number"
     // older["type"]=="integer" implies newer["type"]=="integer"
@@ -793,41 +862,56 @@ bool is_numeric_superset(json::Value const& older, json::Value const& newer) {
     // "exclusiveMinimum" is always the exclusive range. in this check we
     // require for them to be the same datatype
 
-    if (!is_numeric_property_value_superset(
-          older, newer, "minimum", std::less_equal<>{})) {
-        // older["minimum"] is not superset of newer["minimum"] because newer is
-        // less strict
-        return false;
-    }
-    if (!is_numeric_property_value_superset(
-          older, newer, "maximum", std::greater_equal<>{})) {
-        // older["maximum"] is not superset of newer["maximum"] because newer
-        // is less strict
-        return false;
-    }
+    // older["minimum"] is not superset of newer["minimum"] because newer is
+    // less strict
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "minimum",
+      std::less_equal<>{},
+      {p / "minimum", json_incompatibility_type::minimum_increased},
+      {p / "minimum", json_incompatibility_type::minimum_added}));
 
-    if (!is_numeric_property_value_superset(
-          older, newer, "multipleOf", [](double older, double newer) {
-              // check that the reminder of newer/older is close enough to 0.
-              // close enough is defined as being close to the Unit in the Last
-              // Place of the bigger between the two.
-              // TODO: this is an approximate check, if a bigdecimal
-              // representation it would be possible to perform an exact
-              // reminder(newer, older)==0 check
-              constexpr auto max_ulp_error = 3;
-              return std::abs(std::remainder(newer, older))
-                     <= (max_ulp_error * boost::math::ulp(newer));
-          })) {
-        return false;
-    }
+    // older["maximum"] is not superset of newer["maximum"] because newer is
+    // less strict
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "maximum",
+      std::greater_equal<>{},
+      {p / "maximum", json_incompatibility_type::maximum_decreased},
+      {p / "maximum", json_incompatibility_type::maximum_added}));
+
+    // TODO: return multiple_of_expanded instead of multiple_of_changed if older
+    // is a multiple of newer
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "multipleOf",
+      [](double older, double newer) {
+          // check that the reminder of newer/older is close enough to 0.
+          // close enough is defined as being close to the Unit in the Last
+          // Place of the bigger between the two.
+          // TODO: this is an approximate check, if a bigdecimal
+          // representation it would be possible to perform an exact
+          // reminder(newer, older)==0 check
+          constexpr auto max_ulp_error = 3;
+          return std::abs(std::remainder(newer, older))
+                 <= (max_ulp_error * boost::math::ulp(newer));
+      },
+      {p / "multipleOf", json_incompatibility_type::multiple_of_changed},
+      {p / "multipleOf", json_incompatibility_type::multiple_of_added}));
 
     // exclusiveMinimum/exclusiveMaximum checks are mostly the same logic,
     // implemented in this helper
-    auto exclusive_limit_check = [](
-                                   json::Value const& older,
-                                   json::Value const& newer,
-                                   std::string_view prop_name,
-                                   std::invocable<double, double> auto pred) {
+    auto exclusive_limit_check =
+      [](
+        json::Value const& older,
+        json::Value const& newer,
+        std::string_view prop_name,
+        std::invocable<double, double> auto pred,
+        raw_compatibility_result changed_err,
+        raw_compatibility_result added_err) -> raw_compatibility_result {
         auto get_value = [=](json::Value const& v)
           -> std::variant<std::monostate, bool, double> {
             auto it = v.FindMember(json::Value{
@@ -850,27 +934,36 @@ bool is_numeric_superset(json::Value const& older, json::Value const& newer) {
 
         return std::visit(
           ss::make_visitor(
-            [](bool older, bool newer) {
+            [&](bool older, bool newer) {
                 // compatible if no change or if older was not "exclusive"
-                return older == newer || older == false;
+                if (older != newer && older != false) {
+                    return changed_err;
+                }
+                return raw_compatibility_result{};
             },
-            [](bool older, std::monostate) {
+            [&](bool older, std::monostate) {
                 // monostate defaults to false, compatible if older is false
-                return older == false;
+                if (older != false) {
+                    return added_err;
+                }
+                return raw_compatibility_result{};
             },
             [&](double older, double newer) {
                 // delegate to pred
-                return std::invoke(pred, older, newer);
+                if (!std::invoke(pred, older, newer)) {
+                    return changed_err;
+                }
+                return raw_compatibility_result{};
             },
-            [](double, std::monostate) {
+            [&](double, std::monostate) {
                 // newer is less strict than older
-                return false;
+                return added_err;
             },
             [](std::monostate, auto) {
                 // older has no rules, compatible with everything
-                return true;
+                return raw_compatibility_result{};
             },
-            [&](auto, auto) -> bool {
+            [&](auto, auto) -> raw_compatibility_result {
                 throw as_exception(invalid_schema(fmt::format(
                   R"(is_numeric_superset-{} not implemented for mixed types: older: '{}', newer: '{}')",
                   prop_name,
@@ -881,21 +974,42 @@ bool is_numeric_superset(json::Value const& older, json::Value const& newer) {
           get_value(newer));
     };
 
-    if (!exclusive_limit_check(
-          older, newer, "exclusiveMinimum", std::less_equal<>{})) {
-        return false;
-    }
+    auto p_exlusive_minimum = p / "exclusiveMinimum";
+    res.merge(exclusive_limit_check(
+      older,
+      newer,
+      "exclusiveMinimum",
+      std::less_equal<>{},
+      raw_compatibility_result::of<json_incompatibility>(
+        p_exlusive_minimum,
+        json_incompatibility_type::exclusive_minimum_increased),
+      raw_compatibility_result::of<json_incompatibility>(
+        p_exlusive_minimum,
+        json_incompatibility_type::exclusive_minimum_added)));
 
-    if (!exclusive_limit_check(
-          older, newer, "exclusiveMaximum", std::greater_equal<>{})) {
-        return false;
-    }
+    auto p_exlusive_maximum = p / "exclusiveMaximum";
+    res.merge(exclusive_limit_check(
+      older,
+      newer,
+      "exclusiveMaximum",
+      std::greater_equal<>{},
+      raw_compatibility_result::of<json_incompatibility>(
+        p_exlusive_maximum,
+        json_incompatibility_type::exclusive_maximum_decreased),
+      raw_compatibility_result::of<json_incompatibility>(
+        p_exlusive_maximum,
+        json_incompatibility_type::exclusive_maximum_added)));
 
-    return true;
+    return res;
 }
 
-bool is_array_superset(
-  context const& ctx, json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_array_superset(
+  context const& ctx,
+  json::Value const& older,
+  json::Value const& newer,
+  std::filesystem::path p) {
+    raw_compatibility_result res;
+
     // "type": "array" is used to model an array or a tuple.
     // for array, "items" is a schema that validates all the elements.
     // for tuple in Draft4, "items" is an array of schemas to validate the
@@ -907,15 +1021,22 @@ bool is_array_superset(
     // then is split based on array/tuple.
 
     // size checks are common to both types
-    if (!is_numeric_property_value_superset(
-          older, newer, "minItems", std::less_equal<>{}, 0)) {
-        return false;
-    }
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "minItems",
+      std::less_equal<>{},
+      {p / "minItems", json_incompatibility_type::min_items_increased},
+      {p / "minItems", json_incompatibility_type::min_items_added},
+      0));
 
-    if (!is_numeric_property_value_superset(
-          older, newer, "maxItems", std::greater_equal<>{})) {
-        return false;
-    }
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "maxItems",
+      std::greater_equal<>{},
+      {p / "maxItems", json_incompatibility_type::max_items_decreased},
+      {p / "maxItems", json_incompatibility_type::max_items_added}));
 
     // uniqueItems makes sense mostly for arrays, but it's also allowed for
     // tuples, so the validation is done here
@@ -939,7 +1060,8 @@ bool is_array_superset(
 
     if (older_value == true && newer_value == false) {
         // removed unique items requirement
-        return false;
+        res.emplace<json_incompatibility>(
+          p / "uniqueItems", json_incompatibility_type::unique_items_added);
     }
 
     // in draft 2020, "prefixItems" is used to represent tuples instead of an
@@ -983,7 +1105,9 @@ bool is_array_superset(
 
     if (older_is_tuple != newer_is_tuple) {
         // one is a tuple and the other is not. not compatible
-        return false;
+        res.emplace<json_incompatibility>(
+          p / "items", json_incompatibility_type::unknown);
+        return res;
     }
     // both are tuples or both are arrays
 
@@ -992,10 +1116,12 @@ bool is_array_superset(
         // note that "additionalItems" can be defined, but it's
         // not used by validation because every element is validated against
         // "items"
-        return is_superset(
+        res.merge(is_superset(
           ctx,
           get_object_or_empty(ctx.older, older, "items"),
-          get_object_or_empty(ctx.newer, newer, "items"));
+          get_object_or_empty(ctx.newer, newer, "items"),
+          std::move(p)));
+        return res;
     }
 
     // both are tuple schemas, validation is similar to object. one side
@@ -1003,9 +1129,11 @@ bool is_array_superset(
 
     // first check is for "additionalItems" compatibility, it's cheaper than the
     // rest
-    if (!is_additional_superset(
-          ctx, older, newer, additional_field_for::array)) {
-        return false;
+
+    res.merge(is_additional_superset(
+      ctx, older, newer, additional_field_for::array, p));
+    if (res.has_error()) {
+        return res;
     }
 
     auto older_tuple_schema
@@ -1014,11 +1142,14 @@ bool is_array_superset(
       = newer[get_tuple_items_kw(ctx.newer.dialect())].GetArray();
     auto older_it = older_tuple_schema.begin();
     auto newer_it = newer_tuple_schema.begin();
+    int i = 0;
     for (; older_it != older_tuple_schema.end()
            && newer_it != newer_tuple_schema.end();
-         ++older_it, ++newer_it) {
-        if (!is_superset(ctx, *older_it, *newer_it)) {
-            return false;
+         ++older_it, ++newer_it, ++i) {
+        res.merge(is_superset(
+          ctx, *older_it, *newer_it, p / "items" / std::to_string(i)));
+        if (res.has_error()) {
+            return res;
         }
     }
 
@@ -1030,28 +1161,53 @@ bool is_array_superset(
     // older["additionalItems"]
     auto older_additional_schema = get_object_or_empty(
       ctx.older, older, get_additional_items_kw(ctx.older.dialect()));
-    if (!std::all_of(
-          newer_it, newer_tuple_schema.end(), [&](json::Value const& n) {
-              return is_superset(ctx, older_additional_schema, n);
-          })) {
-        return false;
-    }
+    std::for_each(
+      newer_it, newer_tuple_schema.end(), [&](json::Value const& n) {
+          auto item_p = p / "items" / std::to_string(i);
+          auto sup_res = is_superset(ctx, older_additional_schema, n, item_p);
+          auto sup_err = sup_res.has_error();
+
+          if (sup_err) {
+              res.merge(std::move(sup_res));
+              res.emplace<json_incompatibility>(
+                std::move(item_p),
+                json_incompatibility_type::
+                  item_removed_not_covered_by_partially_open_content_model);
+          }
+
+          ++i;
+      });
 
     // Check if older has excess elements that are not compatible with
     // newer["additionalItems"]
     auto newer_additional_schema = get_object_or_empty(
       ctx.newer, newer, get_additional_items_kw(ctx.newer.dialect()));
-    if (!std::all_of(
-          older_it, older_tuple_schema.end(), [&](json::Value const& o) {
-              return is_superset(ctx, o, newer_additional_schema);
-          })) {
-        return false;
-    }
-    return true;
+    std::for_each(
+      older_it, older_tuple_schema.end(), [&](json::Value const& o) {
+          auto item_p = p / "items" / std::to_string(i);
+          auto sup_res = is_superset(ctx, o, newer_additional_schema, item_p);
+          auto sup_err = sup_res.has_error();
+
+          if (sup_err) {
+              res.merge(std::move(sup_res));
+              res.emplace<json_incompatibility>(
+                std::move(item_p),
+                json_incompatibility_type::
+                  item_added_not_covered_by_partially_open_content_model);
+          }
+
+          ++i;
+      });
+
+    return res;
 }
 
-bool is_object_properties_superset(
-  context const& ctx, json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_object_properties_superset(
+  context const& ctx,
+  json::Value const& older,
+  json::Value const& newer,
+  std::filesystem::path p) {
+    raw_compatibility_result res;
     // check that every property in newer["properties"]
     // if it appears in older["properties"],
     //    then it has to be compatible with the schema
@@ -1063,7 +1219,7 @@ bool is_object_properties_superset(
     auto newer_properties = get_object_or_empty(ctx.newer, newer, "properties");
     if (newer_properties.ObjectEmpty()) {
         // no "properties" in newer, all good
-        return true;
+        return res;
     }
 
     // older["properties"] is a map of <prop, schema>
@@ -1076,14 +1232,13 @@ bool is_object_properties_superset(
       ctx.older, older, "additionalProperties");
     // scan every prop in newer["properties"]
     for (auto const& [prop, schema] : newer_properties) {
+        auto prop_path = p / "properties" / prop.GetString();
+
         // it is either an evolution of a schema in older["properties"]
         if (auto older_it = older_properties.FindMember(prop);
             older_it != older_properties.MemberEnd()) {
             // prop exists in both
-            if (!is_superset(ctx, older_it->value, schema)) {
-                // not compatible
-                return false;
-            }
+            res.merge(is_superset(ctx, older_it->value, schema, prop_path));
             // check next property
             continue;
         }
@@ -1098,28 +1253,56 @@ bool is_object_properties_superset(
             auto regex = re2::RE2(as_string_view(propPattern));
             if (re2::RE2::PartialMatch(pname, regex)) {
                 pattern_match_found = true;
-                if (!is_superset(ctx, schemaPattern, schema)) {
-                    // not compatible
-                    return false;
+
+                auto prop_res = is_superset(
+                  ctx, schemaPattern, schema, prop_path);
+
+                if (prop_res.has_error()) {
+                    res.merge(std::move(prop_res));
+                    res.emplace<json_incompatibility>(
+                      std::move(prop_path),
+                      json_incompatibility_type::
+                        property_removed_not_covered_by_partially_open_content_model);
                 }
+                break;
             }
+        }
+        if (pattern_match_found) {
+            // check next property
+            continue;
         }
 
         // or it should check against older["additionalProperties"], if no match
         // in patternProperties was found
-        if (
-          !pattern_match_found
-          && !is_superset(ctx, older_additional_properties, schema)) {
-            // not compatible
-            return false;
+        if (!is_false_schema(older_additional_properties)) {
+            auto add_prop_res = is_superset(
+              ctx, older_additional_properties, schema, prop_path);
+
+            if (add_prop_res.has_error()) {
+                res.merge(std::move(add_prop_res));
+                res.emplace<json_incompatibility>(
+                  std::move(prop_path),
+                  json_incompatibility_type::
+                    property_removed_not_covered_by_partially_open_content_model);
+            }
+            continue;
         }
+
+        res.emplace<json_incompatibility>(
+          std::move(prop_path),
+          json_incompatibility_type::
+            property_removed_from_closed_content_model);
     }
 
-    return true;
+    return res;
 }
 
-bool is_object_required_superset(
-  context const& ctx, json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_object_required_superset(
+  context const& ctx,
+  json::Value const& older,
+  json::Value const& newer,
+  std::filesystem::path p) {
+    raw_compatibility_result res;
     // to pass the check, a required property from newer has to be present in
     // older, or if new it needs to have a default value.
     // note that:
@@ -1145,15 +1328,25 @@ bool is_object_required_superset(
     //       yes          |        yes         |  yes
     //       yes          |         no         |  if it has "default" in older
     //       no           |        yes         |  yes
-    return std::ranges::all_of(
+    std::ranges::for_each(
       older_req_in_both_properties, [&](json::Value const& o) {
-          return std::ranges::find(newer_req, o) != newer_req.End()
-                 || older_props[o].HasMember("default");
+          if (
+            std::ranges::find(newer_req, o) == newer_req.End()
+            && !older_props[o].HasMember("default")) {
+              res.emplace<json_incompatibility>(
+                p / "required" / as_string_view(o),
+                json_incompatibility_type::required_attribute_added);
+          }
       });
+    return res;
 }
 
-bool is_object_dependencies_superset(
-  context const& ctx, json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_object_dependencies_superset(
+  context const& ctx,
+  json::Value const& older,
+  json::Value const& newer,
+  std::filesystem::path p) {
+    raw_compatibility_result res;
     // "dependencies", if present, is a dict of <property, string_array |
     // schema>. To be compatible, each key in older has to be in newer and the
     // values have to be of the same type and compatible.
@@ -1166,34 +1359,47 @@ bool is_object_dependencies_superset(
     // all dependencies in older need to carry over in newer, and need to be
     // compatible
     // TODO: n^2 search
-    return std::ranges::all_of(
-      older_p,
-      [&ctx, newer_dep = newer_p](json::Value::Member const& older_dep) {
+
+    std::ranges::for_each(
+      older_p, [&, newer_dep = newer_p](json::Value::Member const& older_dep) {
+          auto path_dep = p / "dependencies" / older_dep.name.GetString();
           auto const& o = older_dep.value;
           auto n_it = newer_dep.FindMember(older_dep.name);
 
           if (o.IsObject()) {
               if (n_it == newer_dep.MemberEnd()) {
-                  return false;
+                  res.emplace<json_incompatibility>(
+                    std::move(path_dep),
+                    json_incompatibility_type::dependency_schema_added);
+                  return;
               }
 
               auto const& n = n_it->value;
 
               if (!n.IsObject()) {
-                  return false;
+                  res.emplace<json_incompatibility>(
+                    std::move(path_dep),
+                    json_incompatibility_type::dependency_schema_added);
+                  return;
               }
 
               // schemas: o and n needs to be compatible
-              return is_superset(ctx, o, n);
+              res.merge(is_superset(ctx, o, n, std::move(path_dep)));
           } else if (o.IsArray()) {
               if (n_it == newer_dep.MemberEnd()) {
-                  return false;
+                  res.emplace<json_incompatibility>(
+                    std::move(path_dep),
+                    json_incompatibility_type::dependency_array_added);
+                  return;
               }
 
               auto const& n = n_it->value;
 
               if (!n.IsArray()) {
-                  return false;
+                  res.emplace<json_incompatibility>(
+                    std::move(path_dep),
+                    json_incompatibility_type::dependency_array_added);
+                  return;
               }
               // string array: n needs to be a a superset of o
               // TODO: n^2 search
@@ -1202,9 +1408,22 @@ bool is_object_dependencies_superset(
                     return std::ranges::find(n_array, p) != n_array.End();
                 });
               if (!n_superset_of_o) {
-                  return false;
+                  bool o_superset_of_n = std::ranges::all_of(
+                    n.GetArray(),
+                    [o_array = o.GetArray()](json::Value const& p) {
+                        return std::ranges::find(o_array, p) != o_array.End();
+                    });
+                  if (o_superset_of_n) {
+                      res.emplace<json_incompatibility>(
+                        std::move(path_dep),
+                        json_incompatibility_type::dependency_array_extended);
+                  } else {
+                      res.emplace<json_incompatibility>(
+                        std::move(path_dep),
+                        json_incompatibility_type::dependency_array_changed);
+                  }
               }
-              return true;
+              return;
           } else {
               throw as_exception(invalid_schema(fmt::format(
                 "dependencies can only be an array or an object for valid "
@@ -1212,34 +1431,49 @@ bool is_object_dependencies_superset(
                 pj{o})));
           }
       });
+
+    return res;
 }
 
-bool is_object_superset(
-  context const& ctx, json::Value const& older, json::Value const& newer) {
-    if (!is_numeric_property_value_superset(
-          older, newer, "minProperties", std::less_equal<>{}, 0)) {
-        // newer requires less properties to be set
-        return false;
-    }
-    if (!is_numeric_property_value_superset(
-          older, newer, "maxProperties", std::greater_equal<>{})) {
-        // newer requires more properties to be set
-        return false;
-    }
-    if (!is_additional_superset(
-          ctx, older, newer, additional_field_for::object)) {
-        // additional properties are not compatible
-        return false;
-    }
-    if (!is_object_properties_superset(ctx, older, newer)) {
-        // "properties" in newer might not be compatible with
-        // older["properties"] (incompatible evolution) or
-        // older["patternProperties"] (it is not compatible with the pattern
-        // that matches the new name) or older["additionalProperties"] (older
-        // has partial open model that does not allow some new properties in
-        // newer)
-        return false;
-    }
+raw_compatibility_result is_object_superset(
+  context const& ctx,
+  json::Value const& older,
+  json::Value const& newer,
+  std::filesystem::path p) {
+    raw_compatibility_result res;
+
+    // newer requires less properties to be set
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "minProperties",
+      std::less_equal<>{},
+      {p / "minProperties",
+       json_incompatibility_type::min_properties_increased},
+      {p / "minProperties", json_incompatibility_type::min_properties_added},
+      0));
+
+    // newer requires more properties to be set
+    res.merge(is_numeric_property_value_superset(
+      older,
+      newer,
+      "maxProperties",
+      std::greater_equal<>{},
+      {p / "maxProperties",
+       json_incompatibility_type::max_properties_decreased},
+      {p / "maxProperties", json_incompatibility_type::max_properties_added}));
+
+    // Check if additional properties are compatible
+    res.merge(is_additional_superset(
+      ctx, older, newer, additional_field_for::object, p));
+
+    // "properties" in newer might not be compatible with
+    // older["properties"] (incompatible evolution) or
+    // older["patternProperties"] (it is not compatible with the pattern
+    // that matches the new name) or older["additionalProperties"] (older
+    // has partial open model that does not allow some new properties in
+    // newer)
+    res.merge(is_object_properties_superset(ctx, older, newer, p));
 
     // note: to match the behavior of the legacy software,
     // ```
@@ -1248,19 +1482,20 @@ bool is_object_superset(
     // ```
     // is omitted
 
-    if (!is_object_required_superset(ctx, older, newer)) {
-        // required properties are not compatible
-        return false;
-    }
-    if (!is_object_dependencies_superset(ctx, older, newer)) {
-        // dependencies are not compatible
-        return false;
-    }
+    // Check if required properties are compatible
+    res.merge(is_object_required_superset(ctx, older, newer, p));
 
-    return true;
+    // Check if dependencies are compatible
+    res.merge(is_object_dependencies_superset(ctx, older, newer, std::move(p)));
+
+    return res;
 }
 
-bool is_enum_superset(json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_enum_superset(
+  json::Value const& older, json::Value const& newer, std::filesystem::path p) {
+    raw_compatibility_result res;
+    auto enum_p = p / "enum";
+
     auto older_it = older.FindMember("enum");
     auto newer_it = newer.FindMember("enum");
     auto older_is_enum = older_it != older.MemberEnd();
@@ -1268,12 +1503,14 @@ bool is_enum_superset(json::Value const& older, json::Value const& newer) {
 
     if (!older_is_enum && !newer_is_enum) {
         // both are not an "enum" schema, compatible
-        return true;
+        return res;
     }
 
     if (!(older_is_enum && newer_is_enum)) {
         // only one is an "enum" schema, not compatible
-        return false;
+        res.emplace<json_incompatibility>(
+          std::move(enum_p), json_incompatibility_type::enum_array_changed);
+        return res;
     }
 
     // both "enum"
@@ -1284,7 +1521,9 @@ bool is_enum_superset(json::Value const& older, json::Value const& newer) {
     if (newer_set.Size() > older_set.Size()) {
         // quick check:
         // newer has some value not in older
-        return false;
+        res.emplace<json_incompatibility>(
+          std::move(enum_p), json_incompatibility_type::enum_array_changed);
+        return res;
     }
 
     // TODO: current implementation is O(n^2), but could be O(n) with normalized
@@ -1294,15 +1533,22 @@ bool is_enum_superset(json::Value const& older, json::Value const& newer) {
         // also be improved with normalization of the input
         if (older_set.end() == std::ranges::find(older_set, v)) {
             // newer has an element not in older
-            return false;
+            res.emplace<json_incompatibility>(
+              std::move(enum_p), json_incompatibility_type::enum_array_changed);
+            return res;
         }
     }
 
-    return true;
+    return res;
 }
 
-bool is_not_combinator_superset(
-  context const& ctx, json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_not_combinator_superset(
+  context const& ctx,
+  json::Value const& older,
+  json::Value const& newer,
+  std::filesystem::path p) {
+    raw_compatibility_result res;
+
     auto older_it = older.FindMember("not");
     auto newer_it = newer.FindMember("not");
     auto older_has_not = older_it != older.MemberEnd();
@@ -1310,19 +1556,26 @@ bool is_not_combinator_superset(
 
     if (older_has_not != newer_has_not) {
         // only one has a "not" schema, not compatible
-        return false;
+        res.emplace<json_incompatibility>(
+          p, json_incompatibility_type::type_changed);
+        return res;
     }
 
     if (older_has_not && newer_has_not) {
         // for not combinator, we want to check if the "not" newer subschema is
         // less strict than the older subschema, because this means that newer
         // validated less data than older
-        return is_superset(
-          {ctx.newer, ctx.older}, newer_it->value, older_it->value);
+        auto is_not_superset = is_superset(
+          {ctx.newer, ctx.older}, newer_it->value, older_it->value, "");
+
+        if (is_not_superset.has_error()) {
+            res.emplace<json_incompatibility>(
+              p / "not", json_incompatibility_type::not_type_extended);
+        }
     }
 
     // both do not have a "not" key, compatible
-    return true;
+    return res;
 }
 
 enum class p_combinator { oneOf, allOf, anyOf };
@@ -1337,8 +1590,13 @@ json::Value to_keyword(p_combinator c) {
     }
 }
 
-bool is_positive_combinator_superset(
-  context const& ctx, json::Value const& older, json::Value const& newer) {
+raw_compatibility_result is_positive_combinator_superset(
+  context const& ctx,
+  json::Value const& older,
+  json::Value const& newer,
+  std::filesystem::path p) {
+    raw_compatibility_result res;
+
     auto get_combinator = [](json::Value const& v) {
         auto res = std::optional<p_combinator>{};
         for (auto c :
@@ -1362,13 +1620,15 @@ bool is_positive_combinator_superset(
     auto maybe_newer_comb = get_combinator(newer);
     if (!maybe_older_comb.has_value()) {
         // older has not a combinator, maximum freedom for newer. compatible
-        return true;
+        return res;
     }
     // older has a combinator
 
     if (!maybe_newer_comb.has_value()) {
         // older has a combinator but newer does not. not compatible
-        return false;
+        res.emplace<json_incompatibility>(
+          std::move(p), json_incompatibility_type::combined_type_changed);
+        return res;
     }
     // newer has a combinator
 
@@ -1386,8 +1646,14 @@ bool is_positive_combinator_superset(
         if (older_schemas.Size() == 1 && newer_schemas.Size() == 1) {
             // both combinators have only one subschema, so the actual
             // combinator does not matter. compare subschemas directly
-            return is_superset(
-              ctx, *older_schemas.Begin(), *newer_schemas.Begin());
+            auto is_combinator_superset = is_superset(
+              ctx, *older_schemas.Begin(), *newer_schemas.Begin(), "");
+            if (is_combinator_superset.has_error()) {
+                res.emplace<json_incompatibility>(
+                  std::move(p),
+                  json_incompatibility_type::combined_type_subschemas_changed);
+            }
+            return res;
         }
 
         // either older or newer - or both - has more than one subschema
@@ -1395,24 +1661,40 @@ bool is_positive_combinator_superset(
         if (older_schemas.Size() == 1 && newer_comb == p_combinator::allOf) {
             // older has only one subschema, newer is "allOf" so it can be
             // compatible if any one of the subschemas matches older
-            return std::ranges::any_of(
+            auto any_superset = std::ranges::any_of(
               newer_schemas, [&](json::Value const& s) {
-                  return is_superset(ctx, *older_schemas.Begin(), s);
+                  return !is_superset(ctx, *older_schemas.Begin(), s, "")
+                            .has_error();
               });
+            if (!any_superset) {
+                res.emplace<json_incompatibility>(
+                  std::move(p),
+                  json_incompatibility_type::combined_type_subschemas_changed);
+            }
+            return res;
         }
 
         if (older_comb == p_combinator::oneOf && newer_schemas.Size() == 1) {
             // older has multiple schemas but only one can be valid. it's
             // compatible if the only subschema in newer is compatible with one
             // in older
-            return std::ranges::any_of(
+            auto any_superset = std::ranges::any_of(
               older_schemas, [&](json::Value const& s) {
-                  return is_superset(ctx, s, *newer_schemas.Begin());
+                  return !is_superset(ctx, s, *newer_schemas.Begin(), "")
+                            .has_error();
               });
+            if (!any_superset) {
+                res.emplace<json_incompatibility>(
+                  std::move(p),
+                  json_incompatibility_type::combined_type_subschemas_changed);
+            }
+            return res;
         }
 
         // different combinators, not a special case. not compatible
-        return false;
+        res.emplace<json_incompatibility>(
+          std::move(p), json_incompatibility_type::combined_type_changed);
+        return res;
     }
 
     // same combinator for older and newer, or older is "anyOf"
@@ -1423,14 +1705,18 @@ bool is_positive_combinator_superset(
     if (older_schemas.Size() > newer_schemas.Size()) {
         if (older_comb == p_combinator::allOf) {
             // older has more restrictions than newer, not compatible
-            return false;
+            res.emplace<json_incompatibility>(
+              std::move(p), json_incompatibility_type::product_type_extended);
+            return res;
         }
     } else if (older_schemas.Size() < newer_schemas.Size()) {
         if (
           newer_comb == p_combinator::anyOf
           || newer_comb == p_combinator::oneOf) {
             // newer has more degrees of freedom than older, not compatible
-            return false;
+            res.emplace<json_incompatibility>(
+              std::move(p), json_incompatibility_type::sum_type_narrowed);
+            return res;
         }
     }
 
@@ -1452,7 +1738,8 @@ bool is_positive_combinator_superset(
     auto superset_graph = graph_t{older_schemas.Size() + newer_schemas.Size()};
     for (auto o = 0u; o < older_schemas.Size(); ++o) {
         for (auto n = 0u; n < newer_schemas.Size(); ++n) {
-            if (is_superset(ctx, older_schemas[o], newer_schemas[n])) {
+            if (!is_superset(ctx, older_schemas[o], newer_schemas[n], "")
+                   .has_error()) {
                 // translate n for the graph
                 auto n_index = n + older_schemas.Size();
                 add_edge(o, n_index, superset_graph);
@@ -1472,10 +1759,13 @@ bool is_positive_combinator_superset(
         // one of  sub schema was left out, meaning that it either had no valid
         // is_superset() relation with the other schema array, or that the
         // algorithm couldn't find a unique compatible pattern.
-        return false;
+        res.emplace<json_incompatibility>(
+          std::move(p),
+          json_incompatibility_type::combined_type_subschemas_changed);
+        return res;
     }
 
-    return true;
+    return res;
 }
 
 } // namespace is_superset_impl
@@ -1485,15 +1775,18 @@ using namespace is_superset_impl;
 // a schema O is a superset of another schema N if every schema that is valid
 // for N is also valid for O. precondition: older and newer are both valid
 // schemas
-bool is_superset(
+raw_compatibility_result is_superset(
   context const& ctx,
   json::Value const& older_schema,
-  json::Value const& newer_schema) {
+  json::Value const& newer_schema,
+  std::filesystem::path p) {
+    raw_compatibility_result res;
+
     // break recursion if parameters are atoms:
     if (is_true_schema(older_schema) || is_false_schema(newer_schema)) {
         // either older is the superset of every possible schema, or newer is
         // the subset of every possible schema
-        return true;
+        return res;
     }
 
     auto older = get_schema(ctx.older, older_schema);
@@ -1516,7 +1809,21 @@ bool is_superset(
         // newer_types_not_in_older accepts integer, and we can accept an
         // evolution from number -> integer. everything else is makes `newer`
         // less strict than older
-        return false;
+
+        auto older_minus_newer = json_type_list{};
+        std::ranges::set_difference(
+          older_types, newer_types, std::back_inserter(older_minus_newer));
+
+        if (
+          older_minus_newer.empty()
+          || (older_minus_newer == json_type_list{json_type::integer} && newer_minus_older == json_type_list{json_type::number})) {
+            res.emplace<json_incompatibility>(
+              std::move(p), json_incompatibility_type::type_narrowed);
+        } else {
+            res.emplace<json_incompatibility>(
+              std::move(p), json_incompatibility_type::type_changed);
+        }
+        return res;
     }
 
     // newer accepts less (or equal) types. for each type, try to find a less
@@ -1526,25 +1833,29 @@ bool is_superset(
         // to do a breadth first search to find a counterexample
         switch (t) {
         case json_type::string:
-            if (!is_string_superset(older, newer)) {
-                return false;
+            res.merge(is_string_superset(older, newer, p));
+            if (res.has_error()) {
+                return res;
             }
             break;
         case json_type::integer:
             [[fallthrough]];
         case json_type::number:
-            if (!is_numeric_superset(older, newer)) {
-                return false;
+            res.merge(is_numeric_superset(older, newer, p));
+            if (res.has_error()) {
+                return res;
             }
             break;
         case json_type::object:
-            if (!is_object_superset(ctx, older, newer)) {
-                return false;
+            res.merge(is_object_superset(ctx, older, newer, p));
+            if (res.has_error()) {
+                return res;
             }
             break;
         case json_type::array:
-            if (!is_array_superset(ctx, older, newer)) {
-                return false;
+            res.merge(is_array_superset(ctx, older, newer, p));
+            if (res.has_error()) {
+                return res;
             }
             break;
         case json_type::boolean:
@@ -1556,17 +1867,9 @@ bool is_superset(
         }
     }
 
-    if (!is_enum_superset(older, newer)) {
-        return false;
-    }
-
-    if (!is_not_combinator_superset(ctx, older, newer)) {
-        return false;
-    }
-
-    if (!is_positive_combinator_superset(ctx, older, newer)) {
-        return false;
-    }
+    res.merge(is_enum_superset(older, newer, p));
+    res.merge(is_not_combinator_superset(ctx, older, newer, p));
+    res.merge(is_positive_combinator_superset(ctx, older, newer, p));
 
     for (auto not_yet_handled_keyword : {
            // draft 6 unhandled keywords:
@@ -1588,7 +1891,7 @@ bool is_superset(
     }
 
     // no rule in newer is less strict than older, older is superset of newer
-    return true;
+    return res;
 }
 
 void sort(json::Value& val) {
@@ -1658,16 +1961,15 @@ ss::future<canonical_schema> make_canonical_json_schema(
 compatibility_result check_compatible(
   const json_schema_definition& reader,
   const json_schema_definition& writer,
-  verbose is_verbose [[maybe_unused]]) {
-    auto is_compatible = [&]() {
+  verbose is_verbose) {
+    auto raw_compat_result = [&]() {
         // reader is a superset of writer iff every schema that is valid for
         // writer is also valid for reader
         context ctx{.older{reader()}, .newer{writer()}};
-        return is_superset(ctx, reader().ctx.doc, writer().ctx.doc);
+        return is_superset(ctx, reader().ctx.doc, writer().ctx.doc, "#/");
     }();
 
-    // TODO(gellert.nagy): start using the is_verbose flag in a follow up PR
-    return compatibility_result{.is_compat = is_compatible};
+    return std::move(raw_compat_result)(is_verbose);
 }
 
 } // namespace pandaproxy::schema_registry
