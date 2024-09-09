@@ -1234,51 +1234,61 @@ raw_compatibility_result is_object_properties_superset(
     // older["additionalProperties"] is a schema
     auto older_additional_properties = get_object_or_empty(
       ctx.older, older, "additionalProperties");
+
     // scan every prop in newer["properties"]
     for (auto const& [prop, schema] : newer_properties) {
-        auto prop_path = p / "properties" / prop.GetString();
+        auto prop_result = [&]() -> raw_compatibility_result {
+            raw_compatibility_result res;
+            auto prop_path = p / "properties" / prop.GetString();
 
-        // it is either an evolution of a schema in older["properties"]
-        if (auto older_it = older_properties.FindMember(prop);
-            older_it != older_properties.MemberEnd()) {
-            // prop exists in both
-            res.merge(is_superset(ctx, older_it->value, schema, prop_path));
-            // check next property
-            continue;
-        }
+            // it is either an evolution of a schema in older["properties"]
+            if (auto older_it = older_properties.FindMember(prop);
+                older_it != older_properties.MemberEnd()) {
+                // prop exists in both
+                res.merge(is_superset(ctx, older_it->value, schema, prop_path));
+                return res;
+            }
 
-        // or it should be checked against every schema in
-        // older["patternProperties"] that matches
-        auto pattern_match_found = false;
-        for (auto pname = as_string_view(prop);
-             auto const& [propPattern, schemaPattern] :
-             older_pattern_properties) {
-            // TODO this rebuilds the regex each time, could be cached
-            auto regex = re2::RE2(as_string_view(propPattern));
-            if (re2::RE2::PartialMatch(pname, regex)) {
-                pattern_match_found = true;
+            // or it should be checked against every schema in
+            // older["patternProperties"] that matches
+            auto pattern_match_found = false;
+            for (auto pname = as_string_view(prop);
+                 auto const& [propPattern, schemaPattern] :
+                 older_pattern_properties) {
+                // TODO this rebuilds the regex each time, could be cached
+                auto regex = re2::RE2(as_string_view(propPattern));
+                if (re2::RE2::PartialMatch(pname, regex)) {
+                    pattern_match_found = true;
 
-                auto prop_res = is_superset(
-                  ctx, schemaPattern, schema, prop_path);
+                    auto prop_res = is_superset(
+                      ctx, schemaPattern, schema, prop_path);
 
-                if (prop_res.has_error()) {
-                    res.merge(std::move(prop_res));
-                    res.emplace<json_incompatibility>(
-                      std::move(prop_path),
-                      json_incompatibility_type::
-                        property_removed_not_covered_by_partially_open_content_model);
-                    break;
+                    if (prop_res.has_error()) {
+                        res.merge(std::move(prop_res));
+                        res.emplace<json_incompatibility>(
+                          std::move(prop_path),
+                          json_incompatibility_type::
+                            property_removed_not_covered_by_partially_open_content_model);
+                        return res;
+                    }
                 }
             }
-        }
-        if (pattern_match_found) {
-            // check next property
-            continue;
-        }
+            if (pattern_match_found) {
+                return res;
+            }
 
-        // or it should check against older["additionalProperties"], if no match
-        // in patternProperties was found
-        if (!is_false_schema(older_additional_properties)) {
+            // or it should check against older["additionalProperties"], if no
+            // match in patternProperties was found
+            // Check if additional properties were allowed (aka whether the
+            // content model was open or closed)
+            if (is_false_schema(older_additional_properties)) {
+                res.emplace<json_incompatibility>(
+                  std::move(prop_path),
+                  json_incompatibility_type::
+                    property_removed_from_closed_content_model);
+                return res;
+            }
+
             auto add_prop_res = is_superset(
               ctx, older_additional_properties, schema, prop_path);
 
@@ -1288,14 +1298,12 @@ raw_compatibility_result is_object_properties_superset(
                   std::move(prop_path),
                   json_incompatibility_type::
                     property_removed_not_covered_by_partially_open_content_model);
+                return res;
             }
-            continue;
-        }
 
-        res.emplace<json_incompatibility>(
-          std::move(prop_path),
-          json_incompatibility_type::
-            property_removed_from_closed_content_model);
+            return res;
+        }();
+        res.merge(std::move(prop_result));
     }
 
     return res;
