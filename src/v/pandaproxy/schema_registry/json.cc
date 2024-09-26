@@ -772,20 +772,11 @@ merge_references(std::span<json::Value::ConstObject> references_objects) {
 // iteratively resolve a reference, following the $ref field until the end or
 // the max_allowed_depth is reached. throws if the max depth is reached or if
 // the reference can't be resolved
-json::Value::ConstObject
+json_const_object
 resolve_reference(schema_context& ctx, const json::Value& candidate) {
     auto ref_it = candidate.FindMember("$ref");
     if (ref_it == candidate.MemberEnd()) { // not a reference, no-op
         return candidate.GetObject();
-    }
-
-    // we don't support merging of references with other fields
-    if (candidate.MemberCount() > 1) {
-        throw as_exception(error_info{
-          error_code::schema_invalid,
-          fmt::format(
-            "Unsupported merging of references with base object: '{}'",
-            pj{candidate})});
     }
 
     auto get_uri_fragment = [](std::string uri_s) {
@@ -795,6 +786,10 @@ resolve_reference(schema_context& ctx, const json::Value& candidate) {
     };
 
     auto [id_uri, fragment_p] = get_uri_fragment(ref_it->value.GetString());
+
+    // store the reference chains here, to merge them later, start with base
+    auto references_objects = absl::InlinedVector<json::Value::ConstObject, 4>{
+      candidate.GetObject()};
 
     // resolve the reference:
     while (ctx.consume_ref_units() > 0) {
@@ -812,6 +807,8 @@ resolve_reference(schema_context& ctx, const json::Value& candidate) {
         const auto& schema = resolve_pointer(schema_pointer, ctx.doc());
         // step 2: get the referenced object inside the schema
         const auto& referenced_obj = resolve_pointer(fragment_p, schema);
+        // step 2.5: store referenced_obj for merging later
+        references_objects.push_back(referenced_obj.GetObject());
 
         // step 3: check if the referenced object has a $ref field, and if so
         // resolve it
@@ -831,7 +828,7 @@ resolve_reference(schema_context& ctx, const json::Value& candidate) {
                   fmt::format("schema dialect mismatch for uri '{}'", id_uri)});
             }
 
-            return referenced_obj.GetObject();
+            return merge_references(references_objects);
         }
     }
     throw std::runtime_error(fmt::format(
@@ -839,7 +836,7 @@ resolve_reference(schema_context& ctx, const json::Value& candidate) {
 }
 
 // helper to convert a boolean to a schema, and to traverse $refs
-json::Value::ConstObject get_schema(schema_context& ctx, const json::Value& v) {
+json_const_object get_schema(schema_context& ctx, const json::Value& v) {
     if (v.IsObject()) {
         return resolve_reference(ctx, v.GetObject());
     }
@@ -858,7 +855,7 @@ json::Value::ConstObject get_schema(schema_context& ctx, const json::Value& v) {
 // helper to retrieve the object value for a key, or an empty object if the key
 // is not present. note: we resolve references with get_schema, but we don't
 // decrease the number of jumps that can be performed after this function.
-json::Value::ConstObject get_object_or_empty(
+json_const_object get_object_or_empty(
   schema_context ctx, const json::Value& v, std::string_view key) {
     auto it = v.FindMember(
       json::Value{key.data(), rapidjson::SizeType(key.size())});
@@ -1505,7 +1502,7 @@ json_compatibility_result is_object_properties_superset(
     //    it has to be compatible with older["additionalProperties"]
 
     auto newer_properties = get_object_or_empty(ctx.newer, newer, "properties");
-    if (newer_properties.ObjectEmpty()) {
+    if (newer_properties->ObjectEmpty()) {
         // no "properties" in newer, all good
         return res;
     }
@@ -1519,14 +1516,14 @@ json_compatibility_result is_object_properties_superset(
     auto older_additional_properties = get_object_or_empty(
       ctx.older, older, "additionalProperties");
     // scan every prop in newer["properties"]
-    for (const auto& [prop, schema] : newer_properties) {
+    for (const auto& [prop, schema] : newer_properties->GetObject()) {
         auto prop_path = [&p, &prop] {
             return p / "properties" / prop.GetString();
         };
 
         // it is either an evolution of a schema in older["properties"]
-        if (auto older_it = older_properties.FindMember(prop);
-            older_it != older_properties.MemberEnd()) {
+        if (auto older_it = older_properties->FindMember(prop);
+            older_it != older_properties->MemberEnd()) {
             // prop exists in both
             res.merge(is_superset(ctx, older_it->value, schema, prop_path()));
             // check next property
@@ -1538,7 +1535,7 @@ json_compatibility_result is_object_properties_superset(
         auto pattern_match_found = false;
         for (auto pname = as_string_view(prop);
              const auto& [propPattern, schemaPattern] :
-             older_pattern_properties) {
+             older_pattern_properties->GetObject()) {
             // TODO this rebuilds the regex each time, could be cached
             auto regex = re2::RE2(as_string_view(propPattern));
             if (re2::RE2::PartialMatch(pname, regex)) {
@@ -1614,7 +1611,7 @@ json_compatibility_result is_object_required_superset(
     // TODO O(n^2) lookup that can be a set_intersection.
     auto older_req_in_both_properties
       = older_req | std::views::filter([&](const json::Value& o) {
-            return newer_props.HasMember(o) && older_props.HasMember(o);
+            return newer_props->HasMember(o) && older_props->HasMember(o);
         });
 
     // for each element:
@@ -1626,7 +1623,7 @@ json_compatibility_result is_object_required_superset(
       older_req_in_both_properties, [&](const json::Value& o) {
           if (
             std::ranges::find(newer_req, o) == newer_req.End()
-            && !older_props[o].HasMember("default")) {
+            && !older_props->FindMember(o)->value.HasMember("default")) {
               res.emplace<json_incompatibility>(
                 p / "required" / as_string_view(o),
                 json_incompatibility_type::required_attribute_added);
@@ -1654,75 +1651,77 @@ json_compatibility_result is_object_dependencies_superset(
     // compatible
     // TODO: n^2 search
 
-    std::ranges::for_each(older_p, [&](const json::Value::Member& older_dep) {
-        auto path_dep = p / "dependencies" / as_string_view(older_dep.name);
-        const auto& o = older_dep.value;
-        auto n_it = newer_p.FindMember(older_dep.name);
+    std::ranges::for_each(
+      older_p->GetObject(), [&](const json::Value::Member& older_dep) {
+          auto path_dep = p / "dependencies" / as_string_view(older_dep.name);
+          const auto& o = older_dep.value;
+          auto n_it = newer_p->FindMember(older_dep.name);
 
-        if (o.IsObject()) {
-            if (n_it == newer_p.MemberEnd()) {
-                res.emplace<json_incompatibility>(
-                  std::move(path_dep),
-                  json_incompatibility_type::dependency_schema_added);
-                return;
-            }
+          if (o.IsObject()) {
+              if (n_it == newer_p->MemberEnd()) {
+                  res.emplace<json_incompatibility>(
+                    std::move(path_dep),
+                    json_incompatibility_type::dependency_schema_added);
+                  return;
+              }
 
-            const auto& n = n_it->value;
+              const auto& n = n_it->value;
 
-            if (!n.IsObject()) {
-                res.emplace<json_incompatibility>(
-                  std::move(path_dep),
-                  json_incompatibility_type::dependency_schema_added);
-                return;
-            }
+              if (!n.IsObject()) {
+                  res.emplace<json_incompatibility>(
+                    std::move(path_dep),
+                    json_incompatibility_type::dependency_schema_added);
+                  return;
+              }
 
-            // schemas: o and n needs to be compatible
-            res.merge(is_superset(ctx, o, n, std::move(path_dep)));
-        } else if (o.IsArray()) {
-            if (n_it == newer_p.MemberEnd()) {
-                res.emplace<json_incompatibility>(
-                  std::move(path_dep),
-                  json_incompatibility_type::dependency_array_added);
-                return;
-            }
+              // schemas: o and n needs to be compatible
+              res.merge(is_superset(ctx, o, n, std::move(path_dep)));
+          } else if (o.IsArray()) {
+              if (n_it == newer_p->MemberEnd()) {
+                  res.emplace<json_incompatibility>(
+                    std::move(path_dep),
+                    json_incompatibility_type::dependency_array_added);
+                  return;
+              }
 
-            const auto& n = n_it->value;
+              const auto& n = n_it->value;
 
-            if (!n.IsArray()) {
-                res.emplace<json_incompatibility>(
-                  std::move(path_dep),
-                  json_incompatibility_type::dependency_array_added);
-                return;
-            }
-            // string array: n needs to be a a superset of o
-            // TODO: n^2 search
-            bool n_superset_of_o = std::ranges::all_of(
-              o.GetArray(), [n_array = n.GetArray()](const json::Value& p) {
-                  return std::ranges::find(n_array, p) != n_array.End();
-              });
-            if (!n_superset_of_o) {
-                bool o_superset_of_n = std::ranges::all_of(
-                  n.GetArray(), [o_array = o.GetArray()](const json::Value& p) {
-                      return std::ranges::find(o_array, p) != o_array.End();
-                  });
-                if (o_superset_of_n) {
-                    res.emplace<json_incompatibility>(
-                      std::move(path_dep),
-                      json_incompatibility_type::dependency_array_extended);
-                } else {
-                    res.emplace<json_incompatibility>(
-                      std::move(path_dep),
-                      json_incompatibility_type::dependency_array_changed);
-                }
-            }
-            return;
-        } else {
-            throw as_exception(invalid_schema(fmt::format(
-              "dependencies can only be an array or an object for valid "
-              "schemas but it was: {}",
-              pj{o})));
-        }
-    });
+              if (!n.IsArray()) {
+                  res.emplace<json_incompatibility>(
+                    std::move(path_dep),
+                    json_incompatibility_type::dependency_array_added);
+                  return;
+              }
+              // string array: n needs to be a a superset of o
+              // TODO: n^2 search
+              bool n_superset_of_o = std::ranges::all_of(
+                o.GetArray(), [n_array = n.GetArray()](const json::Value& p) {
+                    return std::ranges::find(n_array, p) != n_array.End();
+                });
+              if (!n_superset_of_o) {
+                  bool o_superset_of_n = std::ranges::all_of(
+                    n.GetArray(),
+                    [o_array = o.GetArray()](const json::Value& p) {
+                        return std::ranges::find(o_array, p) != o_array.End();
+                    });
+                  if (o_superset_of_n) {
+                      res.emplace<json_incompatibility>(
+                        std::move(path_dep),
+                        json_incompatibility_type::dependency_array_extended);
+                  } else {
+                      res.emplace<json_incompatibility>(
+                        std::move(path_dep),
+                        json_incompatibility_type::dependency_array_changed);
+                  }
+              }
+              return;
+          } else {
+              throw as_exception(invalid_schema(fmt::format(
+                "dependencies can only be an array or an object for valid "
+                "schemas but it was: {}",
+                pj{o})));
+          }
+      });
 
     return res;
 }
