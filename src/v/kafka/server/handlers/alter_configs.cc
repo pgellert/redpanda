@@ -37,6 +37,9 @@
 #include <string_view>
 
 namespace kafka {
+// Legacy function, bug prone for multiple property updates, i.e
+// alter-config --set redpanda.remote.read=true --set
+// redpanda.remote.write=false
 static void parse_and_set_shadow_indexing_mode(
   cluster::property_update<std::optional<model::shadow_indexing_mode>>&
     property_update,
@@ -77,7 +80,7 @@ create_topic_properties_update(alter_configs_resource& resource) {
     std::apply(apply_op(op_t::none), update.custom_properties.serde_fields());
 
     static_assert(
-      std::tuple_size_v<decltype(update.properties.serde_fields())> == 27,
+      std::tuple_size_v<decltype(update.properties.serde_fields())> == 29,
       "If you added a property, please decide on it's default alter config "
       "policy, and handle the update in the loop below");
     static_assert(
@@ -93,6 +96,8 @@ create_topic_properties_update(alter_configs_resource& resource) {
      *
      * See: https://github.com/redpanda-data/redpanda/issues/7451
      */
+    update.properties.remote_read.op = op_t::none;
+    update.properties.remote_write.op = op_t::none;
     update.properties.remote_delete.op = op_t::none;
 
     // Legacy
@@ -163,6 +168,13 @@ create_topic_properties_update(alter_configs_resource& resource) {
                     parse_and_set_shadow_indexing_mode(
                       update_properties_shadow_indexing, cfg.value, set_value);
                 }
+
+                parse_and_set_bool(
+                  tp_ns,
+                  update.properties.remote_read,
+                  cfg.value,
+                  kafka::config_resource_operation::set,
+                  config::shard_local_cfg().cloud_storage_enable_remote_read());
                 continue;
             }
             if (cfg.name == topic_property_remote_write) {
@@ -177,6 +189,14 @@ create_topic_properties_update(alter_configs_resource& resource) {
                     parse_and_set_shadow_indexing_mode(
                       update_properties_shadow_indexing, cfg.value, set_value);
                 }
+
+                parse_and_set_bool(
+                  tp_ns,
+                  update.properties.remote_write,
+                  cfg.value,
+                  kafka::config_resource_operation::set,
+                  config::shard_local_cfg()
+                    .cloud_storage_enable_remote_write());
                 continue;
             }
             if (cfg.name == topic_property_remote_delete) {

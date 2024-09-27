@@ -348,7 +348,7 @@ std::ostream& operator<<(std::ostream& o, const incremental_topic_updates& i) {
       "record_value_subject_name_strategy_compat: {}, "
       "initial_retention_local_target_bytes: {}, "
       "initial_retention_local_target_ms: {}, write_caching: {}, flush_ms: {}, "
-      "flush_bytes: {}, iceberg_enabled: {}",
+      "flush_bytes: {}, iceberg_enabled: {}, remote_read: {}, remote_write: {}",
       i.compression,
       i.cleanup_policy_bitflags,
       i.compaction_strategy,
@@ -375,7 +375,9 @@ std::ostream& operator<<(std::ostream& o, const incremental_topic_updates& i) {
       i.write_caching,
       i.flush_ms,
       i.flush_bytes,
-      i.iceberg_enabled);
+      i.iceberg_enabled,
+      i.remote_read,
+      i.remote_write);
     return o;
 }
 
@@ -1178,7 +1180,9 @@ void adl<cluster::incremental_topic_updates>::to(
       t.write_caching,
       t.flush_ms,
       t.flush_bytes,
-      t.iceberg_enabled);
+      t.iceberg_enabled,
+      t.remote_read,
+      t.remote_write);
 }
 
 cluster::incremental_topic_updates
@@ -1318,6 +1322,13 @@ adl<cluster::incremental_topic_updates>::from(iobuf_parser& in) {
       <= cluster::incremental_topic_updates::version_with_iceberg_property) {
         updates.iceberg_enabled = adl<cluster::property_update<bool>>{}.from(
           in);
+    }
+
+    if (
+      version <= cluster::incremental_topic_updates::
+        version_with_remote_read_and_write) {
+        updates.remote_read = adl<cluster::property_update<bool>>{}.from(in);
+        updates.remote_write = adl<cluster::property_update<bool>>{}.from(in);
     }
 
     return updates;

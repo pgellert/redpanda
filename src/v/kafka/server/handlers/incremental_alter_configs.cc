@@ -37,10 +37,9 @@ namespace kafka {
 using req_resource_t = incremental_alter_configs_resource;
 using resp_resource_t = incremental_alter_configs_resource_response;
 
-/**
- * We pass returned value as a paramter to allow template to be automatically
- * resolved.
- */
+// Legacy function, bug prone for multiple property updates, i.e
+// alter-config --set redpanda.remote.read=true --set
+// redpanda.remote.write=false
 static void parse_and_set_shadow_indexing_mode(
   cluster::property_update<std::optional<model::shadow_indexing_mode>>& simode,
   const std::optional<ss::sstring>& value,
@@ -210,6 +209,13 @@ create_topic_properties_update(
                       op,
                       model::shadow_indexing_mode::fetch);
                 }
+
+                parse_and_set_bool(
+                  tp_ns,
+                  update.properties.remote_read,
+                  cfg.value,
+                  op,
+                  config::shard_local_cfg().cloud_storage_enable_remote_read());
                 continue;
             }
             if (cfg.name == topic_property_remote_write) {
@@ -221,6 +227,14 @@ create_topic_properties_update(
                       op,
                       model::shadow_indexing_mode::archival);
                 }
+
+                parse_and_set_bool(
+                  tp_ns,
+                  update.properties.remote_write,
+                  cfg.value,
+                  op,
+                  config::shard_local_cfg()
+                    .cloud_storage_enable_remote_write());
                 continue;
             }
             if (cfg.name == topic_property_remote_delete) {

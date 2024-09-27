@@ -563,7 +563,7 @@ struct property_update<tristate<T>>
 struct incremental_topic_updates
   : serde::envelope<
       incremental_topic_updates,
-      serde::version<7>,
+      serde::version<8>,
       serde::compat_version<0>> {
     static constexpr int8_t version_with_data_policy = -1;
     static constexpr int8_t version_with_shadow_indexing = -3;
@@ -574,6 +574,7 @@ struct incremental_topic_updates
     static constexpr int8_t version_with_initial_retention = -7;
     static constexpr int8_t version_with_write_caching = -8;
     static constexpr int8_t version_with_iceberg_property = -9;
+    static constexpr int8_t version_with_remote_read_and_write = -10;
     // negative version indicating different format:
     // -1 - topic_updates with data_policy
     // -2 - topic_updates without data_policy
@@ -583,7 +584,8 @@ struct incremental_topic_updates
     // -7 - topic updates with initial retention
     // -8 - write caching properties
     // -9 - iceberg enablement properties
-    static constexpr int8_t version = version_with_iceberg_property;
+    // -10 - split properties for remote_read and remote_write
+    static constexpr int8_t version = version_with_remote_read_and_write;
     property_update<std::optional<model::compression>> compression;
     property_update<std::optional<model::cleanup_policy_bitflags>>
       cleanup_policy_bitflags;
@@ -597,6 +599,10 @@ struct incremental_topic_updates
     property_update<tristate<size_t>> retention_local_target_bytes;
     property_update<tristate<std::chrono::milliseconds>>
       retention_local_target_ms;
+    property_update<bool> remote_read{
+      false, incremental_update_operation::none};
+    property_update<bool> remote_write{
+      false, incremental_update_operation::none};
     property_update<bool> remote_delete{
       false, incremental_update_operation::none};
     property_update<tristate<std::chrono::milliseconds>> segment_ms;
@@ -660,7 +666,9 @@ struct incremental_topic_updates
           write_caching,
           flush_ms,
           flush_bytes,
-          iceberg_enabled);
+          iceberg_enabled,
+          remote_read,
+          remote_write);
     }
 
     friend std::ostream&
@@ -671,6 +679,8 @@ struct incremental_topic_updates
       = default;
 
 private:
+    // This field is kept here for legacy purposes, but should be considered
+    // deprecated in favour of remote_read and remote_write.
     property_update<std::optional<model::shadow_indexing_mode>> shadow_indexing;
 };
 
