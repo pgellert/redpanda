@@ -593,7 +593,6 @@ struct incremental_topic_updates
     property_update<std::optional<size_t>> segment_size;
     property_update<tristate<size_t>> retention_bytes;
     property_update<tristate<std::chrono::milliseconds>> retention_duration;
-    property_update<std::optional<model::shadow_indexing_mode>> shadow_indexing;
     property_update<std::optional<uint32_t>> batch_max_bytes;
     property_update<tristate<size_t>> retention_local_target_bytes;
     property_update<tristate<std::chrono::milliseconds>>
@@ -627,6 +626,11 @@ struct incremental_topic_updates
     property_update<bool> iceberg_enabled{
       storage::ntp_config::default_iceberg_enabled,
       incremental_update_operation::none};
+
+    // To allow us to better control use of the deprecated shadow_indexing
+    // field, use getters and setters instead.
+    const auto& get_shadow_indexing() const { return shadow_indexing; }
+    auto& get_shadow_indexing() { return shadow_indexing; }
 
     auto serde_fields() {
         return std::tie(
@@ -665,6 +669,9 @@ struct incremental_topic_updates
     friend bool operator==(
       const incremental_topic_updates&, const incremental_topic_updates&)
       = default;
+
+private:
+    property_update<std::optional<model::shadow_indexing_mode>> shadow_indexing;
 };
 
 using replication_factor
