@@ -11,17 +11,20 @@ import random
 import string
 import subprocess
 from rptest.services.admin import Admin
-from rptest.clients.kcl import RawKCL
+from rptest.clients.kcl import KCL, RawKCL
 from rptest.utils.si_utils import BucketView, NT
 from ducktape.utils.util import wait_until
 from rptest.util import wait_until_result
 
 from rptest.services.cluster import cluster
-from ducktape.mark import parametrize
+from ducktape.mark import parametrize, matrix
 from rptest.clients.kafka_cli_tools import KafkaCliTools
 from rptest.clients.rpk import RpkTool
 
+from rptest.services.redpanda_installer import RedpandaVersionTriple
 from rptest.clients.types import TopicSpec
+from rptest.tests.end_to_end import EndToEndTest
+from rptest.services.redpanda_installer import InstallOptions
 from rptest.tests.redpanda_test import RedpandaTest
 from rptest.services.redpanda import SISettings
 
@@ -350,3 +353,178 @@ class ShadowIndexingGlobalConfig(RedpandaTest):
                    backoff_sec=1,
                    err_msg="Topic manifest was not re-uploaded as expected",
                    retry_on_exc=True)
+
+
+class AlterConfigMixedNodeTest(EndToEndTest):
+    topics = (TopicSpec(partition_count=1, replication_factor=3), )
+
+    def __init__(self, ctx):
+        super(AlterConfigMixedNodeTest, self).__init__(test_context=ctx)
+
+    @cluster(num_nodes=3)
+    @matrix(incremental_update=[True, False])
+    def test_alter_config_shadow_indexing_mixed_node(self, incremental_update):
+        """Assert that the `AlterConfig` and `IncrementalAlterConfig` APIs still work as expected,
+        most notably with `redpanda.remote.read` and `redpanda.remote.write`, which have seen some
+        changed behavior in v24.3 and above versions of `redpanda`."""
+        num_nodes = 3
+
+        install_opts = InstallOptions(version=RedpandaVersionTriple(
+            (24, 1, 1)),
+                                      num_to_upgrade=2)
+        self.start_redpanda(
+            num_nodes=num_nodes,
+            si_settings=SISettings(test_context=self.test_context),
+            install_opts=install_opts)
+
+        redpanda_versions = {
+            i: self.redpanda.get_version_int_tuple(node)
+            for (i, node) in enumerate(self.redpanda.nodes)
+        }
+
+        rpk = RpkTool(self.redpanda)
+        # KCL is used to direct AlterConfig and DescribeConfigs requests to specific brokers.
+        kcl = KCL(self.redpanda)
+        topic = self.topics[0].name
+        props = {
+            'redpanda.remote.read': 'false',
+            'redpanda.remote.write': 'false'
+        }
+
+        rpk.create_topic(topic, partitions=1, replicas=3, config=props)
+
+        # Make sure that the lower versioned node is the partition leader.
+        leader_node_index = min(redpanda_versions, key=redpanda_versions.get)
+        leader_node_id = leader_node_index + 1
+        self.redpanda._admin.partition_transfer_leadership(
+            'kafka', topic, 0, leader_node_id)
+        wait_until(lambda: self.redpanda._admin.get_partition_leader(
+            namespace='kafka', topic=topic, partition=0) == leader_node_id,
+                   timeout_sec=10,
+                   backoff_sec=1,
+                   err_msg="Partition leadership did not stabilize")
+
+        # Make sure that the higher versioned node is the controller.
+        controller_node_index = max(redpanda_versions,
+                                    key=redpanda_versions.get)
+        controller_node_id = controller_node_index + 1
+        self.redpanda._admin.partition_transfer_leadership(
+            'redpanda', 'controller', 0, controller_node_id)
+        wait_until(lambda: self.redpanda._admin.get_partition_leader(
+            namespace="redpanda", topic="controller", partition=0) ==
+                   controller_node_id,
+                   timeout_sec=10,
+                   backoff_sec=1,
+                   err_msg="Controller leadership did not stabilize")
+
+        # Sanity check defaults
+        desc = rpk.describe_topic_configs(topic)
+        assert desc['redpanda.remote.read'][0] == 'false'
+        assert desc['redpanda.remote.write'][0] == 'false'
+
+        third_node_index = [
+            i for i in redpanda_versions.keys()
+            if i not in [controller_node_index, leader_node_index]
+        ][0]
+
+        controller_node = self.redpanda.nodes[controller_node_index]
+        leader_node = self.redpanda.nodes[leader_node_index]
+        third_node = self.redpanda.nodes[third_node_index]
+
+        # TODO(willem): Add leader_node to list of nodes checked after un-upgraded version
+        # is bumped to v24.2. For now, there seems to be bugs in v24.1 that leads
+        # to inconsistent state between topic properties on nodes.
+        nodes = [controller_node, third_node]
+
+        def check_remote_read_and_write_on_nodes(remote_read, remote_write):
+            for node in nodes:
+                remote_read_valid = False
+                remote_write_valid = False
+                desc = kcl.describe_topic(topic, node=node)
+                for line in desc.split('\n'):
+                    line = line.rstrip()
+                    if 'redpanda.remote.read' in line:
+                        remote_read_valid = remote_read in line
+                    if 'redpanda.remote.write' in line:
+                        remote_write_valid = remote_write in line
+                valid = remote_read_valid and remote_write_valid
+                if not valid:
+                    return False
+            return True
+
+        log_line = "Performing deprecated incremental_update to shadow_indexing_mode"
+        # Set log level to trace for cluster, since that's where log_line appears.
+        self.redpanda._admin.set_log_level("cluster", "trace")
+
+        # Assert that an update to controller node does not
+        # result in the log line appearing on any nodes.
+        props = {
+            'redpanda.remote.read': 'true',
+            'redpanda.remote.write': 'true'
+        }
+        kcl.alter_topic_config(props,
+                               incremental_update,
+                               topic,
+                               node=controller_node)
+        assert self.redpanda.search_log_any(pattern=log_line) == False
+        wait_until(lambda: check_remote_read_and_write_on_nodes(
+            'true', 'true') == True,
+                   timeout_sec=10,
+                   backoff_sec=1,
+                   err_msg="Topic properties did not update across cluster")
+
+        # Assert that an update to the other upgraded
+        # node does not result in the log line appearing on any nodes.
+        props = {
+            'redpanda.remote.read': 'false',
+            'redpanda.remote.write': 'false'
+        }
+        kcl.alter_topic_config(props,
+                               incremental_update,
+                               topic,
+                               node=third_node)
+        assert self.redpanda.search_log_any(pattern=log_line) == False
+        wait_until(lambda: check_remote_read_and_write_on_nodes(
+            'false', 'false') == True,
+                   timeout_sec=10,
+                   backoff_sec=1,
+                   err_msg="Topic properties did not update across cluster")
+
+        # Assert that an update directed to the leader node results in
+        # the log line appearing in cluster trace logs of the controller node and third node.
+        props = {
+            'redpanda.remote.read': 'true',
+            'redpanda.remote.write': 'false'
+        }
+        kcl.alter_topic_config(props,
+                               incremental_update,
+                               topic,
+                               node=leader_node)
+
+        assert self.redpanda.search_log_node(node=controller_node,
+                                             pattern=log_line) == True
+        assert self.redpanda.search_log_node(node=third_node,
+                                             pattern=log_line) == True
+
+        # Cannot assert on topic configs here, as we know the deprecated code path is bug prone.
+        # Still, check that view of topic properties is consistent across the cluster.
+        def check_consistent_properties_across_nodes():
+            node_props = []
+            for node in nodes:
+                desc = kcl.describe_topic(topic, node=node)
+                props = set()
+                for line in desc.split('\n'):
+                    line = line.rstrip()
+                    if 'redpanda.remote.read' in line:
+                        props.add(line)
+                    elif 'redpanda.remote.write' in line:
+                        props.add(line)
+                assert len(props) == 2
+                node_props.append(props)
+            return all(p == node_props[0] for p in node_props)
+
+        wait_until(
+            lambda: check_consistent_properties_across_nodes() == True,
+            timeout_sec=10,
+            backoff_sec=1,
+            err_msg="Topic properties were not consistent across cluster")
