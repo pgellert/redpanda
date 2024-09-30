@@ -170,3 +170,127 @@ FIXTURE_TEST(test_feature_table_snapshots, cluster_test_fixture) {
       app->feature_table.local().is_active(features::feature::test_alpha)
       == true);
 }
+
+FIXTURE_TEST(
+  test_shadow_indexing_update_topic_properties, cluster_test_fixture) {
+    // add two nodes
+    auto controller_id = model::node_id{0};
+    application* node_0 = create_node_application(controller_id);
+    wait_for_controller_leadership(controller_id).get();
+    application* node_1 = create_node_application(model::node_id{1});
+
+    const model::topic topic{"tapioca"};
+    const model::topic_namespace tp_ns{model::kafka_namespace, topic};
+    auto* rp = instance(controller_id);
+    cluster::topic_properties props;
+    props.shadow_indexing = model::shadow_indexing_mode::disabled;
+    rp->add_topic(tp_ns, 1, props, 2).get();
+
+    // Simulate a case in which a lower version node makes an alter config call,
+    // where shadow_indexing_mode has an update and remote_read/remote_write do
+    // not. This will be redirected to the controller node, and the deprecated
+    // path in topic_table::apply() should be taken.
+    {
+        auto update = cluster::topic_properties_update{
+          {model::kafka_namespace, topic}};
+        update.properties.get_shadow_indexing().op
+          = cluster::incremental_update_operation::set;
+        update.properties.get_shadow_indexing().value
+          = model::shadow_indexing_mode::full;
+        auto res = node_1->controller->get_topics_frontend()
+                     .local()
+                     .update_topic_properties(
+                       {update}, model::timeout_clock().now() + 5s)
+                     .get();
+
+        BOOST_REQUIRE_EQUAL(res.size(), 1);
+        BOOST_REQUIRE_EQUAL(res[0].ec, cluster::errc::success);
+        auto cfg = node_0->controller->get_topics_state().local().get_topic_cfg(
+          tp_ns);
+        BOOST_REQUIRE(cfg.has_value());
+        const auto& cfg_shadow_indexing
+          = cfg.value().properties.shadow_indexing;
+        BOOST_REQUIRE(cfg_shadow_indexing.has_value());
+        BOOST_REQUIRE_EQUAL(
+          cfg_shadow_indexing.value(), model::shadow_indexing_mode::full);
+    }
+
+    // Simulate a case in which an updated node makes an alter config
+    // call, where shadow_indexing_mode has an update, as well as
+    // remote_read/remote_write. This will be redirected to the controller node,
+    // and the non-deprecated path in topic_table::apply() should be taken.
+    {
+        auto update = cluster::topic_properties_update{
+          {model::kafka_namespace, topic}};
+        update.properties.get_shadow_indexing().op
+          = cluster::incremental_update_operation::set;
+        update.properties.get_shadow_indexing().value
+          = model::shadow_indexing_mode::disabled;
+
+        update.properties.remote_read.op
+          = cluster::incremental_update_operation::set;
+        update.properties.remote_read.value = false;
+
+        update.properties.remote_write.op
+          = cluster::incremental_update_operation::set;
+        update.properties.remote_write.value = false;
+
+        auto res = node_1->controller->get_topics_frontend()
+                     .local()
+                     .update_topic_properties(
+                       {update}, model::timeout_clock().now() + 5s)
+                     .get();
+
+        BOOST_REQUIRE_EQUAL(res.size(), 1);
+        BOOST_REQUIRE_EQUAL(res[0].ec, cluster::errc::success);
+        auto cfg = node_0->controller->get_topics_state().local().get_topic_cfg(
+          tp_ns);
+        BOOST_REQUIRE(cfg.has_value());
+        const auto& cfg_shadow_indexing
+          = cfg.value().properties.shadow_indexing;
+        BOOST_REQUIRE(cfg_shadow_indexing.has_value());
+        BOOST_REQUIRE_EQUAL(
+          cfg_shadow_indexing.value(), model::shadow_indexing_mode::disabled);
+    }
+
+    // Simulate a case in which an updated node makes an alter config
+    // call, where shadow_indexing_mode has an update, as well as
+    // remote_read/remote_write. This will be redirected to the controller node,
+    // and the non-deprecated path in topic_table::apply() should be taken.
+    // We should be able to set true/false simultaneously this way.
+    {
+        // This update is set to "disabled", but is ignored by the topic_table
+        // as it follows remote_read/write updates instead.
+        auto update = cluster::topic_properties_update{
+          {model::kafka_namespace, topic}};
+        update.properties.get_shadow_indexing().op
+          = cluster::incremental_update_operation::set;
+        update.properties.get_shadow_indexing().value
+          = model::shadow_indexing_mode::disabled;
+
+        update.properties.remote_read.op
+          = cluster::incremental_update_operation::set;
+        update.properties.remote_read.value = true;
+
+        update.properties.remote_write.op
+          = cluster::incremental_update_operation::set;
+        update.properties.remote_write.value = false;
+
+        auto res = node_1->controller->get_topics_frontend()
+                     .local()
+                     .update_topic_properties(
+                       {update}, model::timeout_clock().now() + 5s)
+                     .get();
+
+        BOOST_REQUIRE_EQUAL(res.size(), 1);
+        BOOST_REQUIRE_EQUAL(res[0].ec, cluster::errc::success);
+        auto cfg = node_0->controller->get_topics_state().local().get_topic_cfg(
+          tp_ns);
+        BOOST_REQUIRE(cfg.has_value());
+        const auto& cfg_shadow_indexing
+          = cfg.value().properties.shadow_indexing;
+        BOOST_REQUIRE(cfg_shadow_indexing.has_value());
+        BOOST_REQUIRE_EQUAL(
+          cfg_shadow_indexing.value(), model::shadow_indexing_mode::fetch);
+    }
+}
