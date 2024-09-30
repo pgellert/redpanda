@@ -1403,6 +1403,489 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
 })",
     .compat_result = {},
   },
+  /* internal refs checks section */
+  {
+// simple ref
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+})",
+    .compat_result = {},
+  },
+  {
+// simple ref incompatible
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMaximum": 0
+    }
+  }
+})",
+    .compat_result = {{"#/properties/a/exclusiveMinimum", incompat_t::exclusive_minimum_added}},
+  },
+{
+// simple ref in bundled schema compatible
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "$id": "https://example.com/schemas/external",
+      "$defs": {
+        "positive_num": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+})",
+    .compat_result = {},
+  },
+{
+// simple ref in bundled schema incompatible
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "$id": "https://example.com/schemas/external",
+      "$defs": {
+        "positive_num": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMaximum": 0
+    }
+  }
+})",
+    .compat_result = {{"#/properties/a/exclusiveMinimum", incompat_t::exclusive_minimum_added}},
+  },
+{
+// double jump ref in bundled schema compatible
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "$id": "https://example.com/schemas/external",
+      "$defs": {
+        "positive_num": {
+          "$ref": "#/$defs/pnum_impl"
+        },
+        "pnum_impl": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+})",
+    .compat_result = {},
+  },
+  {
+    // double jump ref in bundled schema incompatible
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "$id": "https://example.com/schemas/external",
+      "$defs": {
+        "positive_num": {
+          "$ref": "#/$defs/pnum_impl"
+        },
+        "pnum_impl": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMaximum": 0
+    }
+  }
+})",
+    .compat_result = {{"#/properties/a/exclusiveMinimum", incompat_t::exclusive_minimum_added}},
+  },
+  {
+    // recursive double jump ref in bundled schema error
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "$id": "https://example.com/schemas/external",
+      "$defs": {
+        "positive_num": {
+          "$ref": "#/$defs/pnum_impl"
+        },
+        "pnum_impl": {
+          "$ref": "#/$defs/positive_num"
+        }
+      }
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+})",
+    .compat_result = {},
+    .expected_exception = true,
+  },
+  {
+    // recursive double jump ref with siblings in bundled schema error
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "$id": "https://example.com/schemas/external",
+      "$defs": {
+        "positive_num": {
+          "$ref": "#/$defs/pnum_impl",
+          "minimum": 0
+        },
+        "pnum_impl": {
+          "$ref": "#/$defs/positive_num",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+})",
+    .compat_result = {},
+    .expected_exception = true,
+  },
+  {
+    // non existing bundled schema
+    .reader_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+})",
+    .compat_result = {},
+    .expected_exception = true,
+  },
+  {
+    // non existing external ref
+    .reader_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "$ref": "an.external.schema#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+})",
+    .compat_result = {},
+    .expected_exception = true,
+  },
+  {
+    // non existing local ref in bundled schema
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "$id": "https://example.com/schemas/external",
+      "$defs": {
+        "positive_num": {
+          "$ref": "#/$defs/pnum_impl"
+        }
+      }
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num"
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  }
+})",
+    .compat_result = {},
+    .expected_exception = true,
+  },
+  {
+    // local ref with siblings
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "#/$defs/positive_num",
+      "type": "number",
+      "multipleOf": 33
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "allOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "number",
+          "multipleOf": 33
+        }
+      ]
+    }
+  }
+})",
+    .compat_result = {},
+  },
+  {
+    // recursive double jump ref with siblings in bundled schema
+    .reader_schema = R"(
+{
+  "type": "object",
+  "$defs": {
+    "positive_num": {
+      "$id": "https://example.com/schemas/external",
+      "$defs": {
+        "positive_num": {
+          "$ref": "#/$defs/pnum_impl"
+        },
+        "pnum_impl": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  },
+  "properties": {
+    "a": {
+      "$ref": "https://example.com/schemas/external#/$defs/positive_num",
+      "type": "number",
+      "multipleOf": 33
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "object",
+  "properties": {
+    "a": {
+      "allOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "number",
+          "multipleOf": 33
+        }
+      ]
+    }
+  }
+})",
+    .compat_result = {},
+  },
+  {
+    // ref in arrays
+    .reader_schema = R"(
+{
+  "$id": "https://example.com/schemas/base",
+  "type": "array",
+  "prefixItems": [
+    {"$ref": "#/$defs/positive_num"},
+    {"type": "string"}
+  ],
+  "items": {"$ref": "https://example.com/schemas/base#/$defs/negative_num", "mutipleOf": 10},
+  "$defs": {
+    "positive_num": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "negative_num": {
+      "type": "number",
+      "exclusiveMaximum": 0
+    }
+  }
+})",
+    .writer_schema = R"(
+{
+  "type": "array",
+  "prefixItems": [
+    {"type": "number", "exclusiveMinimum": 0},
+    {"type": "string"}
+  ],
+  "items": {
+    "allOf": [
+      {"type": "number", "exclusiveMaximum": 0},
+      {"multipleOf": 10}
+    ]
+  }
+})",
+  .compat_result = {},
+  },
 });
 SEASTAR_THREAD_TEST_CASE(test_compatibility_check) {
     store_fixture f;
