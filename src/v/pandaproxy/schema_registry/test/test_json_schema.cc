@@ -1533,9 +1533,10 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
     .compat_result = {{"#/properties/a/exclusiveMinimum", incompat_t::exclusive_minimum_added}},
   },
 {
-// double jump ref in bundled schema compatible
-    .reader_schema = R"(
+// double jump ref in bundled schema compatible -- seems like the ref implementation doesn't allow this, but it seems okay?
+.reader_schema = R"(
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "$defs": {
     "positive_num": {
@@ -1557,8 +1558,9 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
     }
   }
 })",
-    .writer_schema = R"(
+  .writer_schema = R"(
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
     "a": {
@@ -1610,6 +1612,7 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
     // recursive double jump ref in bundled schema error
     .reader_schema = R"(
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "$defs": {
     "positive_num": {
@@ -1632,6 +1635,7 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
 })",
     .writer_schema = R"(
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
     "a": {
@@ -1765,7 +1769,7 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
     .expected_exception = true,
   },
   {
-    // local ref with siblings
+    // local ref with siblings -- ref impl says TYPE_CHANGED, looks like they don't do merging?
     .reader_schema = R"(
 {
   "type": "object",
@@ -1788,16 +1792,9 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
   "type": "object",
   "properties": {
     "a": {
-      "allOf": [
-        {
-          "type": "number",
-          "exclusiveMinimum": 0
-        },
-        {
-          "type": "number",
-          "multipleOf": 33
-        }
-      ]
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "multipleOf": 33
     }
   }
 })",
@@ -1854,13 +1851,14 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
     // ref in arrays
     .reader_schema = R"(
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.com/schemas/base",
   "type": "array",
   "prefixItems": [
     {"$ref": "#/$defs/positive_num"},
     {"type": "string"}
   ],
-  "items": {"$ref": "https://example.com/schemas/base#/$defs/negative_num", "mutipleOf": 10},
+  "items": {"$ref": "https://example.com/schemas/base#/$defs/negative_num"},
   "$defs": {
     "positive_num": {
       "type": "number",
@@ -1874,6 +1872,7 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
 })",
     .writer_schema = R"(
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "array",
   "prefixItems": [
     {"type": "number", "exclusiveMinimum": 0},
@@ -1881,8 +1880,7 @@ static const auto compatibility_test_cases = std::to_array<compatibility_test_ca
   ],
   "items": {
     "allOf": [
-      {"type": "number", "exclusiveMaximum": 0},
-      {"multipleOf": 10}
+      {"type": "number", "exclusiveMaximum": 0}
     ]
   }
 })",

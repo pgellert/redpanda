@@ -396,7 +396,7 @@ id_to_schema_pointer collect_bundled_schema_and_fix_refs(
 
 result<document_context> parse_json(iobuf buf) {
     // parse string in json document, check it's a valid json
-    iobuf_istream is{buf.share(0, buf.size_bytes())};
+    iobuf_istream is{buf.copy()};
 
     auto decoder = jsoncons::json_decoder<jsoncons::ojson>{};
     auto reader = jsoncons::basic_json_reader(is.istream(), decoder);
@@ -456,11 +456,8 @@ result<document_context> parse_json(iobuf buf) {
     auto bundles_schemas_map = collect_bundled_schema_and_fix_refs(
       schema, dialect);
 
-    // to use rapidjson we need to serialized schema again
-    auto iobuf_os = iobuf_ostream{};
-    schema.dump(iobuf_os.ostream());
-
-    auto schema_stream = json::chunked_input_stream{std::move(iobuf_os).buf()};
+    auto schema_stream = json::chunked_input_stream{
+      buf.share(0, buf.size_bytes())};
     auto rapidjson_schema = json::Document{};
     if (rapidjson_schema.ParseStream(schema_stream).HasParseError()) {
         // not a valid json document, return error
@@ -2189,6 +2186,17 @@ void sort(json::Value& val) {
     }
 }
 
+std::optional<std::string>
+get_id(jsoncons::ojson& doc, json_schema_dialect dialect) {
+    auto id_it = doc.find(
+      dialect == json_schema_dialect::draft4 ? "id" : "$id");
+    if (id_it != doc.object_range().end()) {
+        return id_it->value().as_string();
+    } else {
+        return std::nullopt;
+    }
+}
+
 void collect_bundled_schemas_and_fix_refs(
   id_to_schema_pointer& bundled_schemas,
   jsoncons::uri base_uri,
@@ -2213,69 +2221,52 @@ void collect_bundled_schemas_and_fix_refs(
     //   "id"  | >=draft6 |       no
     //   "id"  |  draft4  |       yes
 
-    auto maybe_draft4_id_it = this_obj.find("id");
-    auto maybe_id_it = this_obj.find("$id");
-    if (
-      maybe_id_it != this_obj.object_range().end()
-      || maybe_draft4_id_it != this_obj.object_range().end()) {
-        // we are visiting a bundled schema. the dialect has to be known and has
-        // to match the keyword used.
-        // try to extract the dialect from the $schema keyword, or use the
-        // parent dialect. empty means that "$schema" is present but the dialect
-        // is not known, and we should stop scanning this branch.
-        auto maybe_new_dialect = [&]() -> std::optional<json_schema_dialect> {
-            auto dialect_it = this_obj.find("$schema");
-            if (dialect_it == this_obj.object_range().end()) {
-                // we can keep using the parent dialect
-                return dialect;
-            }
+    if (this_obj.is_array()) {
+        for (auto i = 0u; i < this_obj.size(); ++i) {
+            collect_bundled_schemas_and_fix_refs(
+              bundled_schemas,
+              base_uri,
+              this_obj_ptr / i,
+              this_obj[i],
+              dialect);
+        }
+        return;
+    }
+    if (!this_obj.is_object()) {
+        return;
+    }
 
-            // we have a $schema keyword, use this dialect if we find out that
-            // this_obj is a bundled schema
-            return from_uri(dialect_it->value().as_string_view());
-        }();
-
-        if (maybe_new_dialect.has_value() == false) {
-            // stop scanning this tree, we might be in a bundled schema but we
-            // don't know the dialect.
+    auto dialect_it = this_obj.find("$schema");
+    if (dialect_it != this_obj.object_range().end()) {
+        auto parsed = from_uri(dialect_it->value().as_string_view());
+        if (!parsed) {
+            // stop scanning this tree, we might be in a bundled schema but
+            // we don't know the dialect.
             return;
         }
 
-        // we are in a bundled schema and we know the dialect to use, now we
-        // know which keyword to use to get the base_uri
-        auto id_it = [&] {
-            switch (maybe_new_dialect.value()) {
-            case json_schema_dialect::draft4:
-                return maybe_draft4_id_it;
-            case json_schema_dialect::draft6:
-            case json_schema_dialect::draft7:
-            case json_schema_dialect::draft201909:
-            case json_schema_dialect::draft202012:
-                return maybe_id_it;
-            }
-        }();
+        dialect = *parsed;
+    }
 
-        if (id_it == this_obj.object_range().end()) {
-            // stop scanning this branch, the keyword for base uri does not
-            // agree with schema dialect.
-            return;
-        }
+    if (auto id = get_id(this_obj, dialect); id.has_value()) {
+        // we are visiting a bundled schema.
 
-        // run validation since we are not a guaranteed to be in proper schema
-        if (validate_json_schema(maybe_new_dialect.value(), this_obj)
-              .has_error()) {
+        // run validation since we are not a guaranteed to be in proper
+        // schema
+        if (validate_json_schema(dialect, this_obj).has_error()) {
             // stop exploring this branch, the schema is invalid
             return;
         }
 
-        // base uri keyword agrees with the dialect, it's a validated schema, we
-        // can register this as a bundled schema and continue scanning.
-        // (run resolve because it could be relative to the parent schema).
-        base_uri = jsoncons::uri{id_it->value().as_string()}.resolve(base_uri);
-        dialect = maybe_new_dialect.value();
+        base_uri = jsoncons::uri{*id}.resolve(base_uri);
         bundled_schemas.insert_or_assign(
           to_json_id_uri(base_uri),
           std::pair{json::Pointer{this_obj_ptr.to_string()}, dialect});
+
+        // base uri keyword agrees with the dialect, it's a validated
+        // schema, we can register this as a bundled schema and continue
+        // scanning. (run resolve because it could be relative to the parent
+        // schema).
     }
 
     if (auto ref_it = this_obj.find("$ref");
@@ -2286,25 +2277,12 @@ void collect_bundled_schemas_and_fix_refs(
                             .string();
     }
 
-    // lambda to recursively scan the object for more bundled schemas and $refs
-    auto collect_and_fix = [&](const auto& key, auto& value) {
-        collect_bundled_schemas_and_fix_refs(
-          bundled_schemas, base_uri, this_obj_ptr / key, value, dialect);
-    };
-
     // recursively scan the object for more bundled schemas and $refs
     for (auto& e : this_obj.object_range()) {
         const auto& key = e.key();
         auto& value = e.value();
-        if (value.is_object()) {
-            collect_and_fix(key, value);
-        } else if (value.is_array()) {
-            for (auto i = 0u; i < value.size(); ++i) {
-                if (value[i].is_object()) {
-                    collect_and_fix(i, value[i]);
-                }
-            }
-        }
+        collect_bundled_schemas_and_fix_refs(
+          bundled_schemas, base_uri, this_obj_ptr / key, value, dialect);
     }
 }
 
@@ -2316,17 +2294,13 @@ id_to_schema_pointer collect_bundled_schema_and_fix_refs(
         bundled_schemas.insert_or_assign(
           {}, std::pair{json::Pointer{}, dialect});
     } else {
-        // validation ensures that this is an object and we can can look into it
-        auto root_id = [&] {
-            auto id_it = doc.find(
-              dialect == json_schema_dialect::draft4 ? "id" : "$id");
-            if (id_it != doc.object_range().end()) {
-                return to_json_id_uri(
-                  jsoncons::uri{id_it->value().as_string()});
-            } else {
-                return json_id_uri{""};
-            }
-        }();
+        vassert(
+          doc.is_object(),
+          "Validation should ensure that this is an object and we can can look "
+          "into it");
+
+        auto root_id = to_json_id_uri(
+          jsoncons::uri{get_id(doc, dialect).value_or("")});
 
         bundled_schemas.insert_or_assign(
           root_id, std::pair{json::Pointer{}, dialect});
