@@ -923,6 +923,8 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     }
     auto updated_properties = tp->second.get_configuration().properties;
     auto& overrides = cmd.value;
+
+    vlog(clusterlog.warn, "Applying topic properties update: {}", overrides);
     /**
      * Update topic properties
      */

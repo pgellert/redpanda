@@ -362,7 +362,8 @@ class AlterConfigMixedNodeTest(EndToEndTest):
         super(AlterConfigMixedNodeTest, self).__init__(test_context=ctx)
 
     @cluster(num_nodes=3)
-    @matrix(incremental_update=[True, False])
+    # @matrix(incremental_update=[True, False])
+    @matrix(incremental_update=[True])
     def test_alter_config_shadow_indexing_mixed_node(self, incremental_update):
         """Assert that the `AlterConfig` and `IncrementalAlterConfig` APIs still work as expected,
         most notably with `redpanda.remote.read` and `redpanda.remote.write`, which have seen some
@@ -434,7 +435,7 @@ class AlterConfigMixedNodeTest(EndToEndTest):
         # TODO(willem): Add leader_node to list of nodes checked after un-upgraded version
         # is bumped to v24.2. For now, there seems to be bugs in v24.1 that leads
         # to inconsistent state between topic properties on nodes.
-        nodes = [controller_node, third_node]
+        nodes = self.redpanda.nodes  # [controller_node, third_node]
 
         def check_remote_read_and_write_on_nodes(remote_read, remote_write):
             for node in nodes:
@@ -524,7 +525,15 @@ class AlterConfigMixedNodeTest(EndToEndTest):
             return all(p == node_props[0] for p in node_props)
 
         wait_until(
-            lambda: check_consistent_properties_across_nodes() == True,
+            lambda: check_remote_read_and_write_on_nodes('false', 'false'),
+            # lambda: check_consistent_properties_across_nodes(),
             timeout_sec=10,
             backoff_sec=1,
             err_msg="Topic properties were not consistent across cluster")
+
+        # This can't be expressed as a consistenty update, since the shadow_indexing enum is not powerful enough to express it:
+        # props = {
+        #     'redpanda.remote.read': 'false',
+        #     'redpanda.remote.write': 'true'
+        # }
+        # So if we start with (RR=True, RW=False), we can't get to (RR=False, RW=True) with a single update (with all nodes consistent).

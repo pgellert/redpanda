@@ -40,26 +40,41 @@ using resp_resource_t = incremental_alter_configs_resource_response;
 // Legacy function, bug prone for multiple property updates, i.e
 // alter-config --set redpanda.remote.read=true --set
 // redpanda.remote.write=false
+
+// This makes the parsing "more correct" but it still has bugs, eg. it still
+// can't handle both enable- and drop-type updates at the same time:
+//     'redpanda.remote.read': 'false'
+//     'redpanda.remote.write': 'true'
+// Also, similar changes would be needed in the alter_configs_handler
+
 static void parse_and_set_shadow_indexing_mode(
   cluster::property_update<std::optional<model::shadow_indexing_mode>>& simode,
   const std::optional<ss::sstring>& value,
   config_resource_operation op,
-  model::shadow_indexing_mode enabled_value) {
+  model::shadow_indexing_mode enabled_value,
+  model::shadow_indexing_mode default_value) {
     switch (op) {
-    case config_resource_operation::remove:
-        simode.op = cluster::incremental_update_operation::remove;
-        simode.value = model::negate_shadow_indexing_flag(enabled_value);
-        break;
-    case config_resource_operation::set:
+    case config_resource_operation::remove: {
         simode.op = cluster::incremental_update_operation::set;
-        simode.value
+        simode.value = simode.value ? model::add_shadow_indexing_flag(
+                                        *simode.value, default_value)
+                                    : default_value;
+        break;
+    }
+    case config_resource_operation::set: {
+        simode.op = cluster::incremental_update_operation::set;
+        auto delta
           = string_switch<model::shadow_indexing_mode>(*value)
               .match("no", model::negate_shadow_indexing_flag(enabled_value))
               .match("false", model::negate_shadow_indexing_flag(enabled_value))
               .match("yes", enabled_value)
               .match("true", enabled_value)
               .default_match(model::shadow_indexing_mode::disabled);
+        simode.value = simode.value
+                         ? model::add_shadow_indexing_flag(*simode.value, delta)
+                         : delta;
         break;
+    }
     case config_resource_operation::append:
     case config_resource_operation::subtract:
         break;
@@ -207,7 +222,11 @@ create_topic_properties_update(
                       update.properties.get_shadow_indexing(),
                       cfg.value,
                       op,
-                      model::shadow_indexing_mode::fetch);
+                      model::shadow_indexing_mode::fetch,
+                      config::shard_local_cfg()
+                          .cloud_storage_enable_remote_read()
+                        ? model::shadow_indexing_mode::fetch
+                        : model::shadow_indexing_mode::drop_fetch);
                 }
 
                 parse_and_set_bool(
@@ -225,8 +244,15 @@ create_topic_properties_update(
                       update.properties.get_shadow_indexing(),
                       cfg.value,
                       op,
-                      model::shadow_indexing_mode::archival);
+                      model::shadow_indexing_mode::archival,
+                      config::shard_local_cfg()
+                          .cloud_storage_enable_remote_read()
+                        ? model::shadow_indexing_mode::archival
+                        : model::shadow_indexing_mode::drop_archival);
                 }
+
+                // TODO: implement the feature switch here instead with a
+                // feature flag
 
                 parse_and_set_bool(
                   tp_ns,
@@ -361,6 +387,8 @@ create_topic_properties_update(
           error_code::invalid_config,
           fmt::format("invalid topic property: {}", cfg.name));
     }
+
+    vlog(klog.warn, "Incremental alter topic config update: {}", update);
 
     return update;
 }
