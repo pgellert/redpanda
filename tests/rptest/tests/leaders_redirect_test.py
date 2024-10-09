@@ -106,39 +106,33 @@ class LeadersRedirectTest(RedpandaTest):
         '''
         path = f"security/users/cc-baxter"
 
-        def make_new_address(node, port, sub=""):
-            return dict(address=f"{sub}{node.name}", port=port)
-
-        altered_cfgs = []
         base_port = 10091
-        for i in range(0, len(self.redpanda.nodes)):
+        for i in range(len(self.redpanda.nodes)):
             node = self.redpanda.nodes[i]
             port = base_port + i
-            self.redpanda.stop_node(node)
-            altered_cfgs.append(
-                dict(
-                    kafka_api=make_new_address(node, port),
-                    advertised_kafka_api=make_new_address(
-                        node, port, subdomain),
-                ))
-
-        for i in range(0, len(self.redpanda.nodes)):
-            node = self.redpanda.nodes[i]
-            self.redpanda.start_node(node, altered_cfgs[i])
+            altered_cfgs = dict(
+                kafka_api=dict(address=f"{node.name}", port=port),
+                advertised_kafka_api=dict(address=f"{subdomain}{node.name}",
+                                          port=port),
+            )
+            self.redpanda.restart_nodes(node, altered_cfgs)
 
         wait_until(lambda: self.redpanda.healthy(),
                    timeout_sec=30,
                    backoff_sec=2)
 
+        leader = self.admin.await_stable_leader(topic="controller",
+                                                partition=0,
+                                                namespace="redpanda",
+                                                timeout_s=30,
+                                                backoff_s=1)
+
         for node in self.redpanda.nodes:
-            leader = self.admin.await_stable_leader(topic="controller",
-                                                    partition=0,
-                                                    namespace="redpanda",
-                                                    timeout_s=30,
-                                                    backoff_s=1)
-            if self.redpanda.idx(node) != leader:
-                self.logger.debug(
-                    f"leader: {leader}, dest: {self.redpanda.idx(node)}")
-                url = self.admin._url(node, path)
-                r = self.make_request(url, 'DELETE')
-                self.check_redirect(r, leader, subdomain=subdomain)
+            if self.redpanda.idx(node) == leader:
+                continue
+
+            self.logger.debug(
+                f"leader: {leader}, dest: {self.redpanda.idx(node)}")
+            url = self.admin._url(node, path)
+            r = self.make_request(url, 'DELETE')
+            self.check_redirect(r, leader, subdomain=subdomain)
