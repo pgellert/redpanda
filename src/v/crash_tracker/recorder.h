@@ -12,6 +12,7 @@
 #pragma once
 
 #include "base/seastarx.h"
+#include "crash_tracker/prepared_writer.h"
 #include "crash_tracker/types.h"
 
 namespace crash_tracker {
@@ -41,6 +42,14 @@ public:
 private:
     recorder() = default;
     ~recorder() = default;
+
+    /// The writer has shared state, so accessing it from multiple threads
+    /// is guarded by this lock. We are using the async-signal safe
+    /// ss::util::spinlock instead of more efficient locking mechanisms like the
+    /// seastar primitives or std::mutex to ensure that we can safely use the
+    /// lock in a singal handler context.
+    ss::util::spinlock _writer_lock;
+    prepared_writer _writer;
 
     friend recorder& get_recorder();
 };
