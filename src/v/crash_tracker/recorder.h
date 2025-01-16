@@ -12,6 +12,7 @@
 #pragma once
 
 #include "base/seastarx.h"
+#include "crash_tracker/prepared_writer.h"
 #include "crash_tracker/types.h"
 
 namespace crash_tracker {
@@ -41,6 +42,11 @@ public:
 private:
     recorder() = default;
     ~recorder() = default;
+
+    /// The writer has shared state, so accessing it from multiple threads
+    /// is guarded by this lock
+    ss::util::spinlock _writer_lock;
+    prepared_writer _writer;
 
     friend recorder& get_recorder();
 };
