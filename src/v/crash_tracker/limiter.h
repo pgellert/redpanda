@@ -38,7 +38,7 @@ public:
     ss::future<> record_clean_shutdown() const;
 
 private:
-    const recorder& _recorder [[maybe_unused]];
+    const recorder& _recorder;
 };
 
 namespace impl {

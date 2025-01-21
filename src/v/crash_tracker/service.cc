@@ -22,8 +22,8 @@ service::service() noexcept
   : _limiter(get_recorder()) {}
 
 ss::future<> service::start(ss::abort_source& as) {
-    co_await _limiter.check_for_crash_loop(as);
     co_await get_recorder().start();
+    co_await _limiter.check_for_crash_loop(as);
 }
 
 ss::future<> service::stop() {

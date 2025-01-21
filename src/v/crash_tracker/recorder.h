@@ -35,7 +35,7 @@ public:
     /// Async-signal safe
     void record_crash_sighandler(int signo);
 
-    void record_crash_exception(std::exception_ptr eptr);
+    ss::future<> record_crash_exception(std::exception_ptr eptr);
 
     ss::future<std::vector<recorded_crash>> get_recorded_crashes() const;
 

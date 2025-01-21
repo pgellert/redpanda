@@ -43,7 +43,8 @@ class CrashLoopChecksTest(RedpandaTest):
                 "crash_loop_limit": CrashLoopChecksTest.CRASH_LOOP_LIMIT,
                 "developer_mode": False
             },
-            log_config=LoggingConfig('info', logger_levels={'main': 'debug'}),
+            log_config=LoggingConfig('info',
+                                     logger_levels={'crash_tracker': 'debug'}),
         )
 
     def remove_crash_loop_tracker_file(self, broker):

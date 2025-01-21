@@ -520,8 +520,9 @@ int application::run(int ac, char** av) {
                   _log.error,
                   "Failure during startup: {}",
                   std::current_exception());
-                crash_tracker::get_recorder().record_crash_exception(
-                  std::current_exception());
+                crash_tracker::get_recorder()
+                  .record_crash_exception(std::current_exception())
+                  .get();
                 return 1;
             }
             return 0;

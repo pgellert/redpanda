@@ -107,21 +107,22 @@ void print_skipping() {
 
 } // namespace
 
-void recorder::record_crash_exception(std::exception_ptr eptr) {
+ss::future<> recorder::record_crash_exception(std::exception_ptr eptr) {
+    std::unique_lock<ss::util::spinlock> g(_writer_lock, std::try_to_lock);
     if (is_crash_loop_limit_reached(eptr)) {
         // We specifically do not want to record crash_loop_limit_reached errors
         // as crashes because they are not informative and would build up
         // garbage on disk and would force to expire earlier useful crash logs.
-        return;
+        co_await _writer.release();
+        co_return;
     }
 
     // If the recorder is already locked, give up to prevent possible deadlocks.
     // For example, an assertion failure while recording a segfault may lead to
     // a deadlock if we unconditionally waited for the lock here.
-    std::unique_lock<ss::util::spinlock> g(_writer_lock, std::try_to_lock);
     if (!g.owns_lock() || !_writer.initialized()) {
         print_skipping();
-        return;
+        co_return;
     }
 
     auto& cd = _writer.fill();
