@@ -48,7 +48,7 @@ private:
     /// ss::util::spinlock instead of more efficient locking mechanisms like the
     /// seastar primitives or std::mutex to ensure that we can safely use the
     /// lock in a singal handler context.
-    ss::util::spinlock _writer_lock;
+    std::atomic<bool> _writer_guard = {false};
     prepared_writer _writer;
 
     friend recorder& get_recorder();

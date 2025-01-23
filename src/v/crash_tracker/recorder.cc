@@ -20,6 +20,7 @@
 #include <seastar/core/file.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sleep.hh>
+#include <seastar/util/defer.hh>
 #include <seastar/util/print_safe.hh>
 
 #include <chrono>
@@ -72,7 +73,14 @@ ss::future<> recorder::start() {
           "Failed to create a unique crash recorder file");
     }
 
-    std::lock_guard<ss::util::spinlock> g(_writer_lock);
+    // Note: _writer_guard ensures the visibility of changes to the
+    // buffers/state of _writer are visible across threads
+    vassert(
+      !_writer_guard.exchange(true, std::memory_order_acquire),
+      "start() runs before any other call, so _writer_guard must have been "
+      "false");
+    auto defer = ss::defer(
+      [&]() { _writer_guard.exchange(false, std::memory_order_release); });
     co_await _writer.initialize(*crash_file_name);
 }
 
@@ -113,11 +121,20 @@ void recorder::record_crash_exception(std::exception_ptr eptr) {
         return;
     }
 
-    // If the recorder is already locked, give up to prevent possible deadlocks.
-    // For example, an assertion failure while recording a segfault may lead to
-    // a deadlock if we unconditionally waited for the lock here.
-    std::unique_lock<ss::util::spinlock> g(_writer_lock, std::try_to_lock);
-    if (!g.owns_lock() || !_writer.initialized()) {
+    bool before = false;
+    if (!_writer_guard.compare_exchange_strong(
+          before, true, std::memory_order_acquire)) {
+        // If the _writer_guard is true, it must have been because another crash
+        // is already being recorded. In this case, give up and skip recording
+        // this crash. Do not spin trying to set this guard to avoid deadlock.
+        print_skipping();
+        return;
+    }
+    auto defer = ss::defer(
+      [&]() { _writer_guard.exchange(false, std::memory_order_release); });
+    if (!_writer.initialized()) {
+        // The writer must have already been consumed, so do not record a crash
+        // in this case.
         print_skipping();
         return;
     }
@@ -138,7 +155,10 @@ void recorder::record_crash_exception(std::exception_ptr eptr) {
 }
 
 ss::future<> recorder::stop() {
-    std::lock_guard<ss::util::spinlock> g(_writer_lock);
+    vassert(
+      !_writer_guard.exchange(true, std::memory_order_acquire),
+      "stop() runs only after start() or completed record_crash_exception() so "
+      "noone could be holding the lock here.");
     co_await _writer.release();
 }
 
