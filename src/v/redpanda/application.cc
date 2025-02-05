@@ -9,6 +9,7 @@
 
 #include "redpanda/application.h"
 
+#include "absl/debugging/symbolize.h"
 #include "base/vlog.h"
 #include "cli_parser.h"
 #include "cloud_io/remote.h"
@@ -438,6 +439,8 @@ int application::run(int ac, char** av) {
       po::value<std::vector<config::node_id_override>>()->multitoken(),
       "Override node UUID and ID iff current UUID matches "
       "- usage: <current UUID>:<new UUID>:<new ID>");
+
+    absl::InitializeSymbolizer(av[0]);
 
     // Validate command line args using options registered by the app and
     // seastar. Keep the resulting variables in a temporary map so they don't

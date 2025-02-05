@@ -23,7 +23,12 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/util/print_safe.hh>
 
+#include <absl/debugging/failure_signal_handler.h>
+#include <absl/debugging/stacktrace.h>
+#include <absl/debugging/symbolize.h>
+
 #include <chrono>
+#include <cxxabi.h>
 #include <filesystem>
 #include <string_view>
 
@@ -110,6 +115,21 @@ void record_backtrace(crash_description& cd) {
             return; // Prevent buffer overflow
         }
 
+        char symbol[1024];
+        if (absl::Symbolize(f.addr, symbol, sizeof(symbol))) {
+            int status = 0;
+            std::unique_ptr<char, void (*)(void*)> demangled(
+              abi::__cxa_demangle(symbol, nullptr, nullptr, &status),
+              std::free);
+            if (status == 0 && demangled) {
+                fmt::print(std::cerr, "{}: {}\n", pos, demangled.get());
+            } else {
+                fmt::print(std::cerr, "{}: {}\n", pos, symbol);
+            }
+        } else {
+            fmt::print(std::cerr, "{}: {}\n", pos, f.addr);
+        }
+
         const bool first = pos == 0;
         auto result = fmt::format_to_n(
           cd.stacktrace.begin() + pos,
@@ -151,6 +171,33 @@ void recorder::record_crash_sighandler(recorded_signo signo) {
     auto& cd = *cd_opt;
 
     record_backtrace(cd);
+
+    // constexpr int kMaxDepth = 32;
+    // void* stack[kMaxDepth];
+    // int sizes[kMaxDepth];
+    // int depth = absl::GetStackFramesWithContext(
+    //   stack, sizes, kMaxDepth, 1, nullptr, nullptr);
+
+    // for (int i = 0; i < depth; ++i) {
+    //     char symbol[1024];
+    //     if (absl::Symbolize(stack[i], symbol, sizeof(symbol))) {
+    //         int status = 0;
+    //         std::unique_ptr<char, void (*)(void*)> demangled(
+    //           abi::__cxa_demangle(symbol, nullptr, nullptr, &status),
+    //           std::free);
+    //         if (status == 0 && demangled) {
+    //             fmt::print(std::cerr, "{}: {}\n", i, demangled.get());
+    //         } else {
+    //             fmt::print(std::cerr, "{}: {}\n", i, symbol);
+    //         }
+    //     } else {
+    //         fmt::print(std::cerr, "{}: {}\n", i, stack[i]);
+    //     }
+    // }
+
+    // if (depth == 0) {
+    //     fmt::print(std::cerr, "Failed to output stack frams\n");
+    // }
 
     switch (signo) {
     case recorded_signo::sigsegv: {

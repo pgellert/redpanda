@@ -101,6 +101,8 @@ ss::future<>
 feature_manager::start(std::vector<model::node_id>&& cluster_founder_nodes) {
     vlog(clusterlog.info, "Starting...");
 
+    vassert(false, "Something went wrong");
+
     // Register for node health change notifications
     _health_notify_handle = _hm_backend.local().register_node_callback(
       [this](
