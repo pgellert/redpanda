@@ -64,6 +64,29 @@ TEST_F(RecorderTest, TestFileCleanup) {
     ASSERT_EQ(crashes.size(), recorder::crash_files_to_keep);
 }
 
+TEST_F(RecorderTest, TestUploadMarkers) {
+    constexpr auto n_reports = 5;
+
+    // Generate some crash reports
+    const auto test_eptr = std::make_exception_ptr(std::runtime_error{""});
+    for (size_t i = 0; i < n_reports; i++) {
+        auto rec = get_test_recorder();
+        rec.start().get();
+        rec.record_crash_exception(test_eptr);
+    }
+
+    auto rec = get_test_recorder();
+    rec.start().get();
+
+    // Verify upload markers work as expected
+    auto crashes = rec.get_recorded_crashes().get();
+    for (auto& report : crashes) {
+        ASSERT_EQ(report.is_uploaded().get(), false);
+        report.mark_uploaded().get();
+        ASSERT_EQ(report.is_uploaded().get(), true);
+    }
+}
+
 class ParametrizedRecorderTest
   : public testing::TestWithParam<recorder::recorded_signo> {
 public:

@@ -34,6 +34,15 @@ namespace crash_tracker {
 
 static constexpr std::string_view crash_report_suffix = ".crash";
 
+namespace {
+
+std::filesystem::path
+to_upload_marker_path(const std::filesystem::path& crash_report_path) {
+    return crash_report_path.string() + recorder::upload_marker_suffix;
+}
+
+} // namespace
+
 recorder& get_recorder() {
     static recorder inst;
     return inst;
@@ -212,6 +221,19 @@ void recorder::record_crash_exception(std::exception_ptr eptr) {
 
     _writer.write();
 }
+
+ss::future<bool> recorder::recorded_crash::is_uploaded() const {
+    co_return co_await ss::file_exists(
+      to_upload_marker_path(file_path).string());
+}
+
+ss::future<> recorder::recorded_crash::mark_uploaded() const {
+    // Create an empty upload marker
+    const auto marker_path = to_upload_marker_path(file_path).string();
+    auto f = co_await ss::open_file_dma(marker_path, ss::open_flags::create);
+    co_await f.close();
+    co_return;
+};
 
 std::chrono::system_clock::time_point
 recorder::recorded_crash::timestamp() const {

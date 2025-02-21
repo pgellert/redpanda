@@ -27,6 +27,7 @@ namespace crash_tracker {
 class recorder {
 public:
     static constexpr auto crash_files_to_keep = 50;
+    static constexpr std::string upload_marker_suffix = ".uploaded";
 
     struct recorded_crash {
         std::filesystem::path file_path;
