@@ -41,6 +41,13 @@ to_upload_marker_path(const std::filesystem::path& crash_report_path) {
     return crash_report_path.string() + recorder::upload_marker_suffix;
 }
 
+std::filesystem::path
+to_crash_report_path(const std::filesystem::path& upload_marker_path) {
+    auto full_path = upload_marker_path.string();
+    return full_path.substr(
+      0, full_path.size() - recorder::upload_marker_suffix.size());
+}
+
 } // namespace
 
 recorder& get_recorder() {
@@ -105,9 +112,41 @@ ss::future<> recorder::remove_old_crashfiles() const {
     co_return;
 }
 
+namespace {
+ss::future<> upload_marker_walker_fn(
+  std::filesystem::path basedir, ss::directory_entry entry) {
+    const auto path = (basedir / std::string_view{entry.name}).string();
+    if (!path.ends_with(recorder::upload_marker_suffix)) {
+        // Not an upload marker
+        co_return;
+    }
+
+    auto dangling = !co_await ss::file_exists(
+      to_crash_report_path(std::filesystem::path{path}).string());
+    if (dangling) {
+        vlog(
+          ctlog.trace, "Removing dangling crash report upload marker {}", path);
+        co_await ss::remove_file(path);
+    }
+}
+} // namespace
+
+ss::future<> recorder::remove_dangling_upload_markers() const {
+    auto basedir = config::node().crash_report_dir_path();
+    if (!co_await ss::file_exists(basedir.string())) {
+        co_return;
+    }
+
+    co_await directory_walker::walk(
+      basedir.string(), [basedir](ss::directory_entry entry) -> ss::future<> {
+          return upload_marker_walker_fn(basedir, std::move(entry));
+      });
+}
+
 ss::future<> recorder::start() {
     co_await ensure_crashdir_exists();
     co_await remove_old_crashfiles();
+    co_await remove_dangling_upload_markers();
     co_await _writer.initialize(co_await generate_crashfile_name());
 }
 

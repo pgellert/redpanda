@@ -66,6 +66,7 @@ private:
     ss::future<> ensure_crashdir_exists() const;
     ss::future<std::filesystem::path> generate_crashfile_name() const;
     ss::future<> remove_old_crashfiles() const;
+    ss::future<> remove_dangling_upload_markers() const;
 
     prepared_writer _writer;
 
