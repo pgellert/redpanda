@@ -187,7 +187,13 @@ ss::future<> metrics_reporter::start() {
 ss::future<> metrics_reporter::stop() {
     vlog(clusterlog.info, "Stopping Metrics Reporter...");
     _tick_timer.cancel();
+    _cluster_info_initialized_cvar.broken();
     co_await _gate.close();
+}
+
+ss::future<> metrics_reporter::wait_cluster_info_initialized() {
+    return _cluster_info_initialized_cvar.wait(
+      [this] { return _cluster_info.is_initialized(); });
 }
 
 void metrics_reporter::report_metrics() {
@@ -398,6 +404,7 @@ ss::future<> metrics_reporter::try_initialize_cluster_info() {
     _cluster_info.uuid = fmt::format("{}", uuid_gen());
     vlog(
       clusterlog.info, "Generated cluster metrics ID {}", _cluster_info.uuid);
+    _cluster_info_initialized_cvar.signal();
 }
 
 /**
