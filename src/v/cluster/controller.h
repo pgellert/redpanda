@@ -18,6 +18,8 @@
 #include "cluster/node_status_table.h"
 #include "cluster/scheduling/leader_balancer.h"
 #include "cluster/types.h"
+#include "crash_reporter.h"
+#include "crash_tracker/recorder.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "raft/fwd.h"
@@ -55,7 +57,8 @@ public:
       ss::sharded<cloud_storage::remote>&,
       ss::sharded<cloud_storage::cache>&,
       ss::sharded<node_status_table>&,
-      ss::sharded<cluster::metadata_cache>&);
+      ss::sharded<cluster::metadata_cache>&,
+      crash_tracker::recorder&);
 
     ~controller();
 
@@ -316,6 +319,7 @@ private:
     ss::sharded<health_monitor_backend> _hm_backend;   // single instance
     ss::sharded<health_manager> _health_manager;
     ss::sharded<metrics_reporter> _metrics_reporter;
+    ss::sharded<crash_reporter> _crash_reporter;          // single instance
     ss::sharded<feature_manager> _feature_manager;        // single instance
     ss::sharded<feature_backend> _feature_backend;        // instance per core
     ss::sharded<features::feature_table>& _feature_table; // instance per core
@@ -338,6 +342,7 @@ private:
     ss::sharded<cloud_storage::cache>& _cloud_cache;
     ss::sharded<node_status_table>& _node_status_table;
     ss::sharded<cluster::metadata_cache>& _metadata_cache;
+    crash_tracker::recorder& _crash_recorder;
     controller_probe _probe;
     ss::sharded<bootstrap_backend> _bootstrap_backend; // single instance
 

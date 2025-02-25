@@ -110,7 +110,8 @@ controller::controller(
   ss::sharded<cloud_storage::remote>& cloud_storage_api,
   ss::sharded<cloud_storage::cache>& cloud_cache,
   ss::sharded<node_status_table>& node_status_table,
-  ss::sharded<cluster::metadata_cache>& metadata_cache)
+  ss::sharded<cluster::metadata_cache>& metadata_cache,
+  crash_tracker::recorder& crash_recorder)
   : _config_preload(std::move(config_preload))
   , _connections(ccache)
   , _partition_manager(pm)
@@ -129,6 +130,7 @@ controller::controller(
   , _cloud_cache(cloud_cache)
   , _node_status_table(node_status_table)
   , _metadata_cache(metadata_cache)
+  , _crash_recorder(crash_recorder)
   , _probe(*this) {}
 
 // Explicit destructor in the .cc file just to avoid bloating the header with
@@ -718,6 +720,15 @@ ss::future<> controller::start(
       std::ref(_as));
     co_await _metrics_reporter.invoke_on(0, &metrics_reporter::start);
 
+    co_await _crash_reporter.start_single(
+      std::ref(_storage.local().kvs()),
+      std::ref(_stm),
+      std::ref(_as),
+      std::ref(_metrics_reporter),
+      std::ref(_crash_recorder));
+    co_await _crash_reporter.invoke_on(
+      crash_reporter::shard, &crash_reporter::start);
+
     co_await _partition_balancer.start_single(
       _raft0,
       std::ref(_stm),
@@ -863,6 +874,7 @@ ss::future<> controller::stop() {
     co_await _recovery_manager.stop();
     co_await _recovery_table.stop();
     co_await _partition_balancer.stop();
+    co_await _crash_reporter.stop();
     co_await _metrics_reporter.stop();
     co_await _feature_manager.stop();
     co_await _hm_frontend.stop();
