@@ -3232,6 +3232,21 @@ struct metrics_reporter_cluster_info
     auto serde_fields() { return std::tie(uuid, creation_timestamp); }
 };
 
+struct crash_reporter_rate_limiting_metadata
+  : serde::envelope<
+      crash_reporter_rate_limiting_metadata,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    model::timestamp last_upload_time;
+
+    // friend bool operator==(
+    //   const crash_reporter_rate_limiting_metadata&,
+    //   const crash_reporter_rate_limiting_metadata&)
+    //   = default;
+
+    auto serde_fields() { return std::tie(last_upload_time); }
+};
+
 struct controller_committed_offset_request
   : serde::envelope<
       controller_committed_offset_request,

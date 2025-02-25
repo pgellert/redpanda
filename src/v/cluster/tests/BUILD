@@ -552,6 +552,23 @@ redpanda_cc_btest(
     ],
 )
 
+redpanda_cc_btest(
+    name = "crash_reporter_test",
+    timeout = "short",
+    srcs = [
+        "crash_reporter_test.cc",
+    ],
+    tags = ["exclusive"],
+    deps = [
+        "//src/v/cluster",
+        "//src/v/storage/tests:kvstore_fixture",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
 redpanda_cc_bench(
     name = "partition_allocator_b_rpbench",
     srcs = ["allocation_bench.cc"],
