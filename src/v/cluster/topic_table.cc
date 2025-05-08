@@ -43,7 +43,7 @@ topic_table::topic_table(
 ss::future<std::error_code>
 topic_table::apply(create_topic_cmd cmd, model::offset offset) {
     _last_applied_revision_id = model::revision_id(offset);
-    if (_topics.contains(cmd.key)) {
+    if (_topics.by_tp().contains(cmd.key)) {
         // topic already exists
         co_return errc::topic_already_exists;
     }
@@ -112,10 +112,7 @@ topic_table::apply(create_topic_cmd cmd, model::offset offset) {
           topic_table_ntp_delta_type::added);
     }
 
-    _topics.insert({
-      cmd.key,
-      std::move(md),
-    });
+    _topics.emplace(cmd.key, std::move(md));
     _topics_map_revision++;
     _probe.handle_topic_creation(std::move(cmd.key));
 
@@ -142,8 +139,8 @@ ss::future<std::error_code> topic_table::do_local_delete(
            != data_migrations::migrated_resource_state::non_restricted) {
         co_return errc::resource_is_being_migrated;
     }
-    auto tp = _topics.find(nt);
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp().find(nt);
+    if (tp == _topics.by_tp().end()) {
         co_return errc::topic_not_exists;
     }
 
@@ -181,8 +178,8 @@ topic_table::apply(topic_lifecycle_transition soft_del, model::offset offset) {
 
     switch (soft_del.mode) {
     case topic_lifecycle_transition_mode::pending_gc: {
-        auto tp = _topics.find(soft_del.topic.nt);
-        if (tp == _topics.end()) {
+        auto tp = _topics.by_tp().find(soft_del.topic.nt);
+        if (tp == _topics.by_tp().end()) {
             return ss::make_ready_future<std::error_code>(
               errc::topic_not_exists);
         }
@@ -317,8 +314,8 @@ topic_table::apply(create_partition_cmd cmd, model::offset offset) {
         co_return errc::resource_is_being_migrated;
     }
     _last_applied_revision_id = model::revision_id(offset);
-    auto tp = _topics.find(cmd.key);
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp_mutable().find(cmd.key);
+    if (tp == _topics.by_tp_mutable().end()) {
         co_return errc::topic_not_exists;
     }
 
@@ -376,8 +373,9 @@ ss::future<std::error_code> topic_table::do_apply(
   update_partition_replicas_cmd_data cmd_data, model::offset o) {
     _last_applied_revision_id = model::revision_id(o);
 
-    auto tp = _topics.find(model::topic_namespace_view(cmd_data.ntp));
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp_mutable().find(
+      model::topic_namespace_view(cmd_data.ntp));
+    if (tp == _topics.by_tp_mutable().end()) {
         co_return errc::topic_not_exists;
     }
 
@@ -435,8 +433,9 @@ static replicas_revision_map update_replicas_revisions(
 ss::future<std::error_code>
 topic_table::apply(finish_moving_partition_replicas_cmd cmd, model::offset o) {
     _last_applied_revision_id = model::revision_id(o);
-    auto tp = _topics.find(model::topic_namespace_view(cmd.key));
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp_mutable().find(
+      model::topic_namespace_view(cmd.key));
+    if (tp == _topics.by_tp_mutable().end()) {
         co_return errc::topic_not_exists;
     }
 
@@ -501,8 +500,9 @@ topic_table::apply(cancel_moving_partition_replicas_cmd cmd, model::offset o) {
     /**
      * Validate partition exists
      */
-    auto tp = _topics.find(model::topic_namespace_view(cmd.key));
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp_mutable().find(
+      model::topic_namespace_view(cmd.key));
+    if (tp == _topics.by_tp_mutable().end()) {
         co_return errc::topic_not_exists;
     }
 
@@ -572,8 +572,8 @@ topic_table::apply(revert_cancel_partition_move_cmd cmd, model::offset o) {
     /**
      * Validate partition exists
      */
-    auto tp = _topics.find(model::topic_namespace_view(ntp));
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp_mutable().find(model::topic_namespace_view(ntp));
+    if (tp == _topics.by_tp_mutable().end()) {
         co_return errc::topic_not_exists;
     }
 
@@ -636,8 +636,9 @@ topic_table::apply(revert_cancel_partition_move_cmd cmd, model::offset o) {
 ss::future<std::error_code>
 topic_table::apply(move_topic_replicas_cmd cmd, model::offset o) {
     _last_applied_revision_id = model::revision_id(o);
-    auto tp = _topics.find(model::topic_namespace_view(cmd.key));
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp_mutable().find(
+      model::topic_namespace_view(cmd.key));
+    if (tp == _topics.by_tp_mutable().end()) {
         co_return errc::topic_not_exists;
     }
 
@@ -705,8 +706,9 @@ ss::future<std::error_code>
 topic_table::apply(force_partition_reconfiguration_cmd cmd, model::offset o) {
     _last_applied_revision_id = model::revision_id(o);
     // Check the topic exists.
-    auto tp = _topics.find(model::topic_namespace_view(cmd.key));
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp_mutable().find(
+      model::topic_namespace_view(cmd.key));
+    if (tp == _topics.by_tp_mutable().end()) {
         co_return errc::topic_not_exists;
     }
 
@@ -747,8 +749,8 @@ ss::future<std::error_code>
 topic_table::apply(set_topic_partitions_disabled_cmd cmd, model::offset o) {
     _last_applied_revision_id = model::revision_id(o);
 
-    auto topic_it = _topics.find(cmd.value.ns_tp);
-    if (topic_it == _topics.end()) {
+    auto topic_it = _topics.by_tp().find(cmd.value.ns_tp);
+    if (topic_it == _topics.by_tp().end()) {
         co_return errc::topic_not_exists;
     }
     const auto& assignments = topic_it->second.get_assignments();
@@ -1164,8 +1166,8 @@ ss::future<std::error_code>
 topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     _last_applied_revision_id = model::revision_id(o);
     auto key = cmd.key;
-    auto tp = _topics.find(key);
-    if (tp == _topics.end()) {
+    auto tp = _topics.by_tp_mutable().find(key);
+    if (tp == _topics.by_tp_mutable().end()) {
         co_return make_error_code(errc::topic_not_exists);
     }
     const auto migration_state = _migrated_resources.get_topic_state(key);
@@ -1176,12 +1178,13 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
     }
 
     if (cmd.value.topic_id.op == incremental_update_operation::set) {
+        auto& tp_id = cmd.value.topic_id.value;
         vlog(
           clusterlog.trace,
           "Assigning topic id {} to topic {}",
-          cmd.value.topic_id.value,
+          tp_id,
           cmd.key);
-        tp->second.get_configuration().tp_id = cmd.value.topic_id.value;
+        _topics.assign_id(cmd.key, tp_id);
     }
 
     auto updated_properties = update_topic_properties(
@@ -1229,7 +1232,7 @@ topic_table::apply(update_topic_properties_cmd cmd, model::offset o) {
 ss::future<>
 topic_table::fill_snapshot(controller_snapshot& controller_snap) const {
     auto& snap = controller_snap.topics;
-    for (const auto& [ns_tp, md_item] : _topics) {
+    for (const auto& [ns_tp, md_item] : _topics.by_tp()) {
         chunked_hash_map<
           model::partition_id,
           controller_snapshot_parts::topics_t::partition_t>
@@ -1550,7 +1553,8 @@ ss::future<> topic_table::apply_snapshot(
 
     // Go over the old topics set, delete those that are not present in
     // the snapshot and reconcile those that are.
-    for (auto old_it = _topics.begin(); old_it != _topics.end();) {
+    for (auto old_it = _topics.by_tp_mutable().begin();
+         old_it != _topics.by_tp_mutable().end();) {
         const auto& ns_tp = old_it->first;
         auto& md_item = old_it->second;
 
@@ -1562,7 +1566,8 @@ ss::future<> topic_table::apply_snapshot(
               != md_item.metadata.get_revision()) {
                 // The topic was re-created, delete and add it anew.
                 co_await applier.delete_topic(ns_tp, md_item);
-                md_item = co_await applier.create_topic(ns_tp, topic_snapshot);
+                _topics.emplace(
+                  ns_tp, co_await applier.create_topic(ns_tp, topic_snapshot));
                 _topics_map_revision++;
             } else {
                 // The topic was present in the previous set, now we need to
@@ -1575,6 +1580,7 @@ ss::future<> topic_table::apply_snapshot(
                     != topic_snapshot.metadata.configuration.properties;
 
                 md_item.metadata.get_fields() = topic_snapshot.metadata;
+                _topics.assign_id(ns_tp, md_item.get_configuration().tp_id);
 
                 topic_disabled_partitions_set old_disabled_set;
                 if (topic_snapshot.disabled_set) {
@@ -1651,7 +1657,7 @@ ss::future<> topic_table::apply_snapshot(
 
     // Next, go over the new topics set and add state for new topics.
     for (const auto& [ns_tp, topic] : snap.topics) {
-        if (!_topics.contains(ns_tp)) {
+        if (!_topics.by_tp().contains(ns_tp)) {
             _topics.emplace(ns_tp, co_await applier.create_topic(ns_tp, topic));
             _topics_map_revision++;
         }
@@ -1670,7 +1676,7 @@ ss::future<> topic_table::apply_snapshot(
     // 2. re-calculate derived state
 
     _partition_count = 0;
-    for (const auto& [ns_tp, md_item] : _topics) {
+    for (const auto& [ns_tp, md_item] : _topics.by_tp()) {
         _partition_count += md_item.metadata.get_assignments().size();
         co_await ss::coroutine::maybe_yield();
     }
@@ -1727,24 +1733,24 @@ ss::future<> topic_table::notify_waiters() {
 std::vector<model::topic_namespace> topic_table::all_topics() const {
     std::vector<model::topic_namespace> topics;
     topics.reserve(topics.size());
-    for (auto& [tp_ns, _] : _topics) {
+    for (auto& [tp_ns, _] : _topics.by_tp()) {
         topics.push_back(tp_ns);
     }
     return topics;
 }
 
-size_t topic_table::all_topics_count() const { return _topics.size(); }
+size_t topic_table::all_topics_count() const { return _topics.by_tp().size(); }
 
 std::optional<topic_metadata>
 topic_table::get_topic_metadata(model::topic_namespace_view tp) const {
-    if (auto it = _topics.find(tp); it != _topics.end()) {
+    if (auto it = _topics.by_tp().find(tp); it != _topics.by_tp().end()) {
         return it->second.metadata.copy();
     }
     return {};
 }
 std::optional<std::reference_wrapper<const topic_metadata>>
 topic_table::get_topic_metadata_ref(model::topic_namespace_view tp) const {
-    if (auto it = _topics.find(tp); it != _topics.end()) {
+    if (auto it = _topics.by_tp().find(tp); it != _topics.by_tp().end()) {
         return it->second.metadata;
     }
     return {};
@@ -1752,7 +1758,7 @@ topic_table::get_topic_metadata_ref(model::topic_namespace_view tp) const {
 
 std::optional<topic_configuration>
 topic_table::get_topic_cfg(model::topic_namespace_view tp) const {
-    if (auto it = _topics.find(tp); it != _topics.end()) {
+    if (auto it = _topics.by_tp().find(tp); it != _topics.by_tp().end()) {
         return it->second.get_configuration();
     }
     return {};
@@ -1760,7 +1766,7 @@ topic_table::get_topic_cfg(model::topic_namespace_view tp) const {
 
 std::optional<replication_factor> topic_table::get_topic_replication_factor(
   model::topic_namespace_view tp) const {
-    if (auto it = _topics.find(tp); it != _topics.end()) {
+    if (auto it = _topics.by_tp().find(tp); it != _topics.by_tp().end()) {
         return it->second.get_replication_factor();
     }
     return {};
@@ -1768,7 +1774,7 @@ std::optional<replication_factor> topic_table::get_topic_replication_factor(
 
 std::optional<assignments_set>
 topic_table::get_topic_assignments(model::topic_namespace_view tp) const {
-    if (auto it = _topics.find(tp); it != _topics.end()) {
+    if (auto it = _topics.by_tp().find(tp); it != _topics.by_tp().end()) {
         return it->second.get_assignments().copy();
     }
     return std::nullopt;
@@ -1776,20 +1782,20 @@ topic_table::get_topic_assignments(model::topic_namespace_view tp) const {
 
 std::optional<model::timestamp_type>
 topic_table::get_topic_timestamp_type(model::topic_namespace_view tp) const {
-    if (auto it = _topics.find(tp); it != _topics.end()) {
+    if (auto it = _topics.by_tp().find(tp); it != _topics.by_tp().end()) {
         return it->second.get_configuration().properties.timestamp_type;
     }
     return {};
 }
 
 const topic_table::underlying_t& topic_table::all_topics_metadata() const {
-    return _topics;
+    return _topics.by_tp();
 }
 
 std::optional<topic_table::partition_replicas_view>
 topic_table::get_replicas_view(const model::ntp& ntp) const {
-    auto topic_it = _topics.find(model::topic_namespace_view{ntp});
-    if (topic_it == _topics.end()) {
+    auto topic_it = _topics.by_tp().find(model::topic_namespace_view{ntp});
+    if (topic_it == _topics.by_tp().end()) {
         return std::nullopt;
     }
     auto as_it = topic_it->second.get_assignments().find(ntp.tp.partition);
@@ -1828,7 +1834,7 @@ void topic_table::check_topics_map_stable(model::revision_id start_rev) const {
 
 bool topic_table::contains(
   model::topic_namespace_view topic, model::partition_id pid) const {
-    if (auto it = _topics.find(topic); it != _topics.end()) {
+    if (auto it = _topics.by_tp().find(topic); it != _topics.by_tp().end()) {
         return it->second.get_assignments().contains(pid);
     }
     return false;
@@ -1848,8 +1854,8 @@ topic_table::topic_state topic_table::get_topic_state(
 
 std::optional<cluster::partition_assignment>
 topic_table::get_partition_assignment(const model::ntp& ntp) const {
-    auto it = _topics.find(model::topic_namespace_view(ntp));
-    if (it == _topics.end()) {
+    auto it = _topics.by_tp().find(model::topic_namespace_view(ntp));
+    if (it == _topics.by_tp().end()) {
         return {};
     }
 
@@ -1868,7 +1874,7 @@ bool topic_table::is_update_in_progress(const model::ntp& ntp) const {
 
 std::optional<model::initial_revision_id>
 topic_table::get_initial_revision(model::topic_namespace_view tp) const {
-    if (auto it = _topics.find(tp); it != _topics.end()) {
+    if (auto it = _topics.by_tp().find(tp); it != _topics.by_tp().end()) {
         return it->second.get_remote_revision().value_or(
           model::initial_revision_id(it->second.get_revision()()));
     }
@@ -2009,7 +2015,7 @@ size_t topic_table::get_node_partition_count(model::node_id id) const {
     size_t cnt = 0;
     // NOTE: if this loop will cause reactor stalls with large partition counts
     // we may consider making this method asynchronous
-    for (const auto& [_, tp_md] : _topics) {
+    for (const auto& [_, tp_md] : _topics.by_tp()) {
         cnt += std::count_if(
           tp_md.get_assignments().begin(),
           tp_md.get_assignments().end(),

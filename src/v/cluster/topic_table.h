@@ -17,6 +17,7 @@
 #include "cluster/topic_table_probe.h"
 #include "container/chunked_hash_map.h"
 #include "container/contiguous_range_map.h"
+#include "logger.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "utils/stable_iterator_adaptor.h"
@@ -251,6 +252,83 @@ public:
       model::topic_namespace_hash,
       model::topic_namespace_eq>;
 
+    using topic_id_mapping_t
+      = chunked_hash_map<model::topic_id, model::topic_namespace>;
+
+    // Wrapper around underlying_t that maintains a consistent mapping from
+    // topic id to topic name
+    class underlying_map {
+    public:
+        const auto& by_tp() const { return _by_tp; }
+
+        // Ensure that the invariants of underlying_map are not violated during
+        // mutation
+        // Prefer the mutable interface of underlying_map instead (emplace,
+        // erase, assign_id)
+        auto& by_tp_mutable() { return _by_tp; }
+
+        const auto& by_id() const { return _by_id; }
+
+        template<typename... Args>
+        auto emplace(Args&&... args) {
+            auto r = _by_tp.emplace(std::forward<Args>(args)...);
+            if (r.second) {
+                auto& tp_id = r.first->second.get_configuration().tp_id;
+                if (tp_id) {
+                    _by_id.insert_or_assign(*tp_id, r.first->first);
+                } else {
+                    // Should be unreachable once the topic_ids feature is
+                    // active and all topics have a topic id assigned
+                    vlog(
+                      clusterlog.debug,
+                      "Missing topic id while inserting topic: {}",
+                      r.first->first);
+                }
+            }
+            return r;
+        }
+
+        auto erase(underlying_t::const_iterator it) {
+            if (it != _by_tp.end()) {
+                auto& tp_id = it->second.get_configuration().tp_id;
+                if (tp_id) {
+                    _by_id.erase(*tp_id);
+                } else {
+                    // Should be unreachable once the topic_ids feature is
+                    // active and all topics have a topic id assigned
+                    vlog(
+                      clusterlog.debug,
+                      "Missing topic id while erasing topic: {}",
+                      it->first);
+                }
+            }
+            return _by_tp.erase(it);
+        }
+
+        void assign_id(
+          model::topic_namespace tp, std::optional<model::topic_id> tp_id) {
+            auto it = _by_tp.find(tp);
+            if (it != _by_tp.end()) {
+                it->second.get_configuration().tp_id = tp_id;
+                if (tp_id) {
+                    _by_id.emplace(*tp_id, tp);
+                }
+            }
+        }
+
+        std::optional<model::topic_namespace>
+        get_name(model::topic_id tp_id) const {
+            if (auto it = _by_id.find(tp_id); it != _by_id.end()) {
+                return it->second;
+            }
+            return std::nullopt;
+        }
+
+    private:
+        underlying_t _by_tp;
+        topic_id_mapping_t _by_id;
+    };
+
     using lifecycle_markers_t = absl::node_hash_map<
       nt_revision,
       nt_lifecycle_marker,
@@ -479,7 +557,7 @@ public:
     bool contains(model::topic_namespace_view, model::partition_id) const;
     /// Checks if it has given topic
     bool contains(model::topic_namespace_view tp) const {
-        return _topics.contains(tp);
+        return _topics.by_tp().contains(tp);
     }
     /// contains() check with stronger validation on the topic revision/offset.
     /// Just looking up in the cache can yield false negatives if the cache is
@@ -502,7 +580,7 @@ public:
     std::optional<partition_assignment>
     get_partition_assignment(const model::ntp&) const;
 
-    const underlying_t& topics_map() const { return _topics; }
+    const underlying_t& topics_map() const { return _topics.by_tp(); }
 
     bool is_update_in_progress(const model::ntp&) const;
 
@@ -622,14 +700,14 @@ public:
         return stable_iterator<
           underlying_t::const_iterator,
           model::revision_id>(
-          [this] { return _topics_map_revision; }, _topics.begin());
+          [this] { return _topics_map_revision; }, _topics.by_tp().begin());
     }
 
     auto topics_iterator_end() const {
         return stable_iterator<
           underlying_t::const_iterator,
           model::revision_id>(
-          [this] { return _topics_map_revision; }, _topics.end());
+          [this] { return _topics_map_revision; }, _topics.by_tp().end());
     }
 
     const force_recoverable_partitions_t& partitions_to_force_recover() const {
@@ -660,6 +738,15 @@ public:
      */
     static topic_properties update_topic_properties(
       topic_properties updated_properties, update_topic_properties_cmd cmd);
+
+    const topic_id_mapping_t& get_topic_id_mapping() const {
+        return _topics.by_id();
+    }
+
+    std::optional<model::topic_namespace>
+    get_name_by_id(model::topic_id tp_id) const {
+        return _topics.get_name(tp_id);
+    }
 
 private:
     friend topic_table_probe;
@@ -708,7 +795,7 @@ private:
     bool
     topic_multi_property_validation(const topic_properties& properties) const;
 
-    underlying_t _topics;
+    underlying_map _topics;
     lifecycle_markers_t _lifecycle_markers;
     disabled_partitions_t _disabled_partitions;
     iceberg_tombstones_t _iceberg_tombstones;

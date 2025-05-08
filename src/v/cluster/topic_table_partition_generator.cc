@@ -21,11 +21,11 @@ topic_table_partition_generator::topic_table_partition_generator(
   : _topic_table(topic_table)
   , _stable_revision_id(_topic_table.local().topics_map_revision())
   , _batch_size(batch_size) {
-    if (_topic_table.local()._topics.empty()) {
-        _topic_iterator = _topic_table.local()._topics.end();
+    if (_topic_table.local()._topics.by_tp().empty()) {
+        _topic_iterator = _topic_table.local()._topics.by_tp().end();
         _exhausted = true;
     } else {
-        _topic_iterator = _topic_table.local()._topics.begin();
+        _topic_iterator = _topic_table.local()._topics.by_tp().begin();
         _partition_iterator = current_assignment_set().begin();
     }
 }
@@ -67,7 +67,7 @@ topic_table_partition_generator::next_batch() {
 
 void topic_table_partition_generator::next() {
     if (++_partition_iterator == current_assignment_set().end()) {
-        if (++_topic_iterator == _topic_table.local()._topics.end()) {
+        if (++_topic_iterator == _topic_table.local()._topics.by_tp().end()) {
             _exhausted = true;
             return;
         }
