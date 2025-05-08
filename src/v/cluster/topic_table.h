@@ -17,8 +17,10 @@
 #include "cluster/topic_table_probe.h"
 #include "container/chunked_hash_map.h"
 #include "container/contiguous_range_map.h"
+#include "logger.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
+#include "types.h"
 #include "utils/stable_iterator_adaptor.h"
 
 #include <absl/container/node_hash_map.h>
@@ -215,9 +217,10 @@ public:
     };
 
     struct topic_metadata_item {
+        using partitions_t
+          = contiguous_range_map<model::partition_id::type, partition_meta>;
         topic_metadata metadata;
-        contiguous_range_map<model::partition_id::type, partition_meta>
-          partitions;
+        partitions_t partitions;
 
         assignments_set& get_assignments() {
             return metadata.get_assignments();
@@ -250,6 +253,105 @@ public:
       topic_metadata_item,
       model::topic_namespace_hash,
       model::topic_namespace_eq>;
+
+    using topic_id_mapping_t
+      = chunked_hash_map<model::topic_id, model::topic_namespace>;
+
+    // Wrapper around underlying_t that maintains a consistent mapping from
+    // topic id to topic name
+    class underlying_map {
+    public:
+        const auto& by_tp() const { return _by_tp; }
+
+        const auto& by_id() const { return _by_id; }
+
+        auto begin() const { return _by_tp.begin(); }
+        auto end() const { return _by_tp.end(); }
+        auto size() const { return _by_tp.size(); }
+        auto empty() const { return _by_tp.empty(); }
+
+        template<typename... Args>
+        auto find(Args&&... args) const {
+            return _by_tp.find(args...);
+        }
+
+        template<typename... Args>
+        auto contains(Args&&... args) const {
+            return _by_tp.contains(args...);
+        }
+
+        template<typename... Args>
+        auto emplace(Args&&... args) {
+            auto r = _by_tp.emplace(std::forward<Args>(args)...);
+            if (r.second) {
+                auto& tp_id = r.first->second.get_configuration().tp_id;
+                if (tp_id) {
+                    _by_id.insert_or_assign(*tp_id, r.first->first);
+                } else {
+                    // Should be unreachable once the topic_ids feature is
+                    // active and all topics have a topic id assigned
+                    vlog(
+                      clusterlog.debug,
+                      "Missing topic id while inserting topic: {}",
+                      r.first->first);
+                }
+            }
+            return r;
+        }
+
+        auto erase(underlying_t::const_iterator it) {
+            if (it != _by_tp.end()) {
+                auto& tp_id = it->second.get_configuration().tp_id;
+                if (tp_id) {
+                    _by_id.erase(*tp_id);
+                } else {
+                    // Should be unreachable once the topic_ids feature is
+                    // active and all topics have a topic id assigned
+                    vlog(
+                      clusterlog.debug,
+                      "Missing topic id while erasing topic: {}",
+                      it->first);
+                }
+            }
+            return _by_tp.erase(it);
+        }
+
+        using mut_fn
+          = std::function<void(underlying_t::value_type::second_type&)>;
+        bool mutate(const underlying_t::const_iterator it, const mut_fn& func) {
+            auto old_id = it->second.get_configuration().tp_id;
+
+            // This is safe because the underlying _by_tp is mutable
+            // NOLINTBEGIN(*-const-cast)
+            auto& md_item_mut
+              = const_cast<underlying_t::value_type::second_type&>(it->second);
+            // NOLINTEND(*-const-cast)
+            func(md_item_mut);
+
+            auto new_id = it->second.get_configuration().tp_id;
+            if (old_id != new_id) {
+                if (old_id) {
+                    _by_id.erase(*old_id);
+                }
+                if (new_id) {
+                    _by_id.emplace(*new_id, it->first);
+                }
+            }
+            return true;
+        }
+
+        std::optional<model::topic_namespace>
+        get_name(model::topic_id tp_id) const {
+            if (auto it = _by_id.find(tp_id); it != _by_id.end()) {
+                return it->second;
+            }
+            return std::nullopt;
+        }
+
+    private:
+        underlying_t _by_tp;
+        topic_id_mapping_t _by_id;
+    };
 
     using lifecycle_markers_t = absl::node_hash_map<
       nt_revision,
@@ -502,7 +604,7 @@ public:
     std::optional<partition_assignment>
     get_partition_assignment(const model::ntp&) const;
 
-    const underlying_t& topics_map() const { return _topics; }
+    const underlying_t& topics_map() const { return _topics.by_tp(); }
 
     bool is_update_in_progress(const model::ntp&) const;
 
@@ -661,6 +763,15 @@ public:
     static topic_properties update_topic_properties(
       topic_properties updated_properties, update_topic_properties_cmd cmd);
 
+    const topic_id_mapping_t& get_topic_id_mapping() const {
+        return _topics.by_id();
+    }
+
+    std::optional<model::topic_namespace>
+    get_name_by_id(model::topic_id tp_id) const {
+        return _topics.get_name(tp_id);
+    }
+
 private:
     friend topic_table_probe;
 
@@ -708,7 +819,7 @@ private:
     bool
     topic_multi_property_validation(const topic_properties& properties) const;
 
-    underlying_t _topics;
+    underlying_map _topics;
     lifecycle_markers_t _lifecycle_markers;
     disabled_partitions_t _disabled_partitions;
     iceberg_tombstones_t _iceberg_tombstones;
