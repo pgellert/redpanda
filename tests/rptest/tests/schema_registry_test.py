@@ -924,6 +924,9 @@ class SchemaRegistryEndpoints(RedpandaTest):
     def assert_in(self, member, container, msg=None):
         assert member in container, msg or f"{member!r} not found in {container!r}"
 
+    def assert_not_in(self, member, container, msg=None):
+        assert member not in container, msg or f"{member!r} found in {container!r}"
+
     def _request(self,
                  verb,
                  path,
@@ -6664,6 +6667,10 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         result = self._get_schemas_ids_id(schema_id, auth=self.super_auth)
         self.assert_equal(result.status_code, 200)
 
+        result = self._get_subjects(auth=self.super_auth)
+        self.assert_equal(result.status_code, 200)
+        self.assert_equal(result.json(), [subject])
+
     @cluster(num_nodes=1)
     def test_resource_patterns(self):
         """Test that prefixed and global pattern matching of resources works"""
@@ -6780,3 +6787,48 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
             self._create_acl(subject_1, "SUBJECT", "LITERAL", "READ", "DENY"))
         result = self._get_schemas_ids_id(schema_id, auth=self.user_auth)
         self.assert_equal(result.status_code, 403)
+
+    @cluster(num_nodes=1)
+    def test_get_subjects_authorization(self):
+        """
+        Test GET /subjects endpoint authorization logic.
+        This endpoint filters subjects based on individual READ permissions,
+        only returning subjects the user is authorized to access.
+        """
+
+        # Create multiple test subjects with different schemas
+        subject_1 = "test-subject-1"
+        subject_2 = "test-subject-2"
+
+        # Create subjects with schemas (using superuser)
+        self._create_schema(subject_1)
+        self._create_schema(subject_2)
+
+        # No ACLs (authenticated or unauthenticated) - should return empty list
+        result = self._get_subjects(auth=self.user_auth)
+        self.assert_equal(result.status_code, 200)
+        self.assert_equal(result.json(), [])
+
+        result = self._get_subjects()
+        self.assert_equal(result.status_code, 200)
+        self.assert_equal(result.json(), [])
+
+        # Grant READ to subject_1 only - should only return subject_1
+        self._post_acl(
+            self._create_acl(subject_1, "SUBJECT", "LITERAL", "READ"))
+        result = self._get_subjects(auth=self.user_auth)
+        self.assert_equal(result.status_code, 200)
+        self.assert_equal(result.json(), [subject_1])
+
+        # Grant wildcard (*) access - should return all subjects
+        self._post_acl(self._create_acl("*", "SUBJECT", "LITERAL", "READ"))
+        result = self._get_subjects(auth=self.user_auth)
+        self.assert_equal(result.status_code, 200)
+        self.assert_equal(set(result.json()), {subject_1, subject_2})
+
+        # Deny all access - should return no subjects
+        self._post_acl(
+            self._create_acl("*", "SUBJECT", "LITERAL", "READ", "DENY"))
+        result = self._get_subjects(auth=self.user_auth)
+        self.assert_equal(result.status_code, 200)
+        self.assert_equal(result.json(), [])
