@@ -424,7 +424,7 @@ ss::future<ctx_server<service>::reply_t> get_schemas_ids_id_subjects(
 ss::future<server::reply_t> get_subjects(
   server::request_t rq,
   server::reply_t rp,
-  auth auth,
+  auth auth_obj,
   std::optional<request_auth_result> auth_result) {
     parse_accept_header(rq, rp);
     auto inc_del{
@@ -433,19 +433,45 @@ ss::future<server::reply_t> get_subjects(
     auto subject_prefix{
       parse::query_param<std::optional<ss::sstring>>(*rq.req, "subjectPrefix")};
 
+    const auto& authorizer = rq.service().authorizor();
+
+    std::optional<std::function<bool(const subject&)>> authorized_for{};
+
     // Check if we need to validate the auth result
     // Note: we may not need to if ACLs or authentication are disabled
     if (auth_result.has_value()) {
-        // TODO(CORE-12277): Authorization check
-        enterprise::handle_authz(rq, auth, *auth_result);
+        authorized_for =
+          [&authorizer,
+           principal = security::
+             acl_principal{security::principal_type::user, rq.user.name},
+           host = security::acl_host{rq.req->get_client_address().addr()}](
+            const subject& sub) {
+              // TODO: avoid metric increments
+              return authorizer
+                .authorized(sub, security::acl_operation::read, principal, host)
+                .is_authorized();
+          };
+
+        auth_obj = auth{auth_obj.get_level(), auth_obj.get_op(), auth::none{}};
+        enterprise::handle_authz(rq, auth_obj, *auth_result);
     }
 
     // List-type request: must ensure we see latest writes
     co_await rq.service().writer().read_sync();
 
-    auto resp = ppj::rjson_serialize_iobuf(
-      co_await rq.service().schema_store().get_subjects(
-        inc_del, subject_prefix));
+    auto res = co_await rq.service().schema_store().get_subjects(
+      inc_del, subject_prefix);
+
+    // Only return subjects the user is allowed to see
+    if (authorized_for.has_value()) {
+        auto new_end = std::ranges::remove_if(
+          res, [&authorized_for](const auto& subject) {
+              return !(*authorized_for)(subject);
+          });
+        res.erase_to_end(new_end.begin());
+    }
+
+    auto resp = ppj::rjson_serialize_iobuf(std::move(res));
     log_response(*rq.req, resp);
     rp.rep->write_body("json", ppj::as_body_writer(std::move(resp)));
     co_return rp;
