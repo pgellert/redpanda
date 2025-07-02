@@ -76,7 +76,7 @@ public:
     }
     ss::future<server::reply_t>
     operator()(server::request_t rq, server::reply_t rp) const {
-        auto auth_result = _auth.handle_auth(rq);
+        auto auth_result = _auth.handle_auth(rq, _operation_name);
 
         co_await _os();
         auto guard = _g.hold();

@@ -73,6 +73,7 @@ void check_authenticated(request_auth_result& auth_result) {
 
 void handle_authz(
   const server::request_t& rq,
+  std::string_view,
   const auth& auth,
   request_auth_result& auth_result) {
     auto params = detail::auth_params{rq};
