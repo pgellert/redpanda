@@ -2289,6 +2289,9 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
     def assert_equal(self, first, second, msg=None):
         assert first == second, msg or f"{first} != {second}"
 
+    def assert_in(self, member, container, msg=None):
+        assert member in container, msg or f"{member!r} not found in {container!r}"
+
     def _create_acl(self,
                     resource,
                     resource_type,
@@ -2304,6 +2307,23 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
         resp = self.sr_client.post_security_acls([acl], auth=self.super_auth)
         self.assert_equal(resp.status_code, 201,
                           f"Failed to create ACL: {acl=}")
+
+        # Wait until the ACLs are propagated to all nodes
+        def acl_all_observable():
+            for node in self.redpanda.nodes:
+                resp = self.sr_client.get_security_acls(
+                    hostname=node.account.hostname, auth=self.super_auth)
+                self.redpanda.logger.debug(
+                    f"Response: {resp.json()}.\nLooking for: {acl}")
+                self.assert_equal(resp.status_code, 200)
+                self.assert_in(acl, resp.json())
+            return True
+
+        wait_until(acl_all_observable,
+                   timeout_sec=30,
+                   backoff_sec=1,
+                   retry_on_exc=True,
+                   err_msg="Failed to propagate ACL to all nodes: {acl}")
 
     def _create_schema(self, subject: str) -> int:
         response = self.sr_client.post_subjects_subject_versions(
