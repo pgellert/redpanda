@@ -2091,6 +2091,7 @@ class AuditLogTestSchemaRegistryBase(AuditLogTestBase):
     def __init__(self, test_context, **kwargs):
         sr_config = SchemaRegistryConfig()
         sr_config.authn_method = 'http_basic'
+        sr_config.mode_mutability = True
         super(AuditLogTestSchemaRegistryBase, self).__init__(
             test_context=test_context,
             audit_log_config=AuditLogConfig(
