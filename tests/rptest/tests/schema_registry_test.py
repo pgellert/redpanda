@@ -940,7 +940,7 @@ class SchemaRegistryRedpandaClient:
 
         # Error codes that may appear during normal API operation, do not
         # indicate an issue with the service
-        acceptable_errors = {409, 422, 404, 501}
+        acceptable_errors = {401, 403, 404, 409, 422, 501}
 
         def accept_response(resp):
             return 200 <= resp.status_code < 300 or resp.status_code in acceptable_errors
