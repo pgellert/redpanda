@@ -2333,7 +2333,8 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
             and record['actor']['user']['name'] == self.username:
             self.logger.debug(f"Validating api activity record: True")
             regex = re.compile(
-                "http:\/\/(?P<address>.*):(?P<port>\d+)\/(?P<handler>.*)")
+                "http:\/\/(?P<address>.*):(?P<port>\d+)\/(?P<handler>.*)(?:\?.*)?"
+            )
             url_string = record['http_request']['url']['url_string']
             match = regex.match(url_string)
             self.logger.debug(f"Validating api activity record: {url_string}")
@@ -2344,7 +2345,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
 
     @skip_fips_mode
     @cluster(num_nodes=5)
-    @matrix(endpoint_name=["GET_MODE"])
+    @matrix(endpoint_name=[e.name for e in ENDPOINTS])
     def test_sr_audit_authz(self, endpoint_name):
         self.setup_cluster()
 
@@ -2357,8 +2358,10 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
             operation = endpoint.name.lower()
             name = f'sr {operation} call'
             records = self.find_matching_record(
-                lambda record: self.match_api_record(
-                    record, "mode", status_id=status_id, operation=operation),
+                lambda record: self.match_api_record(record,
+                                                     endpoint.path,
+                                                     status_id=status_id,
+                                                     operation=operation),
                 lambda record_count: record_count >= 1, name)
             assert self.aggregate_count(records) == 1, \
                 f'{name}: Expected one record found for {self.aggregate_count(records)}: {records}'

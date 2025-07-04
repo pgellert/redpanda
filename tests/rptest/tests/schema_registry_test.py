@@ -6150,6 +6150,11 @@ class ACLTestEndpoint:
         """Endpoint identifier"""
         raise NotImplementedError
 
+    @property
+    def path(self) -> str:
+        """Endpoint path"""
+        raise NotImplementedError
+
     def setup(self) -> None:
         """Any pre-test setup"""
         pass
@@ -6166,6 +6171,10 @@ class ACLTestEndpoint:
 class GetConfigEndpoint(ACLTestEndpoint):
     name = "GET_CONFIG"
 
+    @property
+    def path(self) -> str:
+        return "config"
+
     def make_request(self, auth):
         return self.sr_client.get_config(auth=auth)
 
@@ -6178,6 +6187,10 @@ class GetConfigEndpoint(ACLTestEndpoint):
 
 class PutConfigEndpoint(ACLTestEndpoint):
     name = "PUT_CONFIG"
+
+    @property
+    def path(self) -> str:
+        return "config"
 
     def make_request(self, auth):
         return self.sr_client.set_config(data=json.dumps(
@@ -6193,6 +6206,10 @@ class PutConfigEndpoint(ACLTestEndpoint):
 
 class GetConfigSubjectEndpoint(ACLTestEndpoint):
     name = "GET_CONFIG_SUBJECT"
+
+    @property
+    def path(self) -> str:
+        return f"config/{self.test.subject}"
 
     def setup(self) -> None:
         res = self.sr_client.set_config_subject(self.test.subject,
@@ -6214,6 +6231,10 @@ class GetConfigSubjectEndpoint(ACLTestEndpoint):
 class PutConfigSubjectEndpoint(ACLTestEndpoint):
     name = "PUT_CONFIG_SUBJECT"
 
+    @property
+    def path(self) -> str:
+        return f"config/{self.test.subject}"
+
     def make_request(self, auth):
         return self.sr_client.set_config_subject(
             self.test.subject,
@@ -6229,6 +6250,10 @@ class PutConfigSubjectEndpoint(ACLTestEndpoint):
 
 class DeleteConfigSubject(ACLTestEndpoint):
     name = "DELETE_CONFIG_SUBJECT"
+
+    @property
+    def path(self) -> str:
+        return f"config/{self.test.subject}"
 
     def setup(self) -> None:
         res = self.sr_client.set_config_subject(self.test.subject,
@@ -6251,6 +6276,10 @@ class DeleteConfigSubject(ACLTestEndpoint):
 class GetMode(ACLTestEndpoint):
     name = "GET_MODE"
 
+    @property
+    def path(self) -> str:
+        return "mode"
+
     def make_request(self, auth):
         return self.sr_client.get_mode(auth=auth)
 
@@ -6263,6 +6292,10 @@ class GetMode(ACLTestEndpoint):
 
 class PutMode(ACLTestEndpoint):
     name = "PUT_MODE"
+
+    @property
+    def path(self) -> str:
+        return "mode"
 
     def make_request(self, auth):
         return self.sr_client.set_mode(data=json.dumps({"mode": "READWRITE"}),
@@ -6277,6 +6310,10 @@ class PutMode(ACLTestEndpoint):
 
 class GetModeSubject(ACLTestEndpoint):
     name = "GET_MODE_SUBJECT"
+
+    @property
+    def path(self) -> str:
+        return f"mode/{self.test.subject}"
 
     def setup(self) -> None:
         res = self.sr_client.set_mode_subject(self.test.subject,
@@ -6298,6 +6335,10 @@ class GetModeSubject(ACLTestEndpoint):
 class PutModeSubject(ACLTestEndpoint):
     name = "PUT_MODE_SUBJECT"
 
+    @property
+    def path(self) -> str:
+        return f"mode/{self.test.subject}"
+
     def make_request(self, auth):
         return self.sr_client.set_mode_subject(self.test.subject,
                                                data=json.dumps(
@@ -6313,6 +6354,10 @@ class PutModeSubject(ACLTestEndpoint):
 
 class DeleteModeSubject(ACLTestEndpoint):
     name = "DELETE_MODE_SUBJECT"
+
+    @property
+    def path(self) -> str:
+        return f"mode/{self.test.subject}"
 
     def setup(self) -> None:
         res = self.sr_client.set_mode_subject(self.test.subject,
@@ -6334,6 +6379,10 @@ class DeleteModeSubject(ACLTestEndpoint):
 class PostSubjectVersions(ACLTestEndpoint):
     name = "POST_SUBJECT_VERSIONS"
 
+    @property
+    def path(self) -> str:
+        return f"subjects/{self.test.subject}/versions"
+
     def make_request(self, auth):
         return self.sr_client.post_subjects_subject_versions(
             self.test.subject, data=self.test.schema_data_1, auth=auth)
@@ -6347,6 +6396,10 @@ class PostSubjectVersions(ACLTestEndpoint):
 
 class GetSchemasIdsIdVersions(ACLTestEndpoint):
     name = "GET_SCHEMAS_IDS_ID_VERSIONS"
+
+    @property
+    def path(self) -> str:
+        return f"schemas/ids/{self.schema_id}/versions"
 
     def setup(self) -> None:
         self.schema_id = self.test._create_schema(self.test.subject)
@@ -6362,6 +6415,10 @@ class GetSchemasIdsIdVersions(ACLTestEndpoint):
 class GetSchemasIdsIdSubjects(ACLTestEndpoint):
     name = "GET_SCHEMAS_IDS_ID_SUBJECTS"
 
+    @property
+    def path(self) -> str:
+        return f"schemas/ids/{self.schema_id}/subjects"
+
     def setup(self) -> None:
         self.schema_id = self.test._create_schema(self.test.subject)
 
@@ -6375,6 +6432,10 @@ class GetSchemasIdsIdSubjects(ACLTestEndpoint):
 
 class GetSubjectVersions(ACLTestEndpoint):
     name = "GET_SUBJECT_VERSIONS"
+
+    @property
+    def path(self) -> str:
+        return f"subjects/{self.test.subject}/versions"
 
     def setup(self) -> None:
         self.test._create_schema(self.test.subject)
@@ -6391,6 +6452,10 @@ class GetSubjectVersions(ACLTestEndpoint):
 class PostSubject(ACLTestEndpoint):
     name = "POST_SUBJECT"
 
+    @property
+    def path(self) -> str:
+        return f"subjects/{self.test.subject}"
+
     def setup(self) -> None:
         self.test._create_schema(self.test.subject)
 
@@ -6405,6 +6470,10 @@ class PostSubject(ACLTestEndpoint):
 
 class GetSubjectVersionsVersion(ACLTestEndpoint):
     name = "GET_SUBJECT_VERSIONS_VERSION"
+
+    @property
+    def path(self) -> str:
+        return f"subjects/{self.test.subject}/versions/1"
 
     def setup(self) -> None:
         self.test._create_schema(self.test.subject)
@@ -6421,6 +6490,10 @@ class GetSubjectVersionsVersion(ACLTestEndpoint):
 class GetSubjectVersionsVersionSchema(ACLTestEndpoint):
     name = "GET_SUBJECT_VERSIONS_VERSION_SCHEMA"
 
+    @property
+    def path(self) -> str:
+        return f"subjects/{self.test.subject}/versions/1/schema"
+
     def setup(self) -> None:
         self.test._create_schema(self.test.subject)
 
@@ -6436,6 +6509,10 @@ class GetSubjectVersionsVersionSchema(ACLTestEndpoint):
 class GetSubjectVersionsVersionReferencedBy(ACLTestEndpoint):
     name = "GET_SUBJECT_VERSIONS_VERSION_REFERENCED_BY"
 
+    @property
+    def path(self) -> str:
+        return f"subjects/{self.test.subject}/versions/1/referencedby"
+
     def setup(self) -> None:
         self.test._create_schema(self.test.subject)
 
@@ -6450,6 +6527,10 @@ class GetSubjectVersionsVersionReferencedBy(ACLTestEndpoint):
 class DeleteSubject(ACLTestEndpoint):
     name = "DELETE_SUBJECT"
 
+    @property
+    def path(self) -> str:
+        return f"subjects/{self.test.subject}"
+
     def setup(self) -> None:
         self.test._create_schema(self.test.subject)
 
@@ -6463,6 +6544,10 @@ class DeleteSubject(ACLTestEndpoint):
 
 class DeleteSubjectVersion(ACLTestEndpoint):
     name = "DELETE_SUBJECT_VERSION"
+
+    @property
+    def path(self) -> str:
+        return f"subjects/{self.test.subject}/versions/1"
 
     def setup(self) -> None:
         self.test._create_schema(self.test.subject)
@@ -6479,6 +6564,10 @@ class DeleteSubjectVersion(ACLTestEndpoint):
 
 class CompatibilitySubjectVersion(ACLTestEndpoint):
     name = "COMPATIBILITY_SUBJECT_VERSION"
+
+    @property
+    def path(self) -> str:
+        return f"compatibility/subjects/{self.test.subject}/versions/1"
 
     def setup(self) -> None:
         self.test._create_schema(self.test.subject)
