@@ -160,6 +160,31 @@ public:
       const request_auth_result& auth_result,
       bool is_authorized,
       security::acl_operation operation,
+      std::optional<std::string_view> reason) {
+        if (auto val = should_enqueue_audit_event(
+              event_type, auth_result.get_username());
+            val.has_value()) {
+            return (bool)*val;
+        }
+        return do_enqueue_audit_event<api_activity>(
+          svc_name,
+          req,
+          operation_name,
+          auth_result,
+          is_authorized,
+          operation,
+          reason,
+          chunked_vector<resource_detail>{});
+    }
+
+    bool enqueue_authz_audit_event(
+      event_type event_type,
+      std::string_view svc_name,
+      ss::httpd::const_req req,
+      std::string_view operation_name,
+      const request_auth_result& auth_result,
+      bool is_authorized,
+      security::acl_operation operation,
       chunked_vector<resource_detail>&& resources) {
         if (auto val = should_enqueue_audit_event(
               event_type, auth_result.get_username());
@@ -173,6 +198,7 @@ public:
           auth_result,
           is_authorized,
           operation,
+          std::nullopt,
           std::move(resources));
     }
 

@@ -547,11 +547,12 @@ api_activity api_activity::construct(
   const request_auth_result& auth_result,
   bool is_authorized,
   security::acl_operation operation,
+  std::optional<std::string_view> reason,
   chunked_vector<resource_detail>&& resources) {
     return {
       op_to_crud(operation),
       actor_from_request_auth_result(
-        auth_result, is_authorized, ss::sstring{svc_name}, std::nullopt),
+        auth_result, is_authorized, ss::sstring{svc_name}, reason),
       api{
         .operation = ss::sstring{operation_name},
         .service = {.name = ss::sstring{svc_name}}},

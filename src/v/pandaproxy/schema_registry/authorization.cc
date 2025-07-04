@@ -85,11 +85,16 @@ void audit_authz(
     }
 }
 
-void check_authenticated(request_auth_result& auth_result) {
+void check_authenticated(
+  const server::request_t& rq,
+  std::string_view operation_name,
+  security::acl_operation op,
+  request_auth_result& auth_result) {
     try {
         auth_result.require_authenticated();
-    } catch (...) {
-        // TODO(CORE-12275): audit failure
+    } catch (const ss::httpd::base_exception& e) {
+        audit_authz(
+          rq, operation_name, auth_result, false, op, ss::sstring{e.what()});
         throw;
     }
 }
@@ -114,7 +119,9 @@ void handle_authz(
     ss::visit(
       resource,
       [&](const auth::none&) { auth_result.pass(); },
-      [&](const auto&) { check_authenticated(auth_result); });
+      [&](const auto&) {
+          check_authenticated(rq, operation_name, op, auth_result);
+      });
 
     // Check Authorization
     auto authz_result = ss::visit(
@@ -143,12 +150,13 @@ void handle_get_schemas_ids_id_authz(
   const chunked_vector<subject>& subjects) {
     const auto& operation_name
       = ss::httpd::schema_registry_json::get_schemas_ids_id.operations.nickname;
+    constexpr auto op = security::acl_operation::read;
     if (!auth_result.has_value()) {
         // ACLs or authentication is disabled
         return;
     }
 
-    check_authenticated(*auth_result);
+    check_authenticated(rq, operation_name, op, *auth_result);
 
     auto params = detail::auth_params{rq};
 
@@ -162,7 +170,7 @@ void handle_get_schemas_ids_id_authz(
           operation_name,
           auth_result.value(),
           false,
-          security::acl_operation::read,
+          op,
           audit_resources{});
         throw_unauthorized();
     }
@@ -171,7 +179,7 @@ void handle_get_schemas_ids_id_authz(
     auto all_results = audit_resources{};
     for (const auto& sub : subjects) {
         auto res = rq.service().authorizor().authorized(
-          sub, security::acl_operation::read, params.principal, params.host);
+          sub, op, params.principal, params.host);
 
         if (res.is_authorized()) {
             authorizing_result = std::move(res);
@@ -189,7 +197,7 @@ void handle_get_schemas_ids_id_authz(
           operation_name,
           auth_result.value(),
           false,
-          security::acl_operation::read,
+          op,
           std::move(all_results));
         throw_unauthorized();
     }
@@ -201,13 +209,14 @@ void handle_get_subjects_authz(
   chunked_vector<subject>& subjects) {
     const auto& operation_name
       = ss::httpd::schema_registry_json::get_subjects.operations.nickname;
+    constexpr auto op = security::acl_operation::read;
 
     if (!auth_result.has_value()) {
         // ACLs or authentication is disabled
         return;
     }
 
-    check_authenticated(*auth_result);
+    check_authenticated(rq, operation_name, op, *auth_result);
 
     auto params = detail::auth_params{rq};
 
@@ -216,10 +225,7 @@ void handle_get_subjects_authz(
 
     auto new_end = std::ranges::remove_if(subjects, [&](const auto& subject) {
         auto res = rq.service().authorizor().authorized(
-          subject,
-          security::acl_operation::read,
-          params.principal,
-          params.host);
+          subject, op, params.principal, params.host);
         if (res.is_authorized()) {
             passing_results.emplace_back(subject(), subject_resource_type);
             return false; // keep
@@ -235,7 +241,7 @@ void handle_get_subjects_authz(
       operation_name,
       auth_result.value(),
       true,
-      security::acl_operation::read,
+      op,
       std::move(passing_results));
 
     if (!failing_results.empty()) {
@@ -244,7 +250,7 @@ void handle_get_subjects_authz(
           operation_name,
           auth_result.value(),
           false,
-          security::acl_operation::read,
+          op,
           std::move(failing_results));
     }
 }

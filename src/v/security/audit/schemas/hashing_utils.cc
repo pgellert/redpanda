@@ -151,6 +151,7 @@ size_t api_activity::hash(
   const request_auth_result& auth_result,
   bool is_authorized,
   security::acl_operation operation,
+  std::optional<std::string_view> reason,
   const chunked_vector<resource_detail>& resources) {
     auto crud = api_activity::op_to_crud(operation);
     size_t h = audit_type_base_hash(
@@ -162,6 +163,7 @@ size_t api_activity::hash(
     h = hash::combine(
       h,
       auth_result.is_auth_required(),
+      reason,
       auth_result.get_username(),
       auth_result.is_superuser(),
       req.get_server_address().addr(),

@@ -128,6 +128,7 @@ public:
       const request_auth_result& auth_result,
       bool is_authorized,
       security::acl_operation operation,
+      std::optional<std::string_view> reason,
       const chunked_vector<resource_detail>& resources);
 
     template<typename T>
@@ -196,6 +197,7 @@ public:
       const request_auth_result& auth_result,
       bool is_authorized,
       security::acl_operation operation,
+      std::optional<std::string_view> reason,
       chunked_vector<resource_detail>&& resources);
 
     static constexpr api_activity::activity_id
