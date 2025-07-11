@@ -41,6 +41,7 @@ from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import expect_exception, inject_remote_script, search_logs_with_timeout
 from rptest.utils.log_utils import wait_until_nag_is_set
 from rptest.utils.mode_checks import skip_fips_mode
+from rptest.utils.assertions import assert_equal, assert_in
 
 
 class SchemaIdValidationMode(str, Enum):
@@ -1320,12 +1321,6 @@ class SchemaRegistryEndpoints(RedpandaTest):
             **kwargs)
 
         self.sr_client = SchemaRegistryRedpandaClient(redpanda=self.redpanda)
-
-    def assert_equal(self, first, second, msg=None):
-        assert first == second, msg or f"{first} != {second}"
-
-    def assert_in(self, member, container, msg=None):
-        assert member in container, msg or f"{member!r} not found in {container!r}"
 
     def _get_rpk_tools(self):
         return RpkTool(self.redpanda)
@@ -5790,8 +5785,8 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
             for node in self.redpanda.nodes:
                 response = self.sr_client.get_security_acls(
                     hostname=node.account.hostname)
-                self.assert_equal(response.status_code, 200)
-                self.assert_equal(len(response.json()), count)
+                assert_equal(response.status_code, 200)
+                assert_equal(len(response.json()), count)
             return True
 
         wait_until(
@@ -5805,13 +5800,13 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
     def _check_filtered_acls(self, filters, expected_acls):
         """Helper to check if listing ACLs with the given `filters` leads to a response of `expected_acls`"""
         response = self.sr_client.get_security_acls(params=filters)
-        self.assert_equal(response.status_code, 200)
+        assert_equal(response.status_code, 200)
 
         # Sort both lists for consistent comparison
         sorted_response = sorted(response.json(), key=str)
         sorted_expected = sorted(expected_acls, key=str)
 
-        self.assert_equal(
+        assert_equal(
             sorted_response, sorted_expected,
             f"Expected {sorted_expected} ACLs for filters {filters}, got {sorted_response}"
         )
@@ -5837,14 +5832,14 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
 
         # Create ACLs and verify 201 status
         resp = self.sr_client.post_security_acls(acls)
-        self.assert_equal(resp.status_code, 201)
+        assert_equal(resp.status_code, 201)
 
         # Get ACLs and verify they exist
         def acls_exist():
             resp = self.sr_client.get_security_acls()
-            self.assert_equal(resp.status_code, 200)
+            assert_equal(resp.status_code, 200)
             created_acls = resp.json()
-            self.assert_equal(len(created_acls), scale + 1)
+            assert_equal(len(created_acls), scale + 1)
             return True
 
         wait_until(acls_exist,
@@ -5855,15 +5850,15 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
 
         # Delete ACLs
         resp = self.sr_client.delete_security_acls(acls)
-        self.assert_equal(resp.status_code, 200)
+        assert_equal(resp.status_code, 200)
         deleted_acls = resp.json()
-        self.assert_equal(len(deleted_acls), scale + 1)
+        assert_equal(len(deleted_acls), scale + 1)
 
         # Verify ACLs are gone
         def acls_removed():
             resp = self.sr_client.get_security_acls()
-            self.assert_equal(resp.status_code, 200)
-            self.assert_equal(len(resp.json()), 0)
+            assert_equal(resp.status_code, 200)
+            assert_equal(len(resp.json()), 0)
             return True
 
         wait_until(acls_removed,
@@ -5884,35 +5879,35 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
                 principal=f"User:user{control_char}1",
                 resource=f"test{control_char}subject")
             resp = self.sr_client.post_security_acls([acl_with_control])
-            self.assert_equal(resp.status_code, 400)
-            self.assert_in("Control characters not allowed", resp.text)
+            assert_equal(resp.status_code, 400)
+            assert_in("Control characters not allowed", resp.text)
 
             # Test in DELETE request body
             resp = self.sr_client.delete_security_acls([acl_with_control])
-            self.assert_equal(resp.status_code, 400)
-            self.assert_in("Control characters not allowed", resp.text)
+            assert_equal(resp.status_code, 400)
+            assert_in("Control characters not allowed", resp.text)
 
             # Test in GET query parameters
             resp = self.sr_client.get_security_acls(
                 params={"principal": f"User:user{control_char}1"})
-            self.assert_equal(resp.status_code, 400)
-            self.assert_in("Invalid parameter", resp.text)
+            assert_equal(resp.status_code, 400)
+            assert_in("Invalid parameter", resp.text)
 
         # Test invalid resource types
         invalid_resource_acl = [self._create_test_acl(resource_type="TOPIC")]
         resp = self.sr_client.post_security_acls(invalid_resource_acl)
-        self.assert_equal(resp.status_code, 400)
+        assert_equal(resp.status_code, 400)
 
         # Test missing required fields
         missing_field_acl = [self._create_test_acl()]
         del missing_field_acl[0]["operation"]
         resp = self.sr_client.post_security_acls(missing_field_acl)
-        self.assert_equal(resp.status_code, 400)
+        assert_equal(resp.status_code, 400)
 
         # Test invalid host format
         invalid_host_acl = [self._create_test_acl(host="invalid:host:format")]
         resp = self.sr_client.post_security_acls(invalid_host_acl)
-        self.assert_equal(resp.status_code, 400)
+        assert_equal(resp.status_code, 400)
 
         # Test PREFIXED pattern type not allowed for REGISTRY resource
         invalid_registry_acl = [
@@ -5921,14 +5916,14 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
                                   pattern_type="PREFIXED")
         ]
         resp = self.sr_client.post_security_acls(invalid_registry_acl)
-        self.assert_equal(resp.status_code, 400)
+        assert_equal(resp.status_code, 400)
 
         # Wildcard is only valid for users, not roles
         invalid_wildcard_role = [
             self._create_test_acl(principal="RedpandaRole:*")
         ]
         resp = self.sr_client.post_security_acls(invalid_wildcard_role)
-        self.assert_equal(resp.status_code, 400)
+        assert_equal(resp.status_code, 400)
 
     @cluster(num_nodes=3)
     def test_field_variations(self):
@@ -5938,7 +5933,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         for pattern_type in self.VALID_PATTERN_TYPES:
             acl = [self._create_test_acl(pattern_type=pattern_type)]
             resp = self.sr_client.post_security_acls(acl)
-            self.assert_equal(resp.status_code, 201)
+            assert_equal(resp.status_code, 201)
 
         # Test valid operations
         for operation in self.VALID_OPERATIONS:
@@ -5947,19 +5942,19 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
                                       operation=operation)
             ]
             resp = self.sr_client.post_security_acls(acl)
-            self.assert_equal(resp.status_code, 201)
+            assert_equal(resp.status_code, 201)
 
         # Test invalid values
         invalid_pattern_acl = [self._create_test_acl(pattern_type="INVALID")]
         resp = self.sr_client.post_security_acls(invalid_pattern_acl)
-        self.assert_equal(resp.status_code, 400)
+        assert_equal(resp.status_code, 400)
 
         for operation in self.DISALLOWED_OPERATIONS + ["INVALID_OP"]:
             invalid_operation_acl = [
                 self._create_test_acl(operation=operation)
             ]
             resp = self.sr_client.post_security_acls(invalid_operation_acl)
-            self.assert_equal(resp.status_code, 400)
+            assert_equal(resp.status_code, 400)
 
     @cluster(num_nodes=3)
     def test_case_handling(self):
@@ -5973,26 +5968,26 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         ]
 
         resp = self.sr_client.post_security_acls(acl)
-        self.assert_equal(resp.status_code, 201)
+        assert_equal(resp.status_code, 201)
 
         # Wait for ACLs to propagate
         self.await_acl_count(1)
 
         # Verify normalization to uppercase in response
         resp = self.sr_client.get_security_acls()
-        self.assert_equal(resp.status_code, 200)
+        assert_equal(resp.status_code, 200)
         created_acls = resp.json()
-        self.assert_equal(len(created_acls), 1)
-        self.assert_equal(created_acls[0]["resource_type"], "SUBJECT")
-        self.assert_equal(created_acls[0]["pattern_type"], "LITERAL")
+        assert_equal(len(created_acls), 1)
+        assert_equal(created_acls[0]["resource_type"], "SUBJECT")
+        assert_equal(created_acls[0]["pattern_type"], "LITERAL")
 
         # Test case-insensitive filtering
         resp = self.sr_client.get_security_acls(params={
             "resource_type": "subject",
             "permission": "ALLOW"
         })
-        self.assert_equal(resp.status_code, 200)
-        self.assert_equal(len(resp.json()), 1)
+        assert_equal(resp.status_code, 200)
+        assert_equal(len(resp.json()), 1)
 
         # Test case-insensitive deletion
         acl_lower = [{
@@ -6001,8 +5996,8 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
             for k, v in acl[0].items()
         }]
         resp = self.sr_client.delete_security_acls(acl_lower)
-        self.assert_equal(resp.status_code, 200)
-        self.assert_equal(len(resp.json()), 1)
+        assert_equal(resp.status_code, 200)
+        assert_equal(len(resp.json()), 1)
 
     @cluster(num_nodes=3)
     def test_acl_delete_filters(self):
@@ -6015,21 +6010,21 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         acls = [first, second]
 
         resp = self.sr_client.post_security_acls(acls)
-        self.assert_equal(resp.status_code, 201)
+        assert_equal(resp.status_code, 201)
 
         # Test deletion
         resp = self.sr_client.delete_security_acls([first])
-        self.assert_equal(resp.status_code, 200)
+        assert_equal(resp.status_code, 200)
         deleted_acls = resp.json()
-        self.assert_equal(len(deleted_acls), 1)
+        assert_equal(len(deleted_acls), 1)
 
         # Verify first ACL is gone, only the second remains
         def only_first_acl_deleted():
             resp = self.sr_client.get_security_acls()
-            self.assert_equal(resp.status_code, 200)
+            assert_equal(resp.status_code, 200)
             remaining_acls = resp.json()
-            self.assert_equal(len(remaining_acls), 1)
-            self.assert_equal(remaining_acls[0]["principal"], "User:bob")
+            assert_equal(len(remaining_acls), 1)
+            assert_equal(remaining_acls[0]["principal"], "User:bob")
             return True
 
         wait_until(
@@ -6060,7 +6055,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
 
         test_acls = [subject_read_acl, subject_write_acl, registry_admin_acl]
         resp = self.sr_client.post_security_acls(test_acls)
-        self.assert_equal(resp.status_code, 201)
+        assert_equal(resp.status_code, 201)
 
         # Wait until ACLs propagate to all nodes
         self.await_acl_count(3)
@@ -6115,7 +6110,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
             {"permission": "ALLOW"}, [subject_read_acl, registry_admin_acl])
         response_lower = self._check_filtered_acls(
             {"permission": "allow"}, [subject_read_acl, registry_admin_acl])
-        self.assert_equal(
+        assert_equal(
             response_upper, response_lower,
             f"Case-insensitive filtering should return same results. {response_upper} != {response_lower}"
         )
@@ -6127,29 +6122,29 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
 
         # Create initial ACL
         resp = self.sr_client.post_security_acls([test_acl])
-        self.assert_equal(resp.status_code, 201)
+        assert_equal(resp.status_code, 201)
 
         # Wait until ACLs propagate to all nodes
         self.await_acl_count(1)
 
         # Create same ACL again - should be idempotent
         resp = self.sr_client.post_security_acls([test_acl])
-        self.assert_equal(resp.status_code, 201)
+        assert_equal(resp.status_code, 201)
 
         # Verify only one exists
         resp = self.sr_client.get_security_acls(
             params={"principal": "User:alice"})
-        self.assert_equal(resp.status_code, 200)
-        self.assert_equal(len(resp.json()), 1)
+        assert_equal(resp.status_code, 200)
+        assert_equal(len(resp.json()), 1)
 
         # Test partial deletion
         non_existent_acl = self._create_test_acl(resource="non-existent")
         resp = self.sr_client.delete_security_acls(
             [test_acl, non_existent_acl])
-        self.assert_equal(resp.status_code, 200)
+        assert_equal(resp.status_code, 200)
         deleted_acls = resp.json()
-        self.assert_equal(len(deleted_acls), 1)
-        self.assert_equal(deleted_acls[0]["resource"], "test-subject")
+        assert_equal(len(deleted_acls), 1)
+        assert_equal(deleted_acls[0]["resource"], "test-subject")
 
         # Verify ACL no longer exists eventually
         self.await_acl_count(0)
@@ -6246,7 +6241,7 @@ class GetConfigSubjectEndpoint(ACLTestEndpoint):
                                                 data=json.dumps(
                                                     {"compatibility": "FULL"}),
                                                 auth=self.test.super_auth)
-        self.test.assert_equal(res.status_code, 200)
+        assert_equal(res.status_code, 200)
 
     def make_request(self, auth):
         return self.sr_client.get_config_subject(self.test.subject, auth=auth)
@@ -6296,7 +6291,7 @@ class DeleteConfigSubject(ACLTestEndpoint):
                                                 data=json.dumps(
                                                     {"compatibility": "FULL"}),
                                                 auth=self.test.super_auth)
-        self.test.assert_equal(res.status_code, 200)
+        assert_equal(res.status_code, 200)
 
     def make_request(self, auth):
         return self.sr_client.delete_config_subject(self.test.subject,
@@ -6365,7 +6360,7 @@ class GetModeSubject(ACLTestEndpoint):
                                               data=json.dumps(
                                                   {"mode": "READWRITE"}),
                                               auth=self.test.super_auth)
-        self.test.assert_equal(res.status_code, 200)
+        assert_equal(res.status_code, 200)
 
     def make_request(self, auth):
         return self.sr_client.get_mode_subject(self.test.subject, auth=auth)
@@ -6415,7 +6410,7 @@ class DeleteModeSubject(ACLTestEndpoint):
                                               data=json.dumps(
                                                   {"mode": "READWRITE"}),
                                               auth=self.test.super_auth)
-        self.test.assert_equal(res.status_code, 200)
+        assert_equal(res.status_code, 200)
 
     def make_request(self, auth):
         return self.sr_client.delete_mode_subject(self.test.subject, auth=auth)
@@ -6808,22 +6803,21 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         resp = self.sr_client.post_security_acls(acl_list,
                                                  auth=self.super_auth)
-        self.assert_equal(resp.status_code, 201,
-                          f"Failed to create ACL: {acl=}")
+        assert_equal(resp.status_code, 201, f"Failed to create ACL: {acl=}")
 
         # Wait until the ACLs are propagated to all nodes
         def acl_all_observable():
             for node in self.redpanda.nodes:
                 resp = self.sr_client.get_security_acls(
                     hostname=node.account.hostname, auth=self.super_auth)
-                self.assert_equal(resp.status_code, 200)
+                assert_equal(resp.status_code, 200)
 
                 response_acls = resp.json()
                 for a in acl_list:
                     self.redpanda.logger.debug(
                         f"Checking if {a} in response from {node.account.hostname}: {response_acls}"
                     )
-                    self.assert_in(a, response_acls)
+                    assert_in(a, response_acls)
 
             return True
 
@@ -6837,7 +6831,7 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
     def _create_schema(self, subject: str) -> int:
         response = self.sr_client.post_subjects_subject_versions(
             subject, data=self.schema_data_1, auth=self.super_auth)
-        self.assert_equal(response.status_code, 200, "Failed to create schema")
+        assert_equal(response.status_code, 200, "Failed to create schema")
         return response.json()["id"]
 
     def setUp(self):
@@ -6865,7 +6859,7 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         # No ACL — should be denied
         result = endpoint.make_request(self.user_auth)
-        self.assert_equal(result.status_code, 403)
+        assert_equal(result.status_code, 403)
 
         # Grant correct ACL
         acl = endpoint.create_acl()
@@ -6873,7 +6867,7 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         # Try again — should now succeed
         result = endpoint.make_request(self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
     @cluster(num_nodes=1)
     def test_unauthenticated(self):
@@ -6881,27 +6875,27 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         # Test public endpoints - GET_SCHEMAS_TYPES and SCHEMA_REGISTRY_STATUS_READY
         result = self.sr_client.get_schemas_types()
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         result = self.sr_client.get_status_ready()
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         # Test non-public endpoints - should return 401
         result = self.sr_client.get_config()
-        self.assert_equal(result.status_code, 401)
+        assert_equal(result.status_code, 401)
 
         result = self.sr_client.post_subjects_subject_versions(
             "test-subject", data=self.schema_data_1)
-        self.assert_equal(result.status_code, 401)
+        assert_equal(result.status_code, 401)
 
         result = self.sr_client.get_security_acls()
-        self.assert_equal(result.status_code, 401)
+        assert_equal(result.status_code, 401)
 
         result = self.sr_client.get_schemas_ids_id(1)
-        self.assert_equal(result.status_code, 401)
+        assert_equal(result.status_code, 401)
 
         result = self.sr_client.get_subjects()
-        self.assert_equal(result.status_code, 401)
+        assert_equal(result.status_code, 401)
 
     @cluster(num_nodes=1)
     def test_acl_endpoints(self):
@@ -6910,18 +6904,15 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
             acl = self._create_acl("*", "SUBJECT", "LITERAL", "WRITE")
 
             result = self.sr_client.get_security_acls(auth=self.user_auth)
-            self.assert_equal(result.status_code,
-                              200 if expected_success else 403)
+            assert_equal(result.status_code, 200 if expected_success else 403)
 
             result = self.sr_client.post_security_acls([acl],
                                                        auth=self.user_auth)
-            self.assert_equal(result.status_code,
-                              201 if expected_success else 403)
+            assert_equal(result.status_code, 201 if expected_success else 403)
 
             result = self.sr_client.delete_security_acls([acl],
                                                          auth=self.user_auth)
-            self.assert_equal(result.status_code,
-                              200 if expected_success else 403)
+            assert_equal(result.status_code, 200 if expected_success else 403)
 
         def grant_cluster_acl():
             def try_create_acl():
@@ -6958,23 +6949,23 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         result = self.sr_client.set_config(data=json.dumps(
             {"compatibility": "FULL"}),
                                            auth=self.super_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         # Check a subject-level endpoint
         subject = "test-subject"
         result = self.sr_client.post_subjects_subject_versions(
             subject, data=self.schema_data_1, auth=self.super_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         # Check deferred endpoints
         schema_id = result.json()['id']
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.super_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         result = self.sr_client.get_subjects(auth=self.super_auth)
-        self.assert_equal(result.status_code, 200)
-        self.assert_equal(result.json(), [subject])
+        assert_equal(result.status_code, 200)
+        assert_equal(result.json(), [subject])
 
     @cluster(num_nodes=1)
     def test_resource_patterns(self):
@@ -6982,11 +6973,11 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         def check_post_schemas(can_post_1, can_post_2):
             result = self.sr_client.post_subjects_subject_versions(
                 "test-subject-1", data=self.schema_data_1, auth=self.user_auth)
-            self.assert_equal(result.status_code, 200 if can_post_1 else 403)
+            assert_equal(result.status_code, 200 if can_post_1 else 403)
 
             result = self.sr_client.post_subjects_subject_versions(
                 "test-subject-2", data=self.schema_data_2, auth=self.user_auth)
-            self.assert_equal(result.status_code, 200 if can_post_2 else 403)
+            assert_equal(result.status_code, 200 if can_post_2 else 403)
 
         # Check prefix matching works
         acl_1 = self._create_acl("test-subject-", "SUBJECT", "PREFIXED",
@@ -7025,29 +7016,29 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         response = self.sr_client.post_subjects_subject_versions(
             subject_2, data=self.schema_data_1, auth=self.super_auth)
-        self.assert_equal(response.status_code, 200)
-        self.assert_equal(response.json()["id"], schema_id)
+        assert_equal(response.status_code, 200)
+        assert_equal(response.json()["id"], schema_id)
 
         response = self.sr_client.post_subjects_subject_versions(
             subject_3, data=self.schema_data_1, auth=self.super_auth)
-        self.assert_equal(response.status_code, 200)
-        self.assert_equal(response.json()["id"], schema_id)
+        assert_equal(response.status_code, 200)
+        assert_equal(response.json()["id"], schema_id)
 
         # Unknown schema id - should be 403 (don't leak presence info)
         result = self.sr_client.get_schemas_ids_id(99999, auth=self.user_auth)
-        self.assert_equal(result.status_code, 403)
+        assert_equal(result.status_code, 403)
 
         # No ACLs - should be denied
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 403)
+        assert_equal(result.status_code, 403)
 
         # Grant READ to subject_1 - should succeed
         self._post_acl(
             self._create_acl(subject_1, "SUBJECT", "LITERAL", "READ"))
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         # Switch access to subject_2 - should still work (any subject access sufficient)
         self._post_acl(
@@ -7056,37 +7047,37 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
             self._create_acl(subject_2, "SUBJECT", "LITERAL", "READ"))
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         # Remove all access - should be denied
         self._post_acl(
             self._create_acl(subject_2, "SUBJECT", "LITERAL", "READ", "DENY"))
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 403)
+        assert_equal(result.status_code, 403)
 
         # Grant access to subject 3 using a prefixed ACL - should succeed
         self._post_acl(
             self._create_acl("test-subject-", "SUBJECT", "PREFIXED", "READ"))
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         # Delete the only subject that granted access to the endpoint
         # Should still succeed since soft-deleted subjects also count
         result = self.sr_client.delete_subject(subject_3, auth=self.super_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         # Remove access to all subjects - should be denied
         self._post_acl(
             self._create_acl("*", "SUBJECT", "LITERAL", "READ", "DENY"))
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 403)
+        assert_equal(result.status_code, 403)
 
     @cluster(num_nodes=1)
     def test_get_schemas_ids_no_match(self):
@@ -7103,14 +7094,14 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         self._post_acl(self._create_acl("*", "SUBJECT", "LITERAL", "READ"))
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         # Add specific DENY to override wildcard ALLOW - should be denied (no subject grants access)
         self._post_acl(
             self._create_acl(subject_1, "SUBJECT", "LITERAL", "READ", "DENY"))
         result = self.sr_client.get_schemas_ids_id(schema_id,
                                                    auth=self.user_auth)
-        self.assert_equal(result.status_code, 403)
+        assert_equal(result.status_code, 403)
 
     @cluster(num_nodes=1)
     def test_get_subjects_authorization(self):
@@ -7130,28 +7121,28 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         # No ACLs - should return empty list
         result = self.sr_client.get_subjects(auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
-        self.assert_equal(result.json(), [])
+        assert_equal(result.status_code, 200)
+        assert_equal(result.json(), [])
 
         # Grant READ to subject_1 only - should only return subject_1
         self._post_acl(
             self._create_acl(subject_1, "SUBJECT", "LITERAL", "DESCRIBE"))
         result = self.sr_client.get_subjects(auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
-        self.assert_equal(result.json(), [subject_1])
+        assert_equal(result.status_code, 200)
+        assert_equal(result.json(), [subject_1])
 
         # Grant wildcard (*) access - should return all subjects
         self._post_acl(self._create_acl("*", "SUBJECT", "LITERAL", "DESCRIBE"))
         result = self.sr_client.get_subjects(auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
-        self.assert_equal(set(result.json()), {subject_1, subject_2})
+        assert_equal(result.status_code, 200)
+        assert_equal(set(result.json()), {subject_1, subject_2})
 
         # Deny all access - should return no subjects
         self._post_acl(
             self._create_acl("*", "SUBJECT", "LITERAL", "DESCRIBE", "DENY"))
         result = self.sr_client.get_subjects(auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
-        self.assert_equal(result.json(), [])
+        assert_equal(result.status_code, 200)
+        assert_equal(result.json(), [])
 
     @cluster(num_nodes=3)
     def test_enterprise_sanctions(self):
@@ -7170,8 +7161,8 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         self._post_acl(get_config_sub_acl)
 
         result = get_config_sub.make_request(self.user_auth)
-        self.assert_equal(result.status_code, 200,
-                          f"Failed to licensed get_config_sub: {result.text}")
+        assert_equal(result.status_code, 200,
+                     f"Failed to licensed get_config_sub: {result.text}")
 
         # Disable the license and restart
         self.redpanda.set_environment(
@@ -7180,15 +7171,13 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         # Verify ACLs still work
         result = get_config_sub.make_request(self.user_auth)
-        self.assert_equal(
-            result.status_code, 200,
-            f"Failed to unlicensed get_config_sub: {result.text}")
+        assert_equal(result.status_code, 200,
+                     f"Failed to unlicensed get_config_sub: {result.text}")
 
         # Verify ACLs can be requested
         result = self.sr_client.get_security_acls(auth=self.super_auth)
-        self.assert_equal(
-            result.status_code, 200,
-            f"Failed to unlicensed get_security_acls: {result.text}")
+        assert_equal(result.status_code, 200,
+                     f"Failed to unlicensed get_security_acls: {result.text}")
 
         # Verify ACLs cannot be created or deleted
         post_config_sub = PutConfigSubjectEndpoint(self)
@@ -7198,7 +7187,7 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
             (self.sr_client.delete_security_acls, [get_config_sub_acl])
         ]:
             resp = endpoint(acl, auth=self.super_auth)
-            self.assert_equal(
+            assert_equal(
                 resp.status_code, 403,
                 f"ACL action {endpoint.__name__} should be forbidden after sanctions"
             )

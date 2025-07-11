@@ -20,6 +20,7 @@ from ducktape.mark import parametrize, ignore
 from rptest.clients.rpk import RpkException, RpkTool
 from rptest.clients.kcl import RawKCL
 from ducktape.utils.util import wait_until
+from rptest.utils.assertions import assert_equal
 
 
 def expect_kafka_cli_error_msg(error_msg: str):
@@ -145,7 +146,7 @@ class QuotaManagementTest(RedpandaTest):
             return [line.strip() for line in output.strip().split('\n')]
 
         def assert_outputs_equal(out, expected):
-            self._assert_equal(normalize(out), normalize(expected))
+            assert_equal(normalize(out), normalize(expected))
 
         self.redpanda.logger.debug("Create a config for client default")
         self.kafka_cli.alter_quota_config(
@@ -200,17 +201,13 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
         res = self.rpk.alter_cluster_quotas(*args, **kwargs)
         assert res['status'] == 'OK', f'Alter failed with result: {res}'
 
-    @staticmethod
-    def _assert_equal(got, expected):
-        assert got == expected, f"Mismatch.\n\tGot:\t\t{got}\n\tExpected:\t{expected}"
-
     @cluster(num_nodes=1)
     def test_describe_default(self):
         self.redpanda.logger.debug(
             "Check that initially describe with default returns no results")
         got = self.describe(default=["client-id"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Add a default quota and verify that describe returns it")
@@ -220,7 +217,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
             Quota(entity=QuotaEntity.client_id_default(),
                   values=[QuotaValue.producer_byte_rate("1111")])
         ])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Add two exact match quotas and verify that describe with default match type doesn't return them"
@@ -231,7 +228,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
                    add=["controller_mutation_rate=3333"])
         got = self.describe(default=["client-id"])
         expected = expected
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Delete the default quota and verify that describe doesn't return it anymore"
@@ -239,7 +236,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
         self.alter(default=["client-id"], delete=["producer_byte_rate"])
         got = self.describe(default=["client-id"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Delete the non-default quotas and verify that describe still returns nothing"
@@ -250,7 +247,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
                    delete=["controller_mutation_rate"])
         got = self.describe(default=["client-id"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
     @cluster(num_nodes=1)
     def test_describe_any(self):
@@ -258,7 +255,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
             "Check that initially describe with any returns no results")
         got = self.describe(any=["client-id"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Add some client-id and client-id-prefix quotas and verify that any with client-id only returns client-id quotas, and any with client-id-prefix only returns client-id-prefix quotas."
@@ -276,14 +273,14 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
             Quota(entity=QuotaEntity.client_id("a-producer"),
                   values=[QuotaValue.producer_byte_rate("4444")])
         ])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         got = self.describe(any=["client-id-prefix"])
         expected = QuotaOutput([
             Quota(entity=QuotaEntity.client_id_prefix("admins-"),
                   values=[QuotaValue.controller_mutation_rate("3333")])
         ])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Delete the client-id quotas and verify that any no longer returns them"
@@ -294,7 +291,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
                    delete=["producer_byte_rate"])
         got = self.describe(default=["client-id"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
     @cluster(num_nodes=1)
     def test_describe_name(self):
@@ -302,7 +299,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
             "Check that initially describe with name returns no results")
         got = self.describe(name=["client-id=a-consumer"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Add an exact match client id and check that filtering for it with name returns it"
@@ -314,7 +311,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
             Quota(entity=QuotaEntity.client_id("a-consumer"),
                   values=[QuotaValue.consumer_byte_rate("2222")])
         ])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Add quotas with other names and entity types and verify that we can search for each with name independently"
@@ -325,21 +322,21 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
                    add=["producer_byte_rate=4444"])
         got = self.describe(name=["client-id=a-consumer"])
         expected = expected  # Same as before
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         got = self.describe(name=["client-id=a-producer"])
         expected = QuotaOutput([
             Quota(entity=QuotaEntity.client_id("a-producer"),
                   values=[QuotaValue.producer_byte_rate("4444")])
         ])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         got = self.describe(name=["client-id-prefix=admins-"])
         expected = QuotaOutput([
             Quota(entity=QuotaEntity.client_id_prefix("admins-"),
                   values=[QuotaValue.controller_mutation_rate("3333")])
         ])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         self.redpanda.logger.debug(
             "Remove all the quotas and verify that none of the previous describes with name return anything"
@@ -352,15 +349,15 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
                    delete=["controller_mutation_rate"])
         got = self.describe(name=["client-id=a-consumer"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         got = self.describe(name=["client-id=a-producer"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
         got = self.describe(name=["client-id-prefix=admins-"])
         expected = QuotaOutput([])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
     @cluster(num_nodes=1)
     @parametrize(strict=False)
@@ -379,7 +376,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
                       QuotaValue.producer_byte_rate("2222")
                   ])
         ])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
     @cluster(num_nodes=1)
     @parametrize(strict=False)
@@ -402,15 +399,15 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
         #     Quota(entity=QuotaEntity.client_id_default_and_user_default(),
         #           values=[QuotaValue.producer_byte_rate("2222")])
         # ])
-        # self._assert_equal(got, compound_output)
+        # assert_equal(got, compound_output)
         #
         # got = self.describe(any=["client-id"], strict=strict)
         # expected = QuotaOutput() if strict else compound_output
-        # self._assert_equal(got, expected)
+        # assert_equal(got, expected)
         #
         # got = self.describe(any=["user"], strict=strict)
         # expected = QuotaOutput() if strict else compound_output
-        # self._assert_equal(got, expected)
+        # assert_equal(got, expected)
 
     @cluster(num_nodes=1)
     def test_error_handling(self):
@@ -509,7 +506,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
             Quota(entity=QuotaEntity.client_id_default(),
                   values=[QuotaValue.producer_byte_rate("10")])
         ])
-        self._assert_equal(got, expected)
+        assert_equal(got, expected)
 
     @cluster(num_nodes=3)
     def test_multi_node(self):
@@ -538,7 +535,7 @@ Quota configs for client-id 'custom-producer' are producer_byte_rate=20480.0"""
                 Quota(entity=QuotaEntity.client_id_default(),
                       values=[QuotaValue.producer_byte_rate("1111")])
             ])
-            self._assert_equal(got, expected)
+            assert_equal(got, expected)
             return True
 
         self.redpanda.logger.debug(

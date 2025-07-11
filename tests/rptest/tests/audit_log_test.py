@@ -50,6 +50,7 @@ from rptest.tests.schema_registry_test import (
     GetSubjectVersionsVersionReferencedBy, DeleteSubject, DeleteSubjectVersion,
     CompatibilitySubjectVersion, GetSchemasTypes, GetStatusReady)
 from rptest.util import expect_exception, wait_until, wait_until_result
+from rptest.utils.assertions import assert_equal, assert_in
 from rptest.utils.mode_checks import skip_fips_mode
 from rptest.utils.rpk_config import read_redpanda_cfg
 from rptest.utils.schema_registry_utils import Mode, get_subjects, put_mode
@@ -2297,12 +2298,6 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
         self.schema_data_1 = json.dumps({"schema": schema1_def})
         self.schema_data_2 = json.dumps({"schema": schema2_def})
 
-    def assert_equal(self, first, second, msg=None):
-        assert first == second, msg or f"{first} != {second}"
-
-    def assert_in(self, member, container, msg=None):
-        assert member in container, msg or f"{member!r} not found in {container!r}"
-
     def _create_acl(self,
                     resource,
                     resource_type,
@@ -2319,22 +2314,21 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
 
         resp = self.sr_client.post_security_acls(acl_list,
                                                  auth=self.super_auth)
-        self.assert_equal(resp.status_code, 201,
-                          f"Failed to create ACL: {acl=}")
+        assert_equal(resp.status_code, 201, f"Failed to create ACL: {acl=}")
 
         # Wait until the ACLs are propagated to all nodes
         def acl_all_observable():
             for node in self.redpanda.nodes:
                 resp = self.sr_client.get_security_acls(
                     hostname=node.account.hostname, auth=self.super_auth)
-                self.assert_equal(resp.status_code, 200)
+                assert_equal(resp.status_code, 200)
 
                 response_acls = resp.json()
                 for a in acl_list:
                     self.redpanda.logger.debug(
                         f"Checking if {a} in response from {node.account.hostname}: {response_acls}"
                     )
-                    self.assert_in(a, response_acls)
+                    assert_in(a, response_acls)
 
             return True
 
@@ -2348,7 +2342,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
     def _create_schema(self, subject: str) -> int:
         response = self.sr_client.post_subjects_subject_versions(
             subject, data=self.schema_data_1, auth=self.super_auth)
-        self.assert_equal(response.status_code, 200, "Failed to create schema")
+        assert_equal(response.status_code, 200, "Failed to create schema")
         return response.json()["id"]
 
     def match_api_record(self,
@@ -2451,7 +2445,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
         # Invalid AuthN — should be denied
         result = endpoint.make_request(
             (self.user.username, "invalid password"))
-        self.assert_equal(result.status_code, 401)
+        assert_equal(result.status_code, 401)
         _ = self.find_matching_record(
             lambda record: self.match_authn_record(record, StatusID.FAILURE),
             lambda record_count: record_count == 1 * request_ratio,
@@ -2459,7 +2453,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
 
         # No ACL — should be denied
         result = endpoint.make_request(self.user_auth)
-        self.assert_equal(result.status_code, 403)
+        assert_equal(result.status_code, 403)
         authn_success_count += 1
 
         self.check_matching_api_record(endpoint, StatusID.FAILURE)
@@ -2470,7 +2464,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
 
         # Try again — should now succeed
         result = endpoint.make_request(self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
         authn_success_count += 1
 
         self.check_matching_api_record(endpoint, StatusID.SUCCESS)
@@ -2492,7 +2486,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
         # Invalid AuthN — should be denied
         result = endpoint(schema_id,
                           auth=(self.user.username, "invalid password"))
-        self.assert_equal(result.status_code, 401)
+        assert_equal(result.status_code, 401)
         _ = self.find_matching_record(
             lambda record: self.match_authn_record(record, StatusID.FAILURE),
             lambda record_count: record_count == 1, 'authn attempt in sr')
@@ -2505,7 +2499,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
 
         # No ACL — should be denied
         result = endpoint(schema_id, auth=self.user_auth)
-        self.assert_equal(result.status_code, 403)
+        assert_equal(result.status_code, 403)
         authn_success_count += 1
         self.check_matching_api_record_parts(
             path=f"schemas/ids/{schema_id}",
@@ -2541,7 +2535,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
 
         # Invalid AuthN — should be denied
         result = endpoint(auth=(self.user.username, "invalid password"))
-        self.assert_equal(result.status_code, 401)
+        assert_equal(result.status_code, 401)
         _ = self.find_matching_record(
             lambda record: self.match_authn_record(record, StatusID.FAILURE),
             lambda record_count: record_count == 1, 'authn attempt in sr')
@@ -2561,7 +2555,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
 
         # Try again — should now succeed with the matching resource
         result = endpoint(auth=self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
         authn_success_count += 1
 
         for subjects, status in [(allowed_subjects, StatusID.SUCCESS),
@@ -2591,7 +2585,7 @@ class AuditLogTestSchemaRegistryACLs(AuditLogTestSchemaRegistryBase):
         endpoint.setup()
 
         result = endpoint.make_request(self.user_auth)
-        self.assert_equal(result.status_code, 200)
+        assert_equal(result.status_code, 200)
 
         self.check_matching_api_record(endpoint, StatusID.SUCCESS)
 
