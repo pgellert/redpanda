@@ -169,12 +169,16 @@ sharded_store::get_schema_version(stored_schema schema) {
       map, std::optional<schema_id>{}, reduce);
 
     // Determine if a provided schema id is appropriate
-    if (schema.id != invalid_schema_id) {
+    const auto& sub = schema.schema.sub();
+    const auto mode = co_await get_mode(sub, default_to_global::yes);
+    if (mode != mode::import && schema.id != invalid_schema_id) {
+        // TODO: throw here and only allow specifying the id in import mode
         if (s_id.has_value() && s_id != schema.id) {
             co_return ss::coroutine::return_exception(exception(
               error_code::subject_version_schema_id_already_exists,
               fmt::format(
-                "Schema already registered with id {} instead of input id {}",
+                "Schema already registered with id {} instead of input id "
+                "{}",
                 s_id.value()(),
                 schema.id())));
         } else if (co_await has_schema(schema.id)) {
@@ -191,9 +195,16 @@ sharded_store::get_schema_version(stored_schema schema) {
         vlog(srlog.debug, "project_ids: existing ID {}", s_id.value());
     }
 
+    if (
+      schema.id != invalid_schema_id && s_id != schema.id
+      && co_await has_schema(schema.id)) {
+        // The supplied id already exists, but the schema is different
+        co_return ss::coroutine::return_exception(
+          as_exception(schema_id_already_exists(schema.id)));
+    }
+
     // Determine if the subject already has a version that references this
     // schema, deleted versions are seen.
-    const auto& sub = schema.schema.sub();
     const auto versions = co_await _store.invoke_on(
       shard_for(sub),
       _smp_opts,
@@ -218,7 +229,7 @@ sharded_store::get_schema_version(stored_schema schema) {
     }
 
     // Check compatibility of the schema
-    if (!v_id.has_value() && !versions.empty()) {
+    if (!v_id.has_value() && !versions.empty() && mode != mode::import) {
         auto compat = co_await is_compatible(
           versions.back().version, schema.schema.share(), verbose::yes);
         if (!compat.is_compat) {
