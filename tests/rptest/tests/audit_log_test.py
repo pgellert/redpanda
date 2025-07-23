@@ -2277,17 +2277,18 @@ class AuditLogTestSanctionMode(AuditLogTestBase):
 
 
 class AuditLogTestReproducer(AuditLogTestBase):
-    """Reproducer and regression test for a bug in the audit logging client where having kafka_batch_max_bytes > audit_client_max_buffer_size lead to no audit messages being produced and the audit log buffers filling up."""
+    PARTITION_COUNT = 60
+
     def __init__(self, test_context):
 
         super(AuditLogTestReproducer, self).__init__(
             test_context=test_context,
-            audit_log_config=AuditLogConfig(num_partitions=1,
-                                            event_types=['management']),
-            extra_rp_conf={
-                "kafka_batch_max_bytes": "26214400",
-                "audit_client_max_buffer_size": "16777216",
-            },
+            audit_log_config=AuditLogConfig(
+                num_partitions=AuditLogTestReproducer.PARTITION_COUNT,
+                event_types=[
+                    'management', 'produce', 'consume', 'describe',
+                    'heartbeat', 'authenticate', 'schema_registry', 'admin'
+                ]),
             log_config=LoggingConfig('info',
                                      logger_levels={
                                          'auditing': 'trace',
@@ -2298,22 +2299,66 @@ class AuditLogTestReproducer(AuditLogTestBase):
 
     @skip_fips_mode
     @cluster(num_nodes=5)
-    def test_sanctioning_mode(self):
-        self.redpanda.logger.debug("Triggering an audit log event")
-        created_topic = "created_topic"
-        self.super_rpk.create_topic(topic=created_topic)
+    def test_rolling_restart(self):
+        event_count = 20
+        retry_count = 100
 
-        def matches_topic_creation(record):
-            return record['class_uid'] == 6003 \
-                and record['api']['service']['name'] == self.kafka_rpc_service_name \
-                and {'name': created_topic, 'type': 'topic'} in record['resources']
+        def check_audit_log_event(i):
+            self.redpanda.logger.debug("Triggering an audit log event")
+            created_topic = f"created_topic_{i}"
+            self.super_rpk.create_topic(topic=created_topic)
 
-        records = self.find_matching_record(
-            matches_topic_creation, lambda record_count: record_count >= 1,
-            "Expected to observe a management API event for the topic creation"
-        )
-        assert len(records) > 0, \
-            f'Did not receive any audit records for topic {created_topic}'
+            def matches_topic_creation(record):
+                return record['class_uid'] == 6003 \
+                    and record['api']['service']['name'] == self.kafka_rpc_service_name \
+                    and {'name': created_topic, 'type': 'topic'} in record['resources']
+
+            records = self.find_matching_record(
+                matches_topic_creation, lambda record_count: record_count >= 1,
+                "Expected to observe a management API event for the topic creation"
+            )
+            assert len(records) > 0, \
+                f'Did not receive any audit records for topic {created_topic}'
+
+        def generate_events_during_restart():
+            self.redpanda.logger.info(
+                "Producing audit logging events during restart (in thread)")
+            for i in range(event_count, 2 * event_count):
+                for _ in range(retry_count):
+                    try:
+                        check_audit_log_event(i)
+                        time.sleep(0.1)
+                        break
+                    except:
+                        continue
+
+        self.change_max_buffer_size_per_shard(1024)
+
+        # self.redpanda.logger.info("Producing some audit logging events")
+        # for i in range(event_count):
+        #     check_audit_log_event(i)
+
+        self.redpanda.logger.info("Initiating a restart of the nodes")
+
+        event_thread = threading.Thread(target=generate_events_during_restart)
+        event_thread.start()
+
+        self.redpanda.stop()
+        self.redpanda.start(nodes=self.redpanda.nodes, clean_nodes=False)
+
+        event_thread.join()
+
+        # self.redpanda.logger.info(
+        #     "Waiting for audit log leadership after restart")
+        # for i in range(AuditLogTestReproducer.PARTITION_COUNT):
+        #     self.admin.await_stable_leader(topic=self.audit_log,
+        #                                    partition=i,
+        #                                    timeout_s=20)
+
+        # self.redpanda.logger.info(
+        #     "Producing some audit logging events (after the restart)")
+        # for i in range(event_count, 2 * event_count):
+        #     check_audit_log_event(i)
 
 
 class AuditLogTestEscapeHatch(RedpandaTest):

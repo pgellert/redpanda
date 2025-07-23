@@ -1037,7 +1037,9 @@ audit_log_manager::should_enqueue_audit_event(
   event_type type,
   const security::acl_principal& principal,
   ignore_enabled_events ignore_events) const {
-    if (_audit_excluded_principals.contains(principal)) {
+    if (
+      _audit_excluded_principals.contains(principal)
+      || principal == audit_principal) {
         return std::make_optional(audit_event_passthrough::yes);
     }
 

@@ -49,11 +49,8 @@ namespace kafka {
 
 /// Checks to see if the event is auditable.
 /// Current check will exclude any produce messages by the audit principal
-inline bool
-skip_auditing(api_key key, const security::acl_principal& principal) {
-    return security::audit::kafka_api_to_event_type(key)
-             == security::audit::event_type::produce
-           && principal == security::audit_principal;
+inline bool skip_auditing(const security::acl_principal& principal) {
+    return principal == security::audit_principal;
 }
 
 inline constexpr auto request_header_size = sizeof(int16_t) + sizeof(int16_t)
@@ -369,7 +366,7 @@ public:
         auto key = _header.key;
 
         // Not auditing produce authz attempts from audit principal
-        if (skip_auditing(key, result.principal)) [[unlikely]] {
+        if (skip_auditing(result.principal)) [[unlikely]] {
             return resp;
         }
 
@@ -429,7 +426,7 @@ private:
       const T& name,
       api_key key,
       std::optional<std::string_view> client_id) {
-        if (skip_auditing(key, auth_result.principal)) [[unlikely]] {
+        if (skip_auditing(auth_result.principal)) [[unlikely]] {
             return;
         }
 
