@@ -587,6 +587,8 @@ ss::future<> audit_client::do_produce(
     // in memory when each produce_record_batch's retries are exhausted. This
     // way the kafka client should periodically refresh its internal metadata.
     std::optional<kafka::error_code> ec;
+    uint64_t retries{0};
+    constexpr uint64_t unexpectedly_large_number_of_retries = 25;
     while (!_as.abort_requested() && ss::timer<>::clock::now() < timeout) {
         auto r = co_await _client.produce_record_batch(
           model::topic_partition{model::kafka_audit_logging_topic, pid},
@@ -595,6 +597,16 @@ ss::future<> audit_client::do_produce(
         co_await update_status(ec.value());
         if (ec.value() == kafka::error_code::none) {
             break;
+        } else if (retries >= unexpectedly_large_number_of_retries) {
+            thread_local static ss::logger::rate_limit rate(1s);
+            vloglr(
+              adtlog,
+              ss::log_level::error,
+              rate,
+              "Audit log production slow progress: {} retries with last error: "
+              "{}",
+              retries,
+              ec);
         }
     }
 
