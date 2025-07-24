@@ -4130,6 +4130,144 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         result_raw = self.sr_client.get_schemas_ids_id_versions(id=1)
         assert result_raw.status_code == 200
 
+    @cluster(num_nodes=3)
+    def test_enabling_import_mode(self):
+        """
+        Test the conditions on enabling import mode
+        """
+        sub1 = "test-subject-1"
+        sub2 = "test-subject-2"
+
+        schema1 = json.dumps({"schema": schema1_def})
+        schema2 = json.dumps({"schema": schema2_def})
+
+        # Test criteria for enabling global-level import mode (schema registry is empty)
+        self.logger.info("Testing global import mode enablement conditions")
+
+        self.logger.debug("Creating schema for global import mode testing")
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject=sub1, data=schema1)
+        self.assert_equal(result_raw.status_code, 200)
+
+        self.logger.debug(
+            "Try to enable global import mode with existing schema - should fail"
+        )
+        result_raw = self.sr_client.set_mode(
+            data=json.dumps({"mode": "IMPORT"}))
+        self.assert_equal(result_raw.status_code, 422)
+        self.assert_equal(result_raw.json()["error_code"], 42205)
+
+        self.logger.debug(
+            "Try to enable global import mode with existing schema with force=true - should succeed"
+        )
+        result_raw = self.sr_client.set_mode(data=json.dumps(
+            {"mode": "IMPORT"}),
+                                             force=True)
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["mode"], "IMPORT")
+
+        self.logger.debug("Reset to READWRITE mode")
+        result_raw = self.sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"}))
+        self.assert_equal(result_raw.status_code, 200)
+
+        self.logger.debug("Soft delete schema version")
+        result_raw = self.sr_client.delete_subject_version(subject=sub1,
+                                                           version=1)
+        self.assert_equal(result_raw.status_code, 200)
+
+        self.logger.debug(
+            "Try to enable global import mode after soft delete - should still fail"
+        )
+        result_raw = self.sr_client.set_mode(
+            data=json.dumps({"mode": "IMPORT"}))
+        self.assert_equal(result_raw.status_code, 422)
+        self.assert_equal(result_raw.json()["error_code"], 42205)
+
+        self.logger.debug("Hard delete schema version")
+        result_raw = self.sr_client.delete_subject_version(subject=sub1,
+                                                           version=1,
+                                                           permanent=True)
+        self.assert_equal(result_raw.status_code, 200)
+
+        self.logger.debug(
+            "Enable global import mode after hard delete - should succeed")
+        result_raw = self.sr_client.set_mode(
+            data=json.dumps({"mode": "IMPORT"}))
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["mode"], "IMPORT")
+
+        self.logger.debug("Reset global mode for further testing")
+        result_raw = self.sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"}))
+        self.assert_equal(result_raw.status_code, 200)
+
+        # Test subject-level criteria for enabling subject-level import mode (subject is empty)
+        self.logger.info(
+            "Testing subject-level import mode enablement conditions")
+
+        self.logger.debug(
+            "Creating schema for subject-level import mode testing")
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject=sub2, data=schema2)
+        self.assert_equal(result_raw.status_code, 200)
+
+        self.logger.debug(
+            "Try to enable subject import mode with existing schema - should fail"
+        )
+        result_raw = self.sr_client.set_mode_subject(subject=sub2,
+                                                     data=json.dumps(
+                                                         {"mode": "IMPORT"}))
+        self.assert_equal(result_raw.status_code, 422)
+        self.assert_equal(result_raw.json()["error_code"], 42205)
+
+        self.logger.debug(
+            "Try to enable subject import mode with existing schema with force=true - should succeed"
+        )
+        result_raw = self.sr_client.set_mode_subject(subject=sub2,
+                                                     data=json.dumps(
+                                                         {"mode": "IMPORT"}),
+                                                     force=True)
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["mode"], "IMPORT")
+
+        self.logger.debug("Reset to READWRITE mode")
+        result_raw = self.sr_client.set_mode_subject(
+            subject=sub2, data=json.dumps({"mode": "READWRITE"}))
+        self.assert_equal(result_raw.status_code, 200)
+
+        self.logger.debug("Soft delete schema for subject")
+        result_raw = self.sr_client.delete_subject_version(subject=sub2,
+                                                           version=1)
+        self.assert_equal(result_raw.status_code, 200)
+
+        self.logger.debug(
+            "Try to enable subject import mode after soft delete - should still fail"
+        )
+        result_raw = self.sr_client.set_mode_subject(subject=sub2,
+                                                     data=json.dumps(
+                                                         {"mode": "IMPORT"}))
+        self.assert_equal(result_raw.status_code, 422)
+        self.assert_equal(result_raw.json()["error_code"], 42205)
+
+        self.logger.debug("Hard delete schema for subject")
+        result_raw = self.sr_client.delete_subject_version(subject=sub2,
+                                                           version=1,
+                                                           permanent=True)
+        self.assert_equal(result_raw.status_code, 200)
+
+        self.logger.debug(
+            "Enable subject import mode after hard delete - should succeed")
+        result_raw = self.sr_client.set_mode_subject(subject=sub2,
+                                                     data=json.dumps(
+                                                         {"mode": "IMPORT"}))
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["mode"], "IMPORT")
+
+        self.logger.debug("Cleaning up - reset modes")
+        result_raw = self.sr_client.delete_mode_subject(subject=sub2)
+        self.assert_equal(result_raw.status_code, 200)
+
 
 class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
     """
