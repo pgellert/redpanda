@@ -179,34 +179,9 @@ sharded_store::get_schema_version(stored_schema schema) {
             co_return ss::coroutine::return_exception(
               as_exception(overwrite_schema_with_id_not_permitted(schema.id)));
         }
-        vlog(
-          srlog.debug,
-          "get_schema_version: existing ID {} in import mode",
-          s_id);
-    } else if (schema.id != invalid_schema_id) {
-        if (s_id.has_value() && s_id != schema.id) {
-            co_return ss::coroutine::return_exception(exception(
-              error_code::subject_version_schema_id_already_exists,
-              fmt::format(
-                "Schema already registered with id {} instead of input id "
-                "{}",
-                s_id.value()(),
-                schema.id())));
-        } else if (co_await has_schema(schema.id)) {
-            // The supplied id already exists, but the schema is different
-            co_return ss::coroutine::return_exception(
-              as_exception(overwrite_schema_with_id_not_permitted(schema.id)));
-        } else {
-            // Use the supplied id
-            s_id = schema.id;
-            vlog(
-              srlog.debug,
-              "get_schema_version: using supplied ID {}",
-              s_id.value());
-        }
-    } else if (s_id) {
-        vlog(srlog.debug, "get_schema_version: existing ID {}", s_id.value());
     }
+
+    vlog(srlog.debug, "get_schema_version: existing ID {}", s_id);
 
     // Determine if the subject already has a version that references this
     // schema, deleted versions are seen.

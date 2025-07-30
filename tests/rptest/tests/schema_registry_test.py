@@ -4039,6 +4039,13 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
     def test_schema_id_smaller_than_one(self):
         sub = "test-subject-1"
 
+        self.logger.debug(
+            f"Enable IMPORT mode to allow posting with specific ids")
+        result_raw = self.sr_client.set_mode(
+            data=json.dumps({"mode": "IMPORT"}))
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["mode"], "IMPORT")
+
         self.logger.debug("Post a schema with id=0 - expect schema_id=0")
         result_raw = self.sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({
@@ -4048,8 +4055,24 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["id"], 0)
 
+        self.logger.debug("Post another schema with id=-1 - should fail")
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            sub, data=json.dumps({
+                "id": -1,
+                "schema": schema2_def
+            }))
+        self.assert_equal(result_raw.status_code, 422)
+        self.assert_equal(result_raw.json()["error_code"], 42205)
+
+        self.logger.debug("Enable READWRITE mode")
+        result_raw = self.sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"}))
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["mode"], "READWRITE")
+
         self.logger.debug(
-            "Post another schema with id=-1 - expect schema_id=1")
+            "Post another schema with id=-1 (now in r/w mode) - should succeed"
+        )
         result_raw = self.sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({
                 "id": -1,
@@ -4062,10 +4085,18 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
     def test_schema_id_exhausted(self):
         sub = "test-subject-1"
 
+        self.logger.debug(
+            f"Enable IMPORT mode to allow posting specific versions")
+        result_raw = self.sr_client.set_mode(
+            data=json.dumps({"mode": "IMPORT"}))
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["mode"], "IMPORT")
+
         self.logger.debug("Post a schema with INT_MAX version")
         result_raw = self.sr_client.post_subjects_subject_versions(
             sub,
             data=json.dumps({
+                "id": 1,
                 "version": 2147483647,
                 "schema": schema1_def
             }))
@@ -4075,7 +4106,10 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Post another schema - expect version exhausted error")
         result_raw = self.sr_client.post_subjects_subject_versions(
-            sub, data=json.dumps({"schema": schema2_def}))
+            sub, data=json.dumps({
+                "id": 2,
+                "schema": schema2_def
+            }))
         self.assert_equal(result_raw.status_code, 500)
         self.assert_equal(result_raw.json()["message"],
                           f"Versions exhausted for subject {sub}")
@@ -4422,6 +4456,75 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         test_schemas_ids_id(12, expected_successful=True)
         test_schemas_ids_id(13, expected_successful=True)
         test_schemas_ids_id(14, expected_successful=True)
+
+    @cluster(num_nodes=3)
+    @matrix(subject_scope=[False, True])
+    def test_readwrite_mode_id_behaviour(self, subject_scope):
+        """Test expected READWRITE mode behaviour when the id is specified when trying to register a schema"""
+        sub1 = "test-subject-1"
+        expected_ver_to_id = {}
+
+        if subject_scope:
+            self.logger.debug(f"Configure READWRITE mode for subject {sub1}")
+            # Overwrite a global-scoped IMPORT-mode to test that subject-level overwriting works
+            result_raw = self.sr_client.set_mode(
+                data=json.dumps({"mode": "IMPORT"}))
+            self.assert_equal(result_raw.status_code, 200)
+            self.assert_equal(result_raw.json()["mode"], "IMPORT")
+
+            result_raw = self.sr_client.set_mode_subject(
+                subject=sub1, data=json.dumps({"mode": "READWRITE"}))
+            self.assert_equal(result_raw.status_code, 200)
+            self.assert_equal(result_raw.json()["mode"], "READWRITE")
+        else:
+            self.logger.debug(f"Configure READWRITE mode for subject {sub1}")
+            # Noop
+
+        self.logger.debug(
+            "Post a schema for the first time while specifying an id - should fail"
+        )
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject=sub1, data=json.dumps({
+                "schema": schema1_def,
+                "id": 1
+            }))
+        self.assert_equal(result_raw.status_code, 422)
+        self.assert_equal(result_raw.json()["error_code"], 42205)
+
+        self.logger.debug("Post a schema without an id - should succeed")
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject=sub1, data=json.dumps({"schema": schema1_def}))
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["id"], 1)
+        expected_ver_to_id[1] = 1
+
+        self.logger.debug(
+            "Post the schema again with the same id - should succeed")
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject=sub1, data=json.dumps({
+                "schema": schema1_def,
+                "id": 1
+            }))
+        self.assert_equal(result_raw.status_code, 200)
+        self.assert_equal(result_raw.json()["id"], 1)
+
+        self.logger.debug(
+            "Post the schema again with a different id - should fail")
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject=sub1, data=json.dumps({
+                "schema": schema1_def,
+                "id": 2
+            }))
+        self.assert_equal(result_raw.status_code, 422)
+        self.assert_equal(result_raw.json()["error_code"], 42205)
+
+        self.logger.debug(
+            f"Finally, sanity check the expected set of schemas - expecting: {expected_ver_to_id=}"
+        )
+        rpk = self._get_rpk_tools()
+        resp = rpk.list_schemas([sub1])
+        got_ver_to_id = {int(elem["version"]): elem["id"] for elem in resp}
+        self.assert_equal(expected_ver_to_id, got_ver_to_id)
 
 
 class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):

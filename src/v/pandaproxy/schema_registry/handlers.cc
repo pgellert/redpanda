@@ -558,12 +558,22 @@ post_subject_versions(server::request_t rq, server::reply_t rp) {
     auto ids = co_await rq.service().schema_store().get_schema_version(
       schema.share());
 
-    const auto mode = co_await rq.service().schema_store().get_mode(
-      sub, default_to_global::yes);
-    const auto should_reinsert = mode == mode::import && ids.id != schema.id;
+    const auto id_matches
+      = ids.id.has_value()
+        && (schema.id == invalid_schema_id || schema.id == ids.id);
+    const auto version_matches
+      = ids.version.has_value()
+        && (schema.version == invalid_schema_version || schema.version == ids.version);
+    const auto exists = id_matches && version_matches;
 
     schema_id schema_id{ids.id.value_or(invalid_schema_id)};
-    if (!ids.version.has_value() || should_reinsert) {
+    if (!exists) {
+        const auto mode = co_await rq.service().schema_store().get_mode(
+          schema.schema.sub(), default_to_global::yes);
+        if (schema.id >= 0 && mode != mode::import) {
+            throw as_exception(mode_not_import(schema.schema.sub()));
+        }
+
         schema.id = (schema.id == invalid_schema_id)
                       ? ids.id.value_or(invalid_schema_id)
                       : schema.id;
