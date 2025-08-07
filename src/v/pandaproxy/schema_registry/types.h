@@ -480,6 +480,21 @@ struct stored_schema {
     }
 };
 
+///\brief A mapping of version and schema id for a subject.
+struct subject_version_entry {
+    subject_version_entry(
+      schema_version version, schema_id id, is_deleted deleted)
+      : version{version}
+      , id{id}
+      , deleted(deleted) {}
+
+    schema_version version;
+    schema_id id;
+    is_deleted deleted{is_deleted::no};
+
+    std::vector<seq_marker> written_at;
+};
+
 enum class compatibility_level {
     none = 0,
     backward,
@@ -549,8 +564,8 @@ struct compatibility_result {
 
 template<>
 struct fmt::formatter<pandaproxy::schema_registry::schema_reference> {
-    constexpr auto parse(fmt::format_parse_context& ctx)
-      -> decltype(ctx.begin()) {
+    constexpr auto
+    parse(fmt::format_parse_context& ctx) -> decltype(ctx.begin()) {
         auto it = ctx.begin();
         auto end = ctx.end();
         if (it != end && (*it == 'l' || *it == 'e')) {
