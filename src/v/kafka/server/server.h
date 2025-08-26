@@ -42,8 +42,14 @@
 #include <seastar/core/sharded.hh>
 #include <seastar/core/smp.hh>
 
+#include <deque>
+
 namespace ssx {
 class singleton_thread_worker;
+}
+
+namespace admin {
+class kafka_connections_service_impl;
 }
 
 namespace kafka {
@@ -245,8 +251,12 @@ public:
     void
     mark_datalake_producer(const std::optional<std::string_view>& client_id);
 
+    size_t connection_count() const { return _connections.size(); }
+
 private:
     void setup_metrics();
+
+    friend class admin::kafka_connections_service_impl;
 
     ss::smp_service_group _smp_group;
     ss::scheduling_group _fetch_scheduling_group;
@@ -294,6 +304,7 @@ private:
     std::unique_ptr<replica_selector> _replica_selector;
     const std::unique_ptr<pandaproxy::schema_registry::api>& _schema_registry;
     boost::intrusive::list<connection_context> _connections;
+    std::deque<recent_connection_info> _recent_connections;
 };
 
 } // namespace kafka

@@ -140,6 +140,7 @@
 #include "redpanda/admin/proxy/service.h"
 #include "redpanda/admin/server.h"
 #include "redpanda/admin/services/internal/debug.h"
+#include "redpanda/admin/services/kafka_connections/kafka_connections.h"
 #include "redpanda/admin/services/shadow_link/shadow_link.h"
 #include "resource_mgmt/memory_groups.h"
 #include "resource_mgmt/memory_sampling.h"
@@ -1150,18 +1151,25 @@ void application::configure_admin_server(model::node_id node_id) {
       std::ref(tx_gateway_frontend),
       std::ref(_debug_bundle_service))
       .get();
+
     _admin
       .invoke_on_all([this, node_id](admin_server& s) {
-          admin::proxy::client client(node_id, &_connection_cache, [this] {
-              return controller->get_members_table().local().node_ids();
-          });
+          auto make_client = [&]() {
+              return admin::proxy::client(node_id, &_connection_cache, [this] {
+                  return controller->get_members_table().local().node_ids();
+              });
+          };
+
           // Add RPC services
           s.add_service(
             std::make_unique<admin::shadow_link_service_impl>(
               &_cluster_link_service));
           s.add_service(
             std::make_unique<admin::debug_service_impl>(
-              std::move(client), stress_fiber_manager));
+              make_client(), stress_fiber_manager));
+          s.add_service(
+            std::make_unique<admin::kafka_connections_service_impl>(
+              make_client(), _kafka_server.ref()));
       })
       .get();
 }

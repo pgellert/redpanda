@@ -1,0 +1,253 @@
+// Copyright 2025 Redpanda Data, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package redpanda.core.admin;
+
+import "proto/redpanda/pbgen/options.proto";
+import "proto/redpanda/pbgen/rpc.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+option (redpanda.pbgen.cpp_namespace) = "proto::admin";
+
+service KafkaConnectionService {
+    rpc ListConnections(ListConnectionsRequest)
+        returns (ListConnectionsResponse) {
+        option (redpanda.pbgen.rpc) = {
+            authz: SUPERUSER
+        };
+    }
+
+    rpc ListAggregatedConnections(ListAggregatedConnectionsRequest)
+        returns (ListAggregatedConnectionsResponse) {
+        option (redpanda.pbgen.rpc) = {
+            authz: SUPERUSER
+        };
+    }
+}
+
+/* Resources */
+// A KafkaConnection resource
+// TODO: renumber the fields to be in order
+message KafkaConnection {
+    // The node ID of the Redpanda node.
+    int32 node_id = 1;
+    // The shard of the Redpanda node.
+    uint32 shard_id = 2;
+
+    google.protobuf.Timestamp open_time = 3;
+
+    // The time when the connection was closed for some recently-closed
+    // connections
+    google.protobuf.Timestamp close_time = 4;
+
+    AuthenticationInfo authentication_info = 5;
+    string listener_name = 6;
+    TLSInfo tls_info = 7;
+    Source source = 8;
+
+    // Latest client id seen on the request
+    string client_id = 9;
+    // As specified by the first ApiVersions request (v3+)
+    string client_software_name = 10;
+    // As specified by the first ApiVersions request (v3+)
+    string client_software_version = 11;
+
+    string transactional_id = 12;
+    string group_id = 13;
+    string group_instance_id = 14;
+    string group_member_id = 15;
+
+    ApiVersions api_versions = 16;
+
+    // Time since no inflight requests
+    google.protobuf.Duration idle_duration = 17;
+    InFlightRequests in_flight_requests = 18;
+
+    uint64 produce_tput_total = 19;
+    uint64 produce_tput_last_1min = 20;
+    uint64 fetch_tput_total = 21;
+    uint64 fetch_tput_last_1min = 22;
+    uint64 request_count_total = 23;
+    uint64 request_count_last_1min = 24;
+
+    // for calculating the average batch size as total / count
+    uint64 produce_batch_record_bytes_total = 25;
+    uint64 produce_batch_record_count_total = 26;
+}
+
+message AggregatedKafkaConnection {
+    message Key {
+        string client_id = 1;
+        string user_principal = 2;
+        string source_ip = 3;
+        int32 node_id = 4;
+        int32 shard_id = 5;
+    }
+
+    message Value {
+        uint64 open_connection_count = 1;
+
+        // All of the below are SUM'ed over the connections
+        uint64 produce_tput_last_1min = 2;
+        uint64 fetch_tput_last_1min = 3;
+        uint64 request_count_last_1min = 4;
+
+        // Calculated as MIN over the connections
+        google.protobuf.Duration idle_duration = 5;
+
+        // TODO: we could add a sample of some of the values here
+        // repeated string client_ids
+        // repeated string user_principals
+        // repeated string source_ips
+        // repeated int32 brokers
+        // repeated int32 shards
+        // repeated string group_id
+    }
+
+    // The aggregation key the data was aggregated by
+    Key key = 1;
+
+    // The aggregated values
+    Value value = 2;
+}
+
+/* RPC Requests and Responses */
+// Request to list all kafka connections
+message ListConnectionsRequest {
+    // The broker whose connections to list
+    int32 node_id = 1;
+    // The maximum number of connections to return. The service may return fewer
+    // than this value.
+    // Note that paging is not fully supported for now, so for now, this field
+    // only acts as a limit for the 1 page of data returned, subsequent pages of
+    // data cannot be requested.
+    int32 page_size = 2;
+
+    // Filter syntax as per: https://google.aip.dev/160
+    // TODO: clarify what subset of the AIP and which fields we support
+    string filter = 3;
+
+    // Ordering syntax as per: https://google.aip.dev/132#ordering
+    // TODO: document error handling behaviour if cross-node aggregation is
+    // implemented
+    string order_by = 4;
+
+    // TODO: support returning a full-list of connections using pagination
+    // string page_token;
+}
+// Kafka connections on the cluster
+message ListConnectionsResponse {
+    // The list of connection as per the request
+    // Note that, apart from open connections, some recently-closed connections
+    // may also be included here. If that is not desirable, use the filter field
+    // of the request.
+    repeated KafkaConnection connections = 1;
+
+    // TODO: support returning a full-list of connections using pagination
+    // string next_page_token;
+}
+
+message ListAggregatedConnectionsRequest {
+    // The broker whose connections to list
+    int32 node_id = 1;
+    // List of fields to aggregate by
+    // Allowed fields: client_id, user_principal, source_ip, shard_id
+    // TODO: consider turning this into an enum
+    repeated string aggregate_by = 2;
+
+    // Filter syntax as per: https://google.aip.dev/160
+    // TODO: clarify what subset of the AIP and which fields we support
+    string filter = 3;
+
+    // Ordering syntax as per: https://google.aip.dev/132#ordering
+    // TODO: document error handling behaviour if cross-node aggregation is
+    // implemented
+    string order_by = 4;
+
+    // The maximum number of aggregated rows to return. The service may return
+    // fewer than this value.
+    int32 page_size = 5;
+}
+
+message ListAggregatedConnectionsResponse {
+    // The list of aggregated connection as per the request
+    repeated AggregatedKafkaConnection aggregated_connections = 1;
+}
+
+/* Other Messages */
+message AuthenticationInfo {
+    message SASLInfo {
+        google.protobuf.Timestamp last_attempt_time = 1;
+        int32 unsuccessful_count_total = 2;
+    }
+
+    AuthenticationState state = 1;
+    AuthenticationMechanism mechanism = 2;
+    string user_principal = 3;
+
+    // Further information when the mechanism is one of the SASL mechanisms
+    SASLInfo sasl_info = 4;
+}
+
+message TLSInfo {
+    // True if TLS is in use
+    bool enabled = 1;
+
+    // TODO: later add TLS version, etc.
+}
+
+message Source {
+    string ip = 1;
+    uint32 port = 2;
+}
+
+message InFlightRequests {
+    message Request {
+        int32 api_key = 1;
+        google.protobuf.Duration in_flight_duration = 2;
+    }
+
+    // The most recent few (currently 5) in-flight requests on the connection
+    repeated Request requests = 1;
+    bool has_more_requests = 2;
+}
+
+message ApiVersions {
+    message Version {
+        int32 min_version = 1;
+        int32 max_version = 2;
+    };
+    // Map of API versions keyed by the Kafka API key number
+    map<int32, Version> versions = 1;
+}
+
+/* Enums */
+enum AuthenticationState {
+    AUTHENTICATION_STATE_UNSPECIFIED = 0;
+    AUTHENTICATION_STATE_UNAUTHENTICATED = 1;
+    AUTHENTICATION_STATE_SUCCESS = 2;
+    AUTHENTICATION_STATE_FAILURE = 3;
+}
+
+enum AuthenticationMechanism {
+    AUTHENTICATION_MECHANISM_UNSPECIFIED = 0;
+    AUTHENTICATION_MECHANISM_MTLS = 1;
+    AUTHENTICATION_MECHANISM_SASL_SCRAM = 2;
+    AUTHENTICATION_MECHANISM_SASL_OAUTHBEARER = 3;
+    AUTHENTICATION_MECHANISM_SASL_PLAIN = 4;
+    AUTHENTICATION_MECHANISM_SASL_GSSAPI = 5;
+}

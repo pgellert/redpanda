@@ -146,6 +146,11 @@ struct virtual_connection_id {
     friend std::ostream&
     operator<<(std::ostream& o, const virtual_connection_id& id);
 };
+
+struct recent_connection_info {
+    // TODO
+};
+
 class connection_context final
   : public ss::enable_lw_shared_from_this<connection_context>
   , public boost::intrusive::list_base_hook<> {
@@ -153,6 +158,7 @@ public:
     connection_context(
       std::optional<std::reference_wrapper<
         boost::intrusive::list<connection_context>>> hook,
+      std::deque<recent_connection_info>& recent_connections,
       server& s,
       ss::lw_shared_ptr<net::connection> conn,
       std::optional<security::sasl_server> sasl,
@@ -198,6 +204,8 @@ public:
     }
 
     bool tls_enabled() const { return conn->tls_enabled(); }
+
+    recent_connection_info get_preclose_info() const;
 
 private:
     template<typename T>
@@ -468,6 +476,7 @@ private:
     std::optional<
       std::reference_wrapper<boost::intrusive::list<connection_context>>>
       _hook;
+    std::deque<recent_connection_info>& _recent_connections;
     class server& _server;
     ss::lw_shared_ptr<net::connection> conn;
 

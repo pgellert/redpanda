@@ -48,6 +48,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <memory>
 
@@ -58,6 +59,9 @@ namespace kafka {
 namespace {
 static constexpr std::string_view
   multi_proxy_initial_client_id("__redpanda_mpx");
+
+constexpr size_t max_recent_connection_info = 5;
+
 /**
  * Exception thrown when virtual connection id provided in header client_id
  * field is not valid
@@ -161,6 +165,7 @@ parse_virtual_connection_id(const kafka::request_header& header) {
 connection_context::connection_context(
   std::optional<
     std::reference_wrapper<boost::intrusive::list<connection_context>>> hook,
+  std::deque<recent_connection_info>& recent_connections,
   class server& s,
   ss::lw_shared_ptr<net::connection> conn,
   std::optional<security::sasl_server> sasl,
@@ -170,6 +175,7 @@ connection_context::connection_context(
   config::conversion_binding<std::vector<bool>, std::vector<ss::sstring>>
     kafka_throughput_controlled_api_keys) noexcept
   : _hook(hook)
+  , _recent_connections(recent_connections)
   , _server(s)
   , conn(conn)
   , _protocol_state()
@@ -210,6 +216,10 @@ ss::future<> connection_context::start() {
 }
 
 ss::future<> connection_context::stop() {
+    _recent_connections.emplace_back(get_preclose_info());
+    while (_recent_connections.size() > max_recent_connection_info) {
+        _recent_connections.pop_front();
+    }
     if (_hook && is_linked()) {
         _hook.value().get().erase(_hook.value().get().iterator_to(*this));
     }
@@ -1008,6 +1018,11 @@ ss::future<> connection_context::client_protocol_state::maybe_process_responses(
     return ss::repeat([this, connection_ctx]() {
         return do_process_responses(connection_ctx);
     });
+}
+
+recent_connection_info connection_context::get_preclose_info() const {
+    // TODO: fill out
+    return recent_connection_info{};
 }
 
 std::ostream& operator<<(std::ostream& o, const virtual_connection_id& id) {
