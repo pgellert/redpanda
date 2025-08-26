@@ -372,6 +372,7 @@ ss::future<> server::apply(ss::lw_shared_ptr<net::connection> conn) {
 
     auto ctx = ss::make_lw_shared<connection_context>(
       _connections,
+      _recent_connections,
       *this,
       conn,
       std::move(sasl),

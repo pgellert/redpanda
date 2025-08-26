@@ -28,6 +28,19 @@ proto_library(
     ],
 )
 
+proto_library(
+    name = "kafka_connections_proto",
+    srcs = ["kafka_connections.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//proto/redpanda/core/common:common_proto",
+        "//proto/redpanda/pbgen:options_proto",
+        "//proto/redpanda/pbgen:rpc_proto",
+        "@protobuf//:duration_proto",
+        "@protobuf//:timestamp_proto",
+    ],
+)
+
 redpanda_proto_library(
     name = "admin_redpanda_proto",
     protos = [":admin_proto"],
@@ -39,6 +52,18 @@ redpanda_proto_library(
     protos = [":shadow_link_proto"],
     visibility = ["//visibility:public"],
     deps = [
+        "//proto/redpanda/core/common:common_redpanda_proto",
+        "//src/v/serde/protobuf:field_mask",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+redpanda_proto_library(
+    name = "kafka_connections_redpanda_proto",
+    protos = [":kafka_connections_proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        # TODO: clean up dependencies
         "//proto/redpanda/core/common:common_redpanda_proto",
         "//src/v/serde/protobuf:field_mask",
         "@abseil-cpp//absl/time:time",
