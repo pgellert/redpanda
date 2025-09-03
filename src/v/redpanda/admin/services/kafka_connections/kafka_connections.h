@@ -24,13 +24,15 @@ public:
     kafka_connections_service_impl(
       admin::proxy::client, ss::sharded<kafka::server>&);
 
-    ss::future<proto::admin::list_connections_response> list_connections(
-      serde::pb::rpc::context, proto::admin::list_connections_request) override;
-
-    ss::future<proto::admin::list_aggregated_connections_response>
-      list_aggregated_connections(
+    ss::future<proto::admin::list_kafka_connections_response>
+      list_kafka_connections(
         serde::pb::rpc::context,
-        proto::admin::list_aggregated_connections_request) override;
+        proto::admin::list_kafka_connections_request) override;
+
+    ss::future<proto::admin::aggregate_connections_response>
+      aggregate_connections(
+        serde::pb::rpc::context,
+        proto::admin::aggregate_connections_request) override;
 
 private:
     admin::proxy::client _proxy_client;

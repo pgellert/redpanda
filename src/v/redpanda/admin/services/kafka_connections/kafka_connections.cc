@@ -41,10 +41,10 @@ kafka_connections_service_impl::kafka_connections_service_impl(
   : _proxy_client(std::move(client))
   , _kafka_server(kafka_server) {}
 
-ss::future<proto::admin::list_connections_response>
-kafka_connections_service_impl::list_connections(
-  serde::pb::rpc::context, proto::admin::list_connections_request) {
-    auto resp = proto::admin::list_connections_response{};
+ss::future<proto::admin::list_kafka_connections_response>
+kafka_connections_service_impl::list_kafka_connections(
+  serde::pb::rpc::context, proto::admin::list_kafka_connections_request) {
+    auto resp = proto::admin::list_kafka_connections_response{};
     auto& conns = resp.get_connections();
 
     co_await _kafka_server.invoke_on_all([&](kafka::server& server) {
@@ -81,9 +81,9 @@ kafka_connections_service_impl::list_connections(
     // co_return resp;
 }
 
-ss::future<proto::admin::list_aggregated_connections_response>
-kafka_connections_service_impl::list_aggregated_connections(
-  serde::pb::rpc::context, proto::admin::list_aggregated_connections_request) {
+ss::future<proto::admin::aggregate_connections_response>
+kafka_connections_service_impl::aggregate_connections(
+  serde::pb::rpc::context, proto::admin::aggregate_connections_request) {
     throw serde::pb::rpc::unimplemented_exception();
 }
 
