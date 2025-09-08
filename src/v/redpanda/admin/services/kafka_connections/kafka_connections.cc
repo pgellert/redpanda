@@ -51,7 +51,7 @@ kafka_connections_service_impl::list_kafka_connections(
         for (const auto& conn : server._connections) {
             auto& res = conns.emplace_back();
             auto src = proto::admin::source{};
-            src.set_ip(fmt::format("{}", conn.client_host()));
+            src.set_ip_address(fmt::format("{}", conn.client_host()));
             src.set_port(conn.client_port());
             res.set_source(std::move(src));
             res.set_listener_name(ss::sstring{conn.listener()});

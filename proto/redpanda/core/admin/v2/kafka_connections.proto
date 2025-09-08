@@ -16,6 +16,7 @@ syntax = "proto3";
 
 package redpanda.core.admin;
 
+import "google/api/field_info.proto";
 import "proto/redpanda/pbgen/options.proto";
 import "proto/redpanda/pbgen/rpc.proto";
 import "google/protobuf/timestamp.proto";
@@ -47,6 +48,9 @@ message KafkaConnection {
     int32 node_id = 1;
     // The shard of the Redpanda node.
     uint32 shard_id = 2;
+
+    // The UUID of the kafka connection
+    string uid = 28 [(google.api.field_info).format = UUID4];
 
     google.protobuf.Timestamp open_time = 3;
 
@@ -126,7 +130,12 @@ message ListKafkaConnectionsResponse {
     // The number of connections matching the request filter (or in total if
     // filtering is not used).
     // The number of connections returned may be less than the total_size if
-    // the total_size is higher than the applicable page_size.
+    // the total_size is higher than the specified or default-applicable
+    // page_size.
+    // Example:
+    //   request.page_size = 10
+    //   response.connections = [<10 items>]
+    //   response.total_size = 13
     int64 total_size = 2;
 
     // TODO: support returning a full-list of connections using pagination
@@ -162,7 +171,12 @@ message AggregateConnectionsResponse {
     // The number of aggregated connections matching the request filter (or in
     // total if filtering is not used).
     // The number of aggregated connections returned may be less than the
-    // total_size if the total_size is higher than the applicable page_size.
+    // total_size if the total_size is higher than the specified or
+    // default-applicable page_size.
+    // Example:
+    //   request.page_size = 10
+    //   response.aggregated_connections = [<10 items>]
+    //   response.total_size = 13
     int64 total_size = 2;
 }
 
@@ -225,7 +239,7 @@ message TLSInfo {
 }
 
 message Source {
-    string ip = 1;
+    string ip_address = 1 [(google.api.field_info).format = IPV4_OR_IPV6];
     uint32 port = 2;
 }
 
