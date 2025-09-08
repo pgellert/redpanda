@@ -36,6 +36,7 @@ proto_library(
         "//proto/redpanda/core/common:common_proto",
         "//proto/redpanda/pbgen:options_proto",
         "//proto/redpanda/pbgen:rpc_proto",
+        "@googleapis//google/api:field_info_proto",
         "@protobuf//:duration_proto",
         "@protobuf//:timestamp_proto",
     ],
