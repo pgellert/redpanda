@@ -35,6 +35,9 @@ public:
         proto::admin::aggregate_connections_request) override;
 
 private:
+    ss::future<> gather_connections(
+      chunked_vector<proto::admin::kafka_connection>& conns,
+      kafka::server& server) const;
     admin::proxy::client _proxy_client;
     ss::sharded<kafka::server>& _kafka_server;
 };
