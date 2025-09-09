@@ -33,17 +33,6 @@ namespace {
 // NOLINTNEXTLINE(*-non-const-global-variables,cert-err58-*)
 ss::logger log{"admin_api_server/kafka_connections_service"};
 
-// auto to_ip(const ss::net::inet_address& addr) {
-//     auto res = proto::admin::ip_address{};
-//     if (addr.is_ipv4()) {
-//         res.set_ipv4(addr.as_ipv4_address().ip);
-//     } else {
-//         iobuf buf{};
-//         buf.append(addr.as_ipv6_address().ip);
-//         res.set_ipv6(std::move(buf));
-//     }
-//     return res;
-// }
 } // namespace
 
 kafka_connections_service_impl::kafka_connections_service_impl(
@@ -52,9 +41,9 @@ kafka_connections_service_impl::kafka_connections_service_impl(
   , _kafka_server(kafka_server) {}
 
 namespace {
-constexpr auto max_conns_per_shard = 2000;
-constexpr auto max_conns_per_broker = 12500; // 64000;
-constexpr auto limit = 100;
+constexpr auto max_conns_per_shard = 2500;
+constexpr auto max_conns_per_broker = 60000;
+constexpr auto limit = 1000000000;
 
 } // namespace
 
@@ -74,7 +63,7 @@ ss::future<> kafka_connections_service_impl::gather_connections(
                 src.set_port(conn.client_port());
                 res.set_source(std::move(src));
                 res.set_listener_name(ss::sstring{conn.listener()});
-                res.set_uid(fmt::format("{}", uuid_t::create()));
+                // res.set_uid(fmt::format("{}", uuid_t::create()));
             };
             add_conn(server._connections.front());
 
@@ -88,85 +77,88 @@ ss::future<> kafka_connections_service_impl::gather_connections(
 }
 
 namespace {
-
 template<typename T, typename Compare = std::less<T>>
 class chunked_heap_sorter {
 public:
     static constexpr size_t YIELD_THRESHOLD = 1000;
 
-    static seastar::future<>
-    sort_async(chunked_vector<T>& vec, Compare comp = Compare{}) {
-        if (vec.size() <= 1) {
+    explicit chunked_heap_sorter(Compare comp)
+      : _operations(0)
+      , _comp(std::move(comp)) {};
+
+    ss::future<> sort_and_limit_async(chunked_vector<T>& vec, size_t k) {
+        if (vec.size() <= 1 || k == 0) {
+            if (k == 0) {
+                vec.clear();
+            }
             co_return;
         }
 
-        // Build heap
-        co_await make_heap_async(vec, comp);
+        // Clamp k to actual size
+        k = std::min(k, vec.size());
 
-        // Extract elements
-        co_await sort_heap_async(vec, comp);
+        // Build heap
+        co_await make_heap_async(vec);
+
+        // Extract only the top k elements
+        co_await sort_heap_async(vec, k);
+
+        // Resize to k
+        if (vec.size() > k) {
+            vec.pop_back_n(vec.size() - k);
+        }
     }
 
 private:
-    static seastar::future<>
-    make_heap_async(chunked_vector<T>& vec, Compare comp) {
-        size_t n = vec.size();
-        size_t operations = 0;
+    ss::future<> check_yield() {
+        if (++_operations % YIELD_THRESHOLD == 0) {
+            co_await ss::maybe_yield();
+            _operations = 0;
+        }
+    }
 
-        // Start from the last non-leaf node
+    ss::future<> make_heap_async(chunked_vector<T>& vec) {
+        size_t n = vec.size();
+
         for (int i = n / 2 - 1; i >= 0; --i) {
-            co_await heapify_async(vec, n, i, comp, operations);
+            co_await heapify_async(vec, n, i);
         }
     }
 
-    static seastar::future<>
-    sort_heap_async(chunked_vector<T>& vec, Compare comp) {
+    ss::future<> sort_heap_async(chunked_vector<T>& vec, size_t k) {
         size_t n = vec.size();
-        size_t operations = 0;
 
-        for (size_t i = n - 1; i > 0; --i) {
-            // Move current root to end
+        // Only extract k elements instead of all n
+        for (size_t i = n - 1; i > n - k; --i) {
             std::swap(vec[0], vec[i]);
-
-            // Call heapify on the reduced heap
-            co_await heapify_async(vec, i, 0, comp, operations);
-
-            if (++operations % YIELD_THRESHOLD == 0) {
-                co_await seastar::yield();
-                operations = 0;
-            }
+            co_await heapify_async(vec, i, 0);
+            co_await check_yield();
         }
     }
 
-    static seastar::future<> heapify_async(
-      chunked_vector<T>& vec,
-      size_t n,
-      size_t i,
-      Compare comp,
-      size_t& operations) {
+    ss::future<> heapify_async(chunked_vector<T>& vec, size_t n, size_t i) {
         size_t largest = i;
         size_t left = 2 * i + 1;
         size_t right = 2 * i + 2;
 
-        if (left < n && comp(vec[largest], vec[left])) {
+        if (left < n && _comp(vec[largest], vec[left])) {
             largest = left;
         }
 
-        if (right < n && comp(vec[largest], vec[right])) {
+        if (right < n && _comp(vec[largest], vec[right])) {
             largest = right;
         }
 
         if (largest != i) {
             std::swap(vec[i], vec[largest]);
 
-            if (++operations % YIELD_THRESHOLD == 0) {
-                co_await seastar::yield();
-                operations = 0;
-            }
-
-            co_await heapify_async(vec, n, largest, comp, operations);
+            co_await check_yield();
+            co_await heapify_async(vec, n, largest);
         }
     }
+
+    size_t _operations;
+    Compare _comp;
 };
 } // namespace
 
@@ -182,20 +174,25 @@ kafka_connections_service_impl::list_kafka_connections(
                                   const proto::admin::kafka_connection& b) {
         return a.get_uid() < b.get_uid();
     };
-    chunked_heap_sorter<kafka_connection, decltype(comparator)> sorter{};
+    chunked_heap_sorter<kafka_connection, decltype(comparator)> sorter{
+      comparator};
 
     for (int i = 0; i < max_conns_per_broker / max_conns_per_shard; i++) {
-        using clock = std::chrono::system_clock;
-        auto begin = clock::now();
-
         // TODO: make this sequential + sort on all cores
         co_await _kafka_server.invoke_on_all([&](kafka::server& server) {
-            return gather_connections(conns, server);
+            using clock = std::chrono::system_clock;
+            auto begin = clock::now();
+
+            return gather_connections(conns, server).finally([i, begin]() {
+                if (i == 0) {
+                    vlog(
+                      log.info,
+                      "Time per shard: {}us",
+                      (clock::now() - begin) / 1us);
+                }
+            });
         });
-        if (i == 0) {
-            vlog(
-              log.info, "Time per shard: {}ms", (clock::now() - begin) / 1ms);
-        }
+
         co_await ss::maybe_yield();
     }
 
@@ -209,7 +206,7 @@ kafka_connections_service_impl::list_kafka_connections(
       "Recent connection count: {}",
       _kafka_server.local()._recent_connections.size());
 
-    co_await sorter.sort_async(resp.get_connections(), comparator);
+    co_await sorter.sort_and_limit_async(resp.get_connections(), limit);
 
     vlog(log.info, "Sorting done");
 

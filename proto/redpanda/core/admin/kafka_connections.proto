@@ -218,17 +218,9 @@ message AggregatedKafkaConnection {
 }
 
 message AuthenticationInfo {
-    message SASLInfo {
-        google.protobuf.Timestamp last_attempt_time = 1;
-        int32 unsuccessful_count_total = 2;
-    }
-
     AuthenticationState state = 1;
     AuthenticationMechanism mechanism = 2;
     string user_principal = 3;
-
-    // Further information when the mechanism is one of the SASL mechanisms
-    SASLInfo sasl_info = 4;
 }
 
 message TLSInfo {

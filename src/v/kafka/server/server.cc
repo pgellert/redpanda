@@ -56,6 +56,7 @@
 #include "kafka/server/quota_manager.h"
 #include "kafka/server/request_context.h"
 #include "kafka/server/response.h"
+#include "kafka/server/sasl_probe.h"
 #include "kafka/server/usage_manager.h"
 #include "model/record.h"
 #include "net/connection.h"
