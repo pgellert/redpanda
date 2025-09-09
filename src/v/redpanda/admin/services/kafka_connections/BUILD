@@ -8,9 +8,11 @@ redpanda_cc_library(
     deps = [
         "//proto/redpanda/core/admin:kafka_connections_redpanda_proto",
         "//src/v/base",
+        "//src/v/container:chunked_vector",
         "//src/v/kafka/server",
         "//src/v/redpanda/admin/proxy:client",
         "//src/v/serde/protobuf:rpc",
+        "//src/v/utils:uuid",
         "@fmt",
         "@seastar",
     ],
