@@ -144,6 +144,25 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "aip_filter",
+    srcs = [
+        "aip_filter.cc",
+    ],
+    hdrs = [
+        "aip_filter.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        # TODO: remove dependency after templating
+        "//proto/redpanda/core/admin:kafka_connections_redpanda_proto",
+        "//src/v/cluster",
+        "//src/v/json",
+        "//src/v/model",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+redpanda_cc_library(
     name = "admin",
     srcs = [
         "debug.cc",
