@@ -37,7 +37,8 @@ public:
 private:
     ss::future<> gather_connections(
       chunked_vector<proto::admin::kafka_connection>& conns,
-      kafka::server& server) const;
+      kafka::server& server,
+      bool is_first_loop) const;
     admin::proxy::client _proxy_client;
     ss::sharded<kafka::server>& _kafka_server;
 };
