@@ -10,21 +10,52 @@
  */
 
 #include "base/vassert-register.h"
+#include "proto/redpanda/core/admin/kafka_connections.proto.h"
 #include "redpanda/admin/aip_filter.h"
 
 #include <gtest/gtest.h>
 
 #include <vector>
 
+namespace {
+
+auto createKafkaConnectionRegistry() {
+    using proto::admin::kafka_connection;
+    auto builder
+      = FieldAccessorRegistryBuilder<kafka_connection>{}
+          .addInt64Field(
+            "field1",
+            [](const kafka_connection& c) {
+                return c.get_produce_batch_record_count_total();
+            })
+          .addStringField(
+            "authentication_info.user_principal",
+            [](const kafka_connection& c) {
+                return c.get_authentication_info().get_user_principal();
+            })
+          .addBoolField("tls_info.enabled", [](const kafka_connection& c) {
+              return c.get_tls_info().get_enabled();
+          });
+    return std::move(builder).build();
+}
+
+} // namespace
+
 struct AIPFilterTest : public testing::Test {};
 
 TEST_F(AIPFilterTest, SimpleTest) {
+    using proto::admin::kafka_connection;
     try {
+        auto field_reg = createKafkaConnectionRegistry();
+
         // Build a filter predicate from a filter string
-        // Predicate pred = FilterParser::parse("field1 = 5 AND tls_info.enabled
-        // = true AND  < \"abc\"");
-        Predicate pred = FilterParser::parse(
-          "field1 >= 5 AND field1 <= 5 AND unknownField = 10");
+        auto registry = createKafkaConnectionRegistry();
+        FilterParser<kafka_connection> parser(registry);
+
+        auto pred = parser.parse("field1 >= 5 AND field1 <= 5");
+
+        // Predicate pred = FilterParser::parse(
+        //   "field1 >= 5 AND field1 <= 5 AND unknownField = 10");
 
         // Example kafka_connection instances to test
         kafka_connection conn1;

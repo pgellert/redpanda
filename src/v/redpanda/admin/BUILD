@@ -153,8 +153,6 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        # TODO: remove dependency after templating
-        "//proto/redpanda/core/admin:kafka_connections_redpanda_proto",
         "//src/v/cluster",
         "//src/v/json",
         "//src/v/model",

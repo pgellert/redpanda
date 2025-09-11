@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Redpanda Data, Inc.
+ * Copyright 2025 Redpanda Data, Inc.
  *
  * Use of this software is governed by the Business Source License
  * included in the file licenses/BSL.md
@@ -17,62 +17,48 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-
-// TODO: make this generic
-#include "proto/redpanda/core/admin/kafka_connections.proto.h"
-
-// Forward declare kafka_connection and nested types for illustration.
-// In practice, these come from the generated protobuf classes.
-// struct TLSInfo {
-//     std::string protocol;
-//     // ... other TLS fields ...
-// };
-// struct kafka_connection {
-//     int64_t field1;
-//     TLSInfo tls_info;
-//     // ... other fields (e.g., bool, double, etc.) ...
-// };
-
-using proto::admin::kafka_connection;
+#include <unordered_map>
 
 // Enum for comparison operators
 enum class Op { EQ, NE, LT, GT, LE, GE };
 
 // Abstract base class for any AST node (comparison or logical combination)
+template<typename T>
 struct ASTNode {
     virtual ~ASTNode() = default;
-    virtual bool evaluate(const kafka_connection& conn) const noexcept = 0;
+    virtual bool evaluate(const T& obj) const noexcept = 0;
 };
 
 // AST node for a logical AND combination of two expressions
-struct AndNode : public ASTNode {
-    std::unique_ptr<ASTNode> left;
-    std::unique_ptr<ASTNode> right;
-    AndNode(std::unique_ptr<ASTNode> l, std::unique_ptr<ASTNode> r)
+template<typename T>
+struct AndNode : public ASTNode<T> {
+    std::unique_ptr<ASTNode<T>> left;
+    std::unique_ptr<ASTNode<T>> right;
+
+    AndNode(std::unique_ptr<ASTNode<T>> l, std::unique_ptr<ASTNode<T>> r)
       : left(std::move(l))
       , right(std::move(r)) {}
-    bool evaluate(const kafka_connection& conn) const noexcept override {
-        return left->evaluate(conn) && right->evaluate(conn);
+
+    bool evaluate(const T& obj) const noexcept override {
+        return left->evaluate(obj) && right->evaluate(obj);
     }
 };
 
-// AST node for a field comparison (templated on the field value type T)
-template<typename T>
-struct ComparisonNode : public ASTNode {
-    std::function<T(const kafka_connection&)>
-      getField; // Extracts field value from kafka_connection
+// AST node for a field comparison (templated on the object type T and field
+// value type F)
+template<typename T, typename F>
+struct ComparisonNode : public ASTNode<T> {
+    std::function<F(const T&)> getField; // Extracts field value from object
     Op op;
-    T literalValue; // The literal value to compare against (already parsed to
-                    // type T)
+    F literalValue; // The literal value to compare against
 
-    ComparisonNode(
-      std::function<T(const kafka_connection&)> accessor, Op oper, T value)
+    ComparisonNode(std::function<F(const T&)> accessor, Op oper, F value)
       : getField(std::move(accessor))
       , op(oper)
       , literalValue(value) {}
 
-    bool evaluate(const kafka_connection& conn) const noexcept override {
-        T fieldVal = getField(conn);
+    bool evaluate(const T& obj) const noexcept override {
+        F fieldVal = getField(obj);
         switch (op) {
         case Op::EQ:
             return fieldVal == literalValue;
@@ -91,98 +77,72 @@ struct ComparisonNode : public ASTNode {
     }
 };
 
+template<typename T>
 class Predicate {
 public:
-    Predicate(std::unique_ptr<ASTNode> root)
+    Predicate(std::unique_ptr<ASTNode<T>> root)
       : _root(std::move(root)) {}
-    // Evaluate the stored filter against a kafka_connection message (noexcept)
-    bool operator()(const kafka_connection& conn) const noexcept {
+
+    // Evaluate the stored filter against an object (noexcept)
+    bool operator()(const T& obj) const noexcept {
         if (!_root) {
-            return true; // no filter means always match (or could be always
-                         // false, depending on requirements)
+            return true; // no filter means always match
         }
-        return _root->evaluate(conn);
+        return _root->evaluate(obj);
     }
 
 private:
-    std::unique_ptr<ASTNode> _root;
+    std::unique_ptr<ASTNode<T>> _root;
 };
 
-// Simulated field accessor registry for kafka_connection
+// Field accessor registry for any type T
+template<typename T>
 struct FieldAccessorInfo {
     enum Type { Int64, Double, Bool, String } type;
     // We use std::function for each possible type (only one will be set, based
     // on 'type')
-    std::function<int64_t(const kafka_connection&)> getInt64;
-    std::function<double(const kafka_connection&)> getDouble;
-    std::function<bool(const kafka_connection&)> getBool;
-    std::function<std::string(const kafka_connection&)> getString;
+    std::function<int64_t(const T&)> getInt64;
+    std::function<double(const T&)> getDouble;
+    std::function<bool(const T&)> getBool;
+    std::function<std::string(const T&)> getString;
 };
 
-// Populate a registry of field paths to accessors
-static const std::unordered_map<std::string, FieldAccessorInfo>&
-getFieldAccessorRegistry() {
-    static const std::unordered_map<std::string, FieldAccessorInfo> registry = {
-      {"field1",
-       FieldAccessorInfo{
-         FieldAccessorInfo::Int64,
-         /*getInt64=*/
-         [](const kafka_connection& c) {
-             return c.get_produce_batch_record_count_total();
-         },
-         /*getDouble=*/nullptr,
-         /*getBool=*/nullptr,
-         /*getString=*/nullptr}},
-      {"authentication_info.user_principal",
-       FieldAccessorInfo{
-         FieldAccessorInfo::String,
-         /*getInt64=*/nullptr,
-         /*getDouble=*/nullptr,
-         /*getBool=*/nullptr,
-         /*getString=*/
-         [](const kafka_connection& c) {
-             return c.get_authentication_info().get_user_principal();
-         }}},
-      {"tls_info.enabled",
-       FieldAccessorInfo{
-         FieldAccessorInfo::Bool,
-         /*getInt64=*/nullptr,
-         /*getDouble=*/nullptr,
-         /*getBool=*/
-         [](const kafka_connection& c) {
-             return c.get_tls_info().get_enabled();
-         },
-         /*getString=*/nullptr}},
-      // ... add other fields as needed ...
-    };
-    return registry;
-}
-
+template<typename T>
 class FilterParser {
 public:
+    using FieldAccessorRegistry
+      = std::unordered_map<std::string, FieldAccessorInfo<T>>;
+
+    // Constructor takes a field accessor registry
+    explicit FilterParser(const FieldAccessorRegistry& registry)
+      : _registry(registry) {}
+
     // Parse the filter string into a Predicate object. Throws
     // std::invalid_argument on error.
-    static Predicate parse(const std::string& filter) {
-        Parser p(filter);
-        std::unique_ptr<ASTNode> root = p.parseExpression();
+    Predicate<T> parse(const std::string& filter) {
+        Parser p(filter, _registry);
+        std::unique_ptr<ASTNode<T>> root = p.parseExpression();
         p.skipSpaces();
         if (!p.endOfInput()) {
             throw std::invalid_argument(
               "Unexpected trailing characters in filter");
         }
-        return Predicate(std::move(root));
+        return Predicate<T>(std::move(root));
     }
 
 private:
+    const FieldAccessorRegistry& _registry;
+
     // Internal recursive descent parser
     class Parser {
     public:
-        Parser(const std::string& input)
+        Parser(const std::string& input, const FieldAccessorRegistry& registry)
           : str(input)
-          , pos(0) {}
+          , pos(0)
+          , _registry(registry) {}
 
         // Parse an expression: comparison { AND comparison }
-        std::unique_ptr<ASTNode> parseExpression() {
+        std::unique_ptr<ASTNode<T>> parseExpression() {
             auto leftNode = parseComparison();
             skipSpaces();
             // Handle multiple AND'ed conditions
@@ -190,7 +150,7 @@ private:
                 skipSpaces();
                 auto rightNode = parseComparison();
                 // Combine the left and right nodes into an AndNode
-                leftNode = std::make_unique<AndNode>(
+                leftNode = std::make_unique<AndNode<T>>(
                   std::move(leftNode), std::move(rightNode));
                 skipSpaces();
             }
@@ -198,29 +158,28 @@ private:
         }
 
         // Parse a single comparison: FieldPath Op Literal
-        std::unique_ptr<ASTNode> parseComparison() {
+        std::unique_ptr<ASTNode<T>> parseComparison() {
             skipSpaces();
             std::string fieldPath = parseFieldPath();
             skipSpaces();
             Op op = parseOperator();
             skipSpaces();
-            std::string literalText
-              = parseLiteral(); // raw literal text (without quotes for strings)
+            std::string literalText = parseLiteral();
+
             // Look up field in registry to get accessor and type
-            const auto& registry = getFieldAccessorRegistry();
-            auto it = registry.find(fieldPath);
-            if (it == registry.end()) {
+            auto it = _registry.find(fieldPath);
+            if (it == _registry.end()) {
                 throw std::invalid_argument("Unknown field path: " + fieldPath);
             }
-            const FieldAccessorInfo& info = it->second;
+            const FieldAccessorInfo<T>& info = it->second;
+
             // Based on field type, convert literal and create appropriate
             // ComparisonNode
             switch (info.type) {
-            case FieldAccessorInfo::Int64: {
+            case FieldAccessorInfo<T>::Int64: {
                 long long val = 0;
                 try {
                     size_t idx = 0;
-                    // Accept decimal or hex (if needed) - here just base 10
                     val = std::stoll(literalText, &idx);
                     if (idx != literalText.size()) {
                         throw std::invalid_argument("");
@@ -229,12 +188,10 @@ private:
                     throw std::invalid_argument(
                       "Expected integer value for field " + fieldPath);
                 }
-                // If the field is actually int32 in proto, we could check range
-                // here.
-                return std::make_unique<ComparisonNode<int64_t>>(
+                return std::make_unique<ComparisonNode<T, int64_t>>(
                   info.getInt64, op, static_cast<int64_t>(val));
             }
-            case FieldAccessorInfo::Double: {
+            case FieldAccessorInfo<T>::Double: {
                 double val = 0.0;
                 try {
                     size_t idx = 0;
@@ -246,10 +203,10 @@ private:
                     throw std::invalid_argument(
                       "Expected numeric value for field " + fieldPath);
                 }
-                return std::make_unique<ComparisonNode<double>>(
+                return std::make_unique<ComparisonNode<T, double>>(
                   info.getDouble, op, val);
             }
-            case FieldAccessorInfo::Bool: {
+            case FieldAccessorInfo<T>::Bool: {
                 // Only allow = or != for bool comparisons
                 if (op != Op::EQ && op != Op::NE) {
                     throw std::invalid_argument(
@@ -272,14 +229,11 @@ private:
                       "Expected boolean literal 'true' or 'false' for field "
                       + fieldPath);
                 }
-                return std::make_unique<ComparisonNode<bool>>(
+                return std::make_unique<ComparisonNode<T, bool>>(
                   info.getBool, op, val);
             }
-            case FieldAccessorInfo::String: {
-                // For string fields, literalText should already be unquoted
-                // content We allow comparisons =, !=, <, >, <=, >= on strings
-                // (lexicographical for ordering).
-                return std::make_unique<ComparisonNode<std::string>>(
+            case FieldAccessorInfo<T>::String: {
+                return std::make_unique<ComparisonNode<T, std::string>>(
                   info.getString, op, literalText);
             }
             }
@@ -400,17 +354,9 @@ private:
                 return value;
             } else {
                 // Unquoted literal (could be numeric or boolean)
-                // Collect characters until we hit a space or end-of-input or
-                // ')' (not applicable here since no parentheses).
                 size_t start = pos;
                 while (pos < str.size()
                        && !std::isspace(static_cast<unsigned char>(str[pos]))) {
-                    // If we encounter a character that signifies end of
-                    // literal, break. In our grammar, literals end at
-                    // whitespace or end of string or before an AND keyword.
-                    // We'll handle stopping at whitespace here. (The AND
-                    // keyword is preceded by whitespace in a well-formed
-                    // filter.)
                     pos++;
                 }
                 std::string token = str.substr(start, pos - start);
@@ -440,8 +386,7 @@ private:
                       [](char a, char b) {
                           return std::toupper(a) == std::toupper(b);
                       })) {
-                    // Ensure the keyword is bounded by non-alphanumeric (end or
-                    // space) to avoid partial matches
+                    // Ensure the keyword is bounded by non-alphanumeric
                     if ((pos + len == str.size()
                          || std::isspace(
                            static_cast<unsigned char>(str[pos + len])))) {
@@ -458,5 +403,63 @@ private:
     private:
         const std::string& str;
         size_t pos;
+        const FieldAccessorRegistry& _registry;
     };
+};
+
+// Helper function to create a field accessor registry builder
+template<typename T>
+class FieldAccessorRegistryBuilder {
+public:
+    using Registry = typename FilterParser<T>::FieldAccessorRegistry;
+
+    FieldAccessorRegistryBuilder& addInt64Field(
+      const std::string& fieldPath, std::function<int64_t(const T&)> accessor) {
+        _registry[fieldPath] = FieldAccessorInfo<T>{
+          FieldAccessorInfo<T>::Int64,
+          std::move(accessor),
+          nullptr,
+          nullptr,
+          nullptr};
+        return *this;
+    }
+
+    FieldAccessorRegistryBuilder& addDoubleField(
+      const std::string& fieldPath, std::function<double(const T&)> accessor) {
+        _registry[fieldPath] = FieldAccessorInfo<T>{
+          FieldAccessorInfo<T>::Double,
+          nullptr,
+          std::move(accessor),
+          nullptr,
+          nullptr};
+        return *this;
+    }
+
+    FieldAccessorRegistryBuilder& addBoolField(
+      const std::string& fieldPath, std::function<bool(const T&)> accessor) {
+        _registry[fieldPath] = FieldAccessorInfo<T>{
+          FieldAccessorInfo<T>::Bool,
+          nullptr,
+          nullptr,
+          std::move(accessor),
+          nullptr};
+        return *this;
+    }
+
+    FieldAccessorRegistryBuilder& addStringField(
+      const std::string& fieldPath,
+      std::function<std::string(const T&)> accessor) {
+        _registry[fieldPath] = FieldAccessorInfo<T>{
+          FieldAccessorInfo<T>::String,
+          nullptr,
+          nullptr,
+          nullptr,
+          std::move(accessor)};
+        return *this;
+    }
+
+    Registry build() && { return std::move(_registry); }
+
+private:
+    Registry _registry;
 };
