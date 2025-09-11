@@ -41,21 +41,38 @@ kafka_connections_service_impl::kafka_connections_service_impl(
   , _kafka_server(kafka_server) {}
 
 namespace {
-constexpr auto max_conns_per_shard = 2500;
-constexpr auto max_conns_per_broker = 60000;
+constexpr auto max_conns_per_shard = 4000;
+constexpr auto max_conns_per_broker = 72000;
 constexpr auto limit = 1000000000;
 
 } // namespace
 
 ss::future<> kafka_connections_service_impl::gather_connections(
   chunked_vector<proto::admin::kafka_connection>& conns,
-  kafka::server& server) const {
+  kafka::server& server,
+  bool is_first_loop) const {
     if (server._connections.size() > 0) {
-        // TODO: consider yield'ing + use uuid as checkpoint or using
-        // counted_intrusive_list
+        using clock = std::chrono::system_clock;
+        auto begin = clock::now();
+        auto conn_ptrs
+          = chunked_vector<ss::lw_shared_ptr<kafka::connection_context>>{};
+        conn_ptrs.reserve(max_conns_per_shard);
 
-        conns.reserve(conns.size() + max_conns_per_shard);
         for (int i = 0; i < max_conns_per_shard; i++) {
+            conn_ptrs.emplace_back(
+              server._connections.front().shared_from_this());
+        }
+
+        if (is_first_loop) {
+            vlog(
+              log.info, "Time per shard: {}us", (clock::now() - begin) / 1us);
+        }
+
+        co_await ss::maybe_yield();
+
+        conns.reserve(conns.size() + conn_ptrs.size());
+        size_t i = 0;
+        for (auto& conn_ptr : conn_ptrs) {
             auto add_conn = [&](const kafka::connection_context& conn) {
                 auto& res = conns.emplace_back();
                 auto src = proto::admin::source{};
@@ -65,11 +82,11 @@ ss::future<> kafka_connections_service_impl::gather_connections(
                 res.set_listener_name(ss::sstring{conn.listener()});
                 // res.set_uid(fmt::format("{}", uuid_t::create()));
             };
-            add_conn(server._connections.front());
-
-            // for (const auto& conn : server._connections) {
-            //     add_conn(conn);
-            // }
+            // TODO: any safety checks needed?
+            add_conn(*conn_ptr);
+            if (++i % 1000 == 0) {
+                co_await ss::maybe_yield();
+            }
         }
     }
 
@@ -180,17 +197,7 @@ kafka_connections_service_impl::list_kafka_connections(
     for (int i = 0; i < max_conns_per_broker / max_conns_per_shard; i++) {
         // TODO: make this sequential + sort on all cores
         co_await _kafka_server.invoke_on_all([&](kafka::server& server) {
-            using clock = std::chrono::system_clock;
-            auto begin = clock::now();
-
-            return gather_connections(conns, server).finally([i, begin]() {
-                if (i == 0) {
-                    vlog(
-                      log.info,
-                      "Time per shard: {}us",
-                      (clock::now() - begin) / 1us);
-                }
-            });
+            return gather_connections(conns, server, i == 0);
         });
 
         co_await ss::maybe_yield();

@@ -42,6 +42,11 @@
 #include <optional>
 #include <vector>
 
+// TODO: move to fwd.h
+namespace admin {
+class kafka_connections_service_impl;
+}
+
 namespace kafka {
 
 using response_ptr = ss::foreign_ptr<std::unique_ptr<response>>;
@@ -206,6 +211,8 @@ public:
     bool tls_enabled() const { return conn->tls_enabled(); }
 
     recent_connection_info get_preclose_info() const;
+
+    friend class admin::kafka_connections_service_impl;
 
 private:
     template<typename T>
