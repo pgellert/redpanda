@@ -77,7 +77,10 @@ message KafkaConnection {
     string group_instance_id = 15;
     string group_member_id = 16;
 
-    ApiVersions api_versions = 17;
+    // Map of API versions keyed by the Kafka API key number
+    // If multiple versions are seen for the same API key, the maximum version
+    // is returned
+    map<int32, int32> api_versions = 17;
 
     // Time since no inflight requests
     google.protobuf.Duration idle_duration = 18;
@@ -244,15 +247,6 @@ message InFlightRequests {
     // The most recent few (currently 5) in-flight requests on the connection
     repeated Request requests = 1;
     bool has_more_requests = 2;
-}
-
-message ApiVersions {
-    message Version {
-        int32 min_version = 1;
-        int32 max_version = 2;
-    };
-    // Map of API versions keyed by the Kafka API key number
-    map<int32, Version> versions = 1;
 }
 
 /* Enums */
