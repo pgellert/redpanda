@@ -12,7 +12,7 @@
 #pragma once
 
 #include "kafka/server/fwd.h"
-#include "proto/redpanda/core/admin/kafka_connections.proto.h"
+#include "proto/redpanda/core/admin/v2/kafka_connections.proto.h"
 #include "redpanda/admin/proxy/client.h"
 
 #include <seastar/core/distributed.hh>

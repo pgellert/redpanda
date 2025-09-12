@@ -11,16 +11,19 @@
 
 #pragma once
 
+#include "redpanda/admin/field_registry.h"
+
 #include <algorithm>
 #include <cctype>
 #include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
+
+namespace redpanda::admin {
 
 // Enum for comparison operators
-enum class Op { EQ, NE, LT, GT, LE, GE };
+enum class ComparisonOp { EQ, NE, LT, GT, LE, GE };
 
 // Abstract base class for any AST node (comparison or logical combination)
 template<typename T>
@@ -44,15 +47,15 @@ struct AndNode : public ASTNode<T> {
     }
 };
 
-// AST node for a field comparison (templated on the object type T and field
-// value type F)
+// AST node for a field comparison (templated on the field value type F)
 template<typename T, typename F>
 struct ComparisonNode : public ASTNode<T> {
     std::function<F(const T&)> getField; // Extracts field value from object
-    Op op;
+    ComparisonOp op;
     F literalValue; // The literal value to compare against
 
-    ComparisonNode(std::function<F(const T&)> accessor, Op oper, F value)
+    ComparisonNode(
+      std::function<F(const T&)> accessor, ComparisonOp oper, F value)
       : getField(std::move(accessor))
       , op(oper)
       , literalValue(value) {}
@@ -60,96 +63,125 @@ struct ComparisonNode : public ASTNode<T> {
     bool evaluate(const T& obj) const noexcept override {
         F fieldVal = getField(obj);
         switch (op) {
-        case Op::EQ:
+        case ComparisonOp::EQ:
             return fieldVal == literalValue;
-        case Op::NE:
+        case ComparisonOp::NE:
             return fieldVal != literalValue;
-        case Op::LT:
+        case ComparisonOp::LT:
             return fieldVal < literalValue;
-        case Op::GT:
+        case ComparisonOp::GT:
             return fieldVal > literalValue;
-        case Op::LE:
+        case ComparisonOp::LE:
             return fieldVal <= literalValue;
-        case Op::GE:
+        case ComparisonOp::GE:
             return fieldVal >= literalValue;
         }
         return false; // unreachable
     }
 };
 
+/**
+ * A filter predicate that can be applied to objects of type T.
+ */
 template<typename T>
-class Predicate {
+class FilterPredicate {
 public:
-    Predicate(std::unique_ptr<ASTNode<T>> root)
-      : _root(std::move(root)) {}
+    FilterPredicate(std::unique_ptr<ASTNode<T>> root)
+      : root_(std::move(root)) {}
 
     // Evaluate the stored filter against an object (noexcept)
     bool operator()(const T& obj) const noexcept {
-        if (!_root) {
+        if (!root_) {
             return true; // no filter means always match
         }
-        return _root->evaluate(obj);
+        return root_->evaluate(obj);
     }
 
 private:
-    std::unique_ptr<ASTNode<T>> _root;
+    std::unique_ptr<ASTNode<T>> root_;
 };
 
-// Field accessor registry for any type T
+/**
+ * AIP (API Improvement Proposals) compliant filter parser for protobuf
+ * messages.
+ *
+ * This class provides parsing of filter expressions according to Google's
+ * AIP-160 filtering standard and creates filter predicates that can be applied
+ * to objects.
+ *
+ * Supported syntax:
+ * - Field comparisons: field = value, field != value, field < value, etc.
+ * - Logical operators: AND (OR not yet supported)
+ * - String literals: "quoted strings"
+ * - Numeric literals: integers and floating point
+ * - Boolean literals: true, false
+ */
 template<typename T>
-struct FieldAccessorInfo {
-    enum Type { Int64, Double, Bool, String } type;
-    // We use std::function for each possible type (only one will be set, based
-    // on 'type')
-    std::function<int64_t(const T&)> getInt64;
-    std::function<double(const T&)> getDouble;
-    std::function<bool(const T&)> getBool;
-    std::function<std::string(const T&)> getString;
-};
-
-template<typename T>
-class FilterParser {
+class AIPFilterParser {
 public:
-    using FieldAccessorRegistry
-      = std::unordered_map<std::string, FieldAccessorInfo<T>>;
+    using Registry = ProtobufFieldRegistry<T>;
 
-    // Constructor takes a field accessor registry
-    explicit FilterParser(const FieldAccessorRegistry& registry)
-      : _registry(registry) {}
+    /**
+     * Construct an AIP filter parser with the given field registry.
+     */
+    explicit AIPFilterParser(const Registry& registry)
+      : registry_(registry) {}
 
-    // Parse the filter string into a Predicate object. Throws
-    // std::invalid_argument on error.
-    Predicate<T> parse(const std::string& filter) {
-        Parser p(filter, _registry);
-        std::unique_ptr<ASTNode<T>> root = p.parseExpression();
-        p.skipSpaces();
-        if (!p.endOfInput()) {
+    /**
+     * Parse a filter expression string into a callable predicate.
+     *
+     * @param filter_expression The filter expression string to parse
+     * @return A callable predicate function that can be applied to objects of
+     * type T
+     * @throws std::invalid_argument if the filter expression is malformed or
+     * references unknown fields
+     */
+    FilterPredicate<T> parse(const std::string& filter_expression) {
+        if (filter_expression.empty()) {
+            return FilterPredicate<T>(nullptr); // Empty filter matches all
+        }
+
+        Parser parser(filter_expression, registry_);
+        std::unique_ptr<ASTNode<T>> root = parser.parseExpression();
+        parser.skipSpaces();
+        if (!parser.endOfInput()) {
             throw std::invalid_argument(
               "Unexpected trailing characters in filter");
         }
-        return Predicate<T>(std::move(root));
+        return FilterPredicate<T>(std::move(root));
+    }
+
+    /**
+     * Validate a filter expression without creating a predicate.
+     */
+    bool validate(const std::string& filter_expression) noexcept {
+        try {
+            parse(filter_expression);
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
     }
 
 private:
-    const FieldAccessorRegistry& _registry;
+    const Registry& registry_;
 
     // Internal recursive descent parser
     class Parser {
     public:
-        Parser(const std::string& input, const FieldAccessorRegistry& registry)
-          : str(input)
-          , pos(0)
-          , _registry(registry) {}
+        Parser(const std::string& input, const Registry& registry)
+          : str_(input)
+          , pos_(0)
+          , registry_(registry) {}
 
         // Parse an expression: comparison { AND comparison }
         std::unique_ptr<ASTNode<T>> parseExpression() {
             auto leftNode = parseComparison();
             skipSpaces();
             // Handle multiple AND'ed conditions
-            while (matchKeyword("AND")) { // case-insensitive match for "AND"
+            while (matchKeyword("AND")) {
                 skipSpaces();
                 auto rightNode = parseComparison();
-                // Combine the left and right nodes into an AndNode
                 leftNode = std::make_unique<AndNode<T>>(
                   std::move(leftNode), std::move(rightNode));
                 skipSpaces();
@@ -162,16 +194,11 @@ private:
             skipSpaces();
             std::string fieldPath = parseFieldPath();
             skipSpaces();
-            Op op = parseOperator();
+            ComparisonOp op = parseOperator();
             skipSpaces();
             std::string literalText = parseLiteral();
 
-            // Look up field in registry to get accessor and type
-            auto it = _registry.find(fieldPath);
-            if (it == _registry.end()) {
-                throw std::invalid_argument("Unknown field path: " + fieldPath);
-            }
-            const FieldAccessorInfo<T>& info = it->second;
+            const auto& info = registry_.get_field_info(fieldPath);
 
             // Based on field type, convert literal and create appropriate
             // ComparisonNode
@@ -207,8 +234,7 @@ private:
                   info.getDouble, op, val);
             }
             case FieldAccessorInfo<T>::Bool: {
-                // Only allow = or != for bool comparisons
-                if (op != Op::EQ && op != Op::NE) {
+                if (op != ComparisonOp::EQ && op != ComparisonOp::NE) {
                     throw std::invalid_argument(
                       "Only '=' or '!=' supported for boolean field "
                       + fieldPath);
@@ -244,29 +270,27 @@ private:
         // Parse a field path (e.g., "field" or "nested.field").
         std::string parseFieldPath() {
             if (
-              pos >= str.size()
-              || !(std::isalpha(str[pos]) || str[pos] == '_')) {
+              pos_ >= str_.size()
+              || !(std::isalpha(str_[pos_]) || str_[pos_] == '_')) {
                 throw std::invalid_argument(
-                  "Expected field name at position " + std::to_string(pos));
+                  "Expected field name at position " + std::to_string(pos_));
             }
             std::string field;
-            // Parse identifier segments separated by '.'
-            while (pos < str.size()) {
-                char c = str[pos];
+            while (pos_ < str_.size()) {
+                char c = str_[pos_];
                 if (std::isalnum(c) || c == '_') {
                     field.push_back(c);
-                    pos++;
+                    pos_++;
                 } else if (c == '.') {
                     field.push_back(c);
-                    pos++;
+                    pos_++;
                     if (
-                      pos >= str.size()
-                      || !(std::isalpha(str[pos]) || str[pos] == '_')) {
+                      pos_ >= str_.size()
+                      || !(std::isalpha(str_[pos_]) || str_[pos_] == '_')) {
                         throw std::invalid_argument(
                           "Expected field name after '.' at position "
-                          + std::to_string(pos));
+                          + std::to_string(pos_));
                     }
-                    // continue parsing next identifier segment
                 } else {
                     break;
                 }
@@ -275,62 +299,60 @@ private:
         }
 
         // Parse a comparison operator token
-        Op parseOperator() {
-            if (pos >= str.size()) {
+        ComparisonOp parseOperator() {
+            if (pos_ >= str_.size()) {
                 throw std::invalid_argument(
                   "Expected comparison operator at end of input");
             }
-            char c = str[pos];
+            char c = str_[pos_];
             if (c == '=') {
-                pos++;
-                return Op::EQ;
+                pos_++;
+                return ComparisonOp::EQ;
             }
             if (c == '!') {
-                if (pos + 1 < str.size() && str[pos + 1] == '=') {
-                    pos += 2;
-                    return Op::NE;
+                if (pos_ + 1 < str_.size() && str_[pos_ + 1] == '=') {
+                    pos_ += 2;
+                    return ComparisonOp::NE;
                 }
                 throw std::invalid_argument(
-                  "Unknown operator '!' at position " + std::to_string(pos));
+                  "Unknown operator '!' at position " + std::to_string(pos_));
             }
             if (c == '<') {
-                if (pos + 1 < str.size() && str[pos + 1] == '=') {
-                    pos += 2;
-                    return Op::LE;
+                if (pos_ + 1 < str_.size() && str_[pos_ + 1] == '=') {
+                    pos_ += 2;
+                    return ComparisonOp::LE;
                 } else {
-                    pos++;
-                    return Op::LT;
+                    pos_++;
+                    return ComparisonOp::LT;
                 }
             }
             if (c == '>') {
-                if (pos + 1 < str.size() && str[pos + 1] == '=') {
-                    pos += 2;
-                    return Op::GE;
+                if (pos_ + 1 < str_.size() && str_[pos_ + 1] == '=') {
+                    pos_ += 2;
+                    return ComparisonOp::GE;
                 } else {
-                    pos++;
-                    return Op::GT;
+                    pos_++;
+                    return ComparisonOp::GT;
                 }
             }
             throw std::invalid_argument(
-              std::string("Expected comparison operator at position ")
-              + std::to_string(pos));
+              "Expected comparison operator at position "
+              + std::to_string(pos_));
         }
 
         // Parse a literal value (number, boolean, or quoted string).
         std::string parseLiteral() {
-            if (pos >= str.size()) {
+            if (pos_ >= str_.size()) {
                 throw std::invalid_argument(
                   "Expected literal value at end of input");
             }
-            if (str[pos] == '\"') {
-                // String literal - parse until closing quote
-                pos++;
+            if (str_[pos_] == '\"') {
+                pos_++;
                 std::string value;
-                while (pos < str.size() && str[pos] != '\"') {
-                    char c = str[pos++];
-                    if (c == '\\' && pos < str.size()) {
-                        // Handle escape sequences like \" or \\ if needed
-                        char nextChar = str[pos++];
+                while (pos_ < str_.size() && str_[pos_] != '\"') {
+                    char c = str_[pos_++];
+                    if (c == '\\' && pos_ < str_.size()) {
+                        char nextChar = str_[pos_++];
                         switch (nextChar) {
                         case '\"':
                             value.push_back('\"');
@@ -338,7 +360,6 @@ private:
                         case '\\':
                             value.push_back('\\');
                             break;
-                        // ... (could handle \n, \t etc. if we want to support)
                         default:
                             value.push_back(nextChar);
                         }
@@ -346,51 +367,47 @@ private:
                         value.push_back(c);
                     }
                 }
-                if (pos >= str.size() || str[pos] != '\"') {
+                if (pos_ >= str_.size() || str_[pos_] != '\"') {
                     throw std::invalid_argument(
                       "Unterminated string literal in filter");
                 }
-                pos++; // consume closing quote
+                pos_++;
                 return value;
             } else {
-                // Unquoted literal (could be numeric or boolean)
-                size_t start = pos;
-                while (pos < str.size()
-                       && !std::isspace(static_cast<unsigned char>(str[pos]))) {
-                    pos++;
+                size_t start = pos_;
+                while (
+                  pos_ < str_.size()
+                  && !std::isspace(static_cast<unsigned char>(str_[pos_]))) {
+                    pos_++;
                 }
-                std::string token = str.substr(start, pos - start);
-                return token;
+                return str_.substr(start, pos_ - start);
             }
         }
 
         // Skip whitespace characters
         void skipSpaces() {
-            while (pos < str.size()
-                   && std::isspace(static_cast<unsigned char>(str[pos]))) {
-                pos++;
+            while (pos_ < str_.size()
+                   && std::isspace(static_cast<unsigned char>(str_[pos_]))) {
+                pos_++;
             }
         }
 
-        // Match a keyword (like "AND"), case-insensitive. If matches, consume
-        // it and return true.
+        // Match a keyword (like "AND"), case-insensitive.
         bool matchKeyword(const std::string& keyword) {
             skipSpaces();
             size_t len = keyword.size();
-            if (pos + len <= str.size()) {
-                // Compare ignoring case
+            if (pos_ + len <= str_.size()) {
                 if (std::equal(
                       keyword.begin(),
                       keyword.end(),
-                      str.begin() + pos,
+                      str_.begin() + pos_,
                       [](char a, char b) {
                           return std::toupper(a) == std::toupper(b);
                       })) {
-                    // Ensure the keyword is bounded by non-alphanumeric
-                    if ((pos + len == str.size()
+                    if ((pos_ + len == str_.size()
                          || std::isspace(
-                           static_cast<unsigned char>(str[pos + len])))) {
-                        pos += len;
+                           static_cast<unsigned char>(str_[pos_ + len])))) {
+                        pos_ += len;
                         return true;
                     }
                 }
@@ -398,68 +415,13 @@ private:
             return false;
         }
 
-        bool endOfInput() const { return pos >= str.size(); }
+        bool endOfInput() const { return pos_ >= str_.size(); }
 
     private:
-        const std::string& str;
-        size_t pos;
-        const FieldAccessorRegistry& _registry;
+        const std::string& str_;
+        size_t pos_;
+        const Registry& registry_;
     };
 };
 
-// Helper function to create a field accessor registry builder
-template<typename T>
-class FieldAccessorRegistryBuilder {
-public:
-    using Registry = typename FilterParser<T>::FieldAccessorRegistry;
-
-    FieldAccessorRegistryBuilder& addInt64Field(
-      const std::string& fieldPath, std::function<int64_t(const T&)> accessor) {
-        _registry[fieldPath] = FieldAccessorInfo<T>{
-          FieldAccessorInfo<T>::Int64,
-          std::move(accessor),
-          nullptr,
-          nullptr,
-          nullptr};
-        return *this;
-    }
-
-    FieldAccessorRegistryBuilder& addDoubleField(
-      const std::string& fieldPath, std::function<double(const T&)> accessor) {
-        _registry[fieldPath] = FieldAccessorInfo<T>{
-          FieldAccessorInfo<T>::Double,
-          nullptr,
-          std::move(accessor),
-          nullptr,
-          nullptr};
-        return *this;
-    }
-
-    FieldAccessorRegistryBuilder& addBoolField(
-      const std::string& fieldPath, std::function<bool(const T&)> accessor) {
-        _registry[fieldPath] = FieldAccessorInfo<T>{
-          FieldAccessorInfo<T>::Bool,
-          nullptr,
-          nullptr,
-          std::move(accessor),
-          nullptr};
-        return *this;
-    }
-
-    FieldAccessorRegistryBuilder& addStringField(
-      const std::string& fieldPath,
-      std::function<std::string(const T&)> accessor) {
-        _registry[fieldPath] = FieldAccessorInfo<T>{
-          FieldAccessorInfo<T>::String,
-          nullptr,
-          nullptr,
-          nullptr,
-          std::move(accessor)};
-        return *this;
-    }
-
-    Registry build() && { return std::move(_registry); }
-
-private:
-    Registry _registry;
-};
+} // namespace redpanda::admin

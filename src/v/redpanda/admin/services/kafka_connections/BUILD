@@ -6,7 +6,7 @@ redpanda_cc_library(
     hdrs = ["kafka_connections.h"],
     visibility = ["//src/v/redpanda:__subpackages__"],
     deps = [
-        "//proto/redpanda/core/admin:kafka_connections_redpanda_proto",
+        "//proto/redpanda/core/admin/v2:kafka_connections_redpanda_proto",
         "//src/v/base",
         "//src/v/container:chunked_vector",
         "//src/v/kafka/server",

@@ -144,6 +144,21 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "field_registry",
+    srcs = [],
+    hdrs = [
+        "field_registry.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/cluster",
+        "//src/v/json",
+        "//src/v/model",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+redpanda_cc_library(
     name = "aip_filter",
     srcs = [
         "aip_filter.cc",
@@ -153,6 +168,7 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":field_registry",
         "//src/v/cluster",
         "//src/v/json",
         "//src/v/model",
