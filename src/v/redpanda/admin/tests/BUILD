@@ -1,7 +1,7 @@
 load("//bazel:test.bzl", "redpanda_cc_gtest")
 
 redpanda_cc_gtest(
-    name = "api_filter_test",
+    name = "aip_filter_test",
     timeout = "short",
     srcs = [
         "aip_filter_test.cc",
@@ -12,6 +12,7 @@ redpanda_cc_gtest(
         "//src/v/redpanda/admin:aip_filter",
         "//src/v/redpanda/admin:field_registry",
         "//src/v/test_utils:gtest",
+        "@abseil-cpp//absl/time",
         "@googletest//:gtest",
         "@seastar",
     ],

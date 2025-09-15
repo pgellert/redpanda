@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "absl/time/time.h"
+#include "base/unreachable.h"
 #include "redpanda/admin/field_registry.h"
 
 #include <algorithm>
@@ -76,7 +78,7 @@ struct ComparisonNode : public ASTNode<T> {
         case ComparisonOp::GE:
             return fieldVal >= literalValue;
         }
-        return false; // unreachable
+        unreachable();
     }
 };
 
@@ -102,6 +104,43 @@ private:
 };
 
 /**
+ * Utility functions for parsing AIP-160 compliant duration and timestamp
+ * literals using absl.
+ */
+namespace aip_utils {
+
+/**
+ * Check if a string looks like a duration (heuristic check)
+ */
+inline bool is_duration_literal(const std::string& str) {
+    // Simple heuristic: ends with 's', 'm', 'h', etc. and has at least one
+    // digit
+    if (str.length() <= 1) return false;
+
+    char last_char = str.back();
+    bool has_time_suffix = (last_char == 's' || last_char == 'm' || last_char == 'h' ||
+                           str.ends_with("ms") || str.ends_with("us") || str.ends_with("ns"));
+
+    return has_time_suffix
+           && std::any_of(str.begin(), str.end() - 1, [](char c) {
+                  return std::isdigit(c);
+              });
+}
+
+/**
+ * Check if a string looks like an RFC-3339 timestamp (heuristic check)
+ */
+inline bool is_timestamp_literal(const std::string& str) {
+    // Basic heuristic: contains 'T' and has reasonable length for RFC-3339
+    return str.length() >= 19 && str.find('T') != std::string::npos
+           && str.length() >= 4 && str[4] == '-' && std::isdigit(str[0])
+           && std::isdigit(str[1]) && std::isdigit(str[2])
+           && std::isdigit(str[3]);
+}
+
+} // namespace aip_utils
+
+/**
  * AIP (API Improvement Proposals) compliant filter parser for protobuf
  * messages.
  *
@@ -115,17 +154,28 @@ private:
  * - String literals: "quoted strings"
  * - Numeric literals: integers and floating point
  * - Boolean literals: true, false
+ * - Duration literals: absl::ParseDuration format (e.g., "20s", "1.2s", "5m",
+ * "1h")
+ * - Timestamp literals: RFC-3339 formatted strings (e.g.,
+ * "2012-04-21T11:30:00-04:00")
  */
 template<typename T>
 class AIPFilterParser {
 public:
-    using Registry = ProtobufFieldRegistry<T>;
+    /**
+     * Construct an AIP filter parser with a reference to a field registry.
+     * The registry must outlive the parser.
+     */
+    explicit AIPFilterParser(const IProtobufFieldRegistry<T>& registry)
+      : registry_(registry) {}
 
     /**
-     * Construct an AIP filter parser with the given field registry.
+     * Construct an AIP filter parser with ownership of a field registry.
      */
-    explicit AIPFilterParser(const Registry& registry)
-      : registry_(registry) {}
+    explicit AIPFilterParser(
+      std::unique_ptr<IProtobufFieldRegistry<T>> registry)
+      : owned_registry_(std::move(registry))
+      , registry_(*owned_registry_) {}
 
     /**
      * Parse a filter expression string into a callable predicate.
@@ -164,12 +214,14 @@ public:
     }
 
 private:
-    const Registry& registry_;
+    std::unique_ptr<IProtobufFieldRegistry<T>> owned_registry_; // If we own it
+    const IProtobufFieldRegistry<T>& registry_; // Always reference this
 
     // Internal recursive descent parser
     class Parser {
     public:
-        Parser(const std::string& input, const Registry& registry)
+        Parser(
+          const std::string& input, const IProtobufFieldRegistry<T>& registry)
           : str_(input)
           , pos_(0)
           , registry_(registry) {}
@@ -198,25 +250,33 @@ private:
             skipSpaces();
             std::string literalText = parseLiteral();
 
-            const auto& info = registry_.get_field_info(fieldPath);
+            // Check if field exists in registry
+            if (!registry_.has_field(fieldPath)) {
+                throw std::invalid_argument("Unknown field path: " + fieldPath);
+            }
+
+            // Get field info
+            auto info = registry_.get_field_info(fieldPath);
 
             // Based on field type, convert literal and create appropriate
             // ComparisonNode
             switch (info.type) {
             case FieldAccessorInfo<T>::Int64: {
-                long long val = 0;
+                int64_t val = 0;
                 try {
                     size_t idx = 0;
-                    val = std::stoll(literalText, &idx);
+                    long long parsed_val = std::stoll(literalText, &idx);
                     if (idx != literalText.size()) {
                         throw std::invalid_argument("");
                     }
+                    val = static_cast<int64_t>(parsed_val);
                 } catch (...) {
                     throw std::invalid_argument(
                       "Expected integer value for field " + fieldPath);
                 }
+
                 return std::make_unique<ComparisonNode<T, int64_t>>(
-                  info.getInt64, op, static_cast<int64_t>(val));
+                  info.getInt64, op, val);
             }
             case FieldAccessorInfo<T>::Double: {
                 double val = 0.0;
@@ -230,6 +290,7 @@ private:
                     throw std::invalid_argument(
                       "Expected numeric value for field " + fieldPath);
                 }
+
                 return std::make_unique<ComparisonNode<T, double>>(
                   info.getDouble, op, val);
             }
@@ -261,6 +322,50 @@ private:
             case FieldAccessorInfo<T>::String: {
                 return std::make_unique<ComparisonNode<T, std::string>>(
                   info.getString, op, literalText);
+            }
+            case FieldAccessorInfo<T>::Duration: {
+                absl::Duration val;
+
+                if (!absl::ParseDuration(literalText, &val)) {
+                    throw std::invalid_argument(
+                      "Expected duration literal with unit (e.g., '20s', "
+                      "'1.5s', '5m') for field "
+                      + fieldPath);
+                }
+
+                return std::make_unique<ComparisonNode<T, absl::Duration>>(
+                  info.getDuration, op, val);
+            }
+            case FieldAccessorInfo<T>::Timestamp: {
+                absl::Time val;
+
+                if (aip_utils::is_timestamp_literal(literalText)) {
+                    std::string error;
+                    if (!absl::ParseTime(
+                          absl::RFC3339_full, literalText, &val, &error)) {
+                        throw std::invalid_argument(
+                          "Invalid timestamp value for field " + fieldPath
+                          + ": " + error);
+                    }
+                } else {
+                    // Try parsing as Unix timestamp
+                    try {
+                        size_t idx = 0;
+                        long long unix_seconds = std::stoll(literalText, &idx);
+                        if (idx != literalText.size()) {
+                            throw std::invalid_argument("");
+                        }
+                        val = absl::FromUnixSeconds(unix_seconds);
+                    } catch (...) {
+                        throw std::invalid_argument(
+                          "Expected RFC-3339 timestamp (e.g., "
+                          "'2012-04-21T11:30:00Z') or Unix timestamp for field "
+                          + fieldPath);
+                    }
+                }
+
+                return std::make_unique<ComparisonNode<T, absl::Time>>(
+                  info.getTimestamp, op, val);
             }
             }
             throw std::invalid_argument(
@@ -340,7 +445,8 @@ private:
               + std::to_string(pos_));
         }
 
-        // Parse a literal value (number, boolean, or quoted string).
+        // Parse a literal value (number, boolean, quoted string, duration, or
+        // timestamp).
         std::string parseLiteral() {
             if (pos_ >= str_.size()) {
                 throw std::invalid_argument(
@@ -420,7 +526,7 @@ private:
     private:
         const std::string& str_;
         size_t pos_;
-        const Registry& registry_;
+        const IProtobufFieldRegistry<T>& registry_;
     };
 };
 
