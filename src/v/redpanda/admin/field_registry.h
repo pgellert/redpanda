@@ -33,7 +33,7 @@ namespace redpanda::admin {
  */
 template<typename T>
 struct FieldAccessorInfo {
-    enum Type { Int64, Double, Bool, String, Duration, Timestamp } type;
+    enum Type { Int64, Double, Bool, String, Duration, Timestamp, Enum } type;
 
     // Accessor functions for each supported type (only one will be set based on
     // 'type')
@@ -43,6 +43,8 @@ struct FieldAccessorInfo {
     std::function<std::string(const T&)> getString;
     std::function<absl::Duration(const T&)> getDuration;
     std::function<absl::Time(const T&)> getTimestamp;
+    std::function<std::string(const T&)>
+      getEnum; // Returns string representation of enum
 };
 
 /**
@@ -152,6 +154,7 @@ public:
           nullptr,
           nullptr,
           nullptr,
+          nullptr,
           nullptr};
         return *this;
     }
@@ -165,6 +168,7 @@ public:
           FieldAccessorInfo<T>::Double,
           nullptr,
           std::move(accessor),
+          nullptr,
           nullptr,
           nullptr,
           nullptr,
@@ -184,6 +188,7 @@ public:
           std::move(accessor),
           nullptr,
           nullptr,
+          nullptr,
           nullptr};
         return *this;
     }
@@ -200,6 +205,7 @@ public:
           nullptr,
           nullptr,
           std::move(accessor),
+          nullptr,
           nullptr,
           nullptr};
         return *this;
@@ -218,6 +224,7 @@ public:
           nullptr,
           nullptr,
           std::move(accessor),
+          nullptr,
           nullptr};
         return *this;
     }
@@ -230,6 +237,25 @@ public:
       std::function<absl::Time(const T&)> accessor) {
         accessors_[field_path] = FieldAccessorInfo<T>{
           FieldAccessorInfo<T>::Timestamp,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          nullptr,
+          std::move(accessor),
+          nullptr};
+        return *this;
+    }
+
+    /**
+     * Add an enum field accessor (returns string representation).
+     */
+    ProtobufFieldRegistryBuilder& addEnumField(
+      const std::string& field_path,
+      std::function<std::string(const T&)> accessor) {
+        accessors_[field_path] = FieldAccessorInfo<T>{
+          FieldAccessorInfo<T>::Enum,
+          nullptr,
           nullptr,
           nullptr,
           nullptr,
@@ -397,13 +423,13 @@ private:
               },
               nullptr,
               nullptr,
+              nullptr,
               nullptr};
         } else if constexpr (
           std::is_same_v<ValueType, int32_t>
           || std::is_same_v<ValueType, int64_t>
           || std::is_same_v<ValueType, uint32_t>
-          || std::is_same_v<ValueType, uint64_t>
-          || std::is_same_v<ValueType, serde::pb::raw_enum_value>) {
+          || std::is_same_v<ValueType, uint64_t>) {
             return FieldAccessorInfo<T>{
               FieldAccessorInfo<T>::Int64,
               [field_numbers](const T& obj) -> int64_t {
@@ -413,7 +439,22 @@ private:
               nullptr,
               nullptr,
               nullptr,
+              nullptr,
               nullptr};
+        } else if constexpr (std::is_same_v<
+                               ValueType,
+                               serde::pb::raw_enum_value>) {
+            return FieldAccessorInfo<T>{
+              FieldAccessorInfo<T>::Enum,
+              nullptr,
+              nullptr,
+              nullptr,
+              nullptr,
+              nullptr,
+              nullptr,
+              [field_numbers](const T& obj) -> std::string {
+                  return extract_field_value<std::string>(obj, field_numbers);
+              }};
         } else if constexpr (
           std::is_same_v<ValueType, float>
           || std::is_same_v<ValueType, double>) {
@@ -423,6 +464,7 @@ private:
               [field_numbers](const T& obj) -> double {
                   return extract_field_value<double>(obj, field_numbers);
               },
+              nullptr,
               nullptr,
               nullptr,
               nullptr,
@@ -439,6 +481,7 @@ private:
                   return extract_field_value<std::string>(obj, field_numbers);
               },
               nullptr,
+              nullptr,
               nullptr};
         } else if constexpr (std::is_same_v<ValueType, absl::Time>) {
             return FieldAccessorInfo<T>{
@@ -450,7 +493,8 @@ private:
               nullptr,
               [field_numbers](const T& obj) -> absl::Time {
                   return extract_field_value<absl::Time>(obj, field_numbers);
-              }};
+              },
+              nullptr};
         } else if constexpr (std::is_same_v<ValueType, absl::Duration>) {
             return FieldAccessorInfo<T>{
               FieldAccessorInfo<T>::Duration,
@@ -462,6 +506,7 @@ private:
                   return extract_field_value<absl::Duration>(
                     obj, field_numbers);
               },
+              nullptr,
               nullptr};
         } else {
             throw std::invalid_argument(
@@ -506,10 +551,6 @@ private:
                       return static_cast<int64_t>(value);
                   } else if constexpr (std::is_same_v<ValueType, uint64_t>) {
                       return static_cast<int64_t>(value);
-                  } else if constexpr (std::is_same_v<
-                                         ValueType,
-                                         serde::pb::raw_enum_value>) {
-                      return static_cast<int64_t>(value.number);
                   } else {
                       throw std::runtime_error(
                         "Cannot convert field value to int64");
@@ -526,6 +567,12 @@ private:
               } else if constexpr (std::is_same_v<ReturnType, std::string>) {
                   if constexpr (std::is_same_v<ValueType, ss::sstring>) {
                       return std::string(value);
+                  } else if constexpr (std::is_same_v<
+                                         ValueType,
+                                         serde::pb::raw_enum_value>) {
+                      // Use the name field from raw_enum_value which contains
+                      // the string representation
+                      return std::string(value.name);
                   } else if constexpr (std::is_same_v<ValueType, iobuf>) {
                       // Convert iobuf to string - need to find the correct
                       // method Based on redpanda codebase, iobuf likely has a

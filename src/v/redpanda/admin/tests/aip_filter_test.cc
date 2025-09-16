@@ -185,17 +185,17 @@ auto create_kafka_connection_field_registry() {
             return std::string(
               c.get_authentication_info().get_user_principal());
         })
-      .addInt64Field(
+      .addEnumField(
         "authentication_info.state",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(
-              c.get_authentication_info().get_state());
+        [](const kafka_connection& c) -> std::string {
+            auto state = c.get_authentication_info().get_state();
+            return std::string(proto::admin::enum_to_string(state));
         })
-      .addInt64Field(
+      .addEnumField(
         "authentication_info.mechanism",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(
-              c.get_authentication_info().get_mechanism());
+        [](const kafka_connection& c) -> std::string {
+            auto mechanism = c.get_authentication_info().get_mechanism();
+            return std::string(proto::admin::enum_to_string(mechanism));
         })
 
       // Nested tls_info fields
@@ -433,11 +433,14 @@ TEST_F(KafkaConnectionFilterTest, DeepNestedFieldAccess) {
     conn.get_authentication_info().set_mechanism(
       proto::admin::authentication_mechanism::sasl_scram);
 
+    // FIXED: Use uppercase string representations for enum values
     EXPECT_TRUE(
-      parser().parse("authentication_info.state = 2")(conn)); // success = 2
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
     EXPECT_TRUE(
-      parser().parse("authentication_info.mechanism = 2")(
-        conn)); // sasl_scram = 2
+      parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"")(conn));
 }
 
 // =============================================================================
@@ -990,6 +993,331 @@ TEST_F(KafkaConnectionFilterTest, RegressionStringEscaping) {
 
     EXPECT_TRUE(parser().parse("client_id = \"client\\\\test\"")(conn1));
     EXPECT_TRUE(parser().parse("client_id = \"client\\\"test\"")(conn2));
+}
+
+// =============================================================================
+// ENUM SUPPORT TESTS
+// =============================================================================
+TEST_F(KafkaConnectionFilterTest, EnumFieldBasicSupport) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::sasl_scram);
+
+    // Test enum field access with uppercase string values
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"")(conn));
+
+    // Test negative cases
+    EXPECT_FALSE(
+      parser().parse("authentication_info.state = \"FAILURE\"")(conn));
+    EXPECT_FALSE(
+      parser().parse("authentication_info.mechanism = \"MTLS\"")(conn));
+}
+
+TEST_F(KafkaConnectionFilterTest, EnumFieldAllValues) {
+    auto conn = create_test_connection();
+
+    // Test all authentication_state values
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::unspecified);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_UNSPECIFIED\"")(
+        conn));
+
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::unauthenticated);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_UNAUTHENTICATED\"")(
+        conn));
+
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::failure);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_FAILURE\"")(conn));
+
+    // Test all authentication_mechanism values
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::unspecified);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_UNSPECIFIED\"")(conn));
+
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::mtls);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism = \"AUTHENTICATION_MECHANISM_MTLS\"")(
+        conn));
+
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::sasl_scram);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"")(conn));
+
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::sasl_oauthbearer);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_OAUTHBEARER\"")(conn));
+
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::sasl_plain);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_PLAIN\"")(conn));
+
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::sasl_gssapi);
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_GSSAPI\"")(conn));
+}
+
+TEST_F(KafkaConnectionFilterTest, EnumFieldCaseSensitivity) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+
+    // Enum values should be case-sensitive (AIP-160 requirement)
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+
+    // These should fail due to case sensitivity - they will parse successfully
+    // but won't match at runtime
+    auto predicate_wrong_case1 = parser().parse(
+      "authentication_info.state = \"authentication_state_success\""); // lowercase
+    auto predicate_wrong_case2 = parser().parse(
+      "authentication_info.state = \"Authentication_State_Success\""); // mixed
+                                                                       // case
+    auto predicate_wrong_case3 = parser().parse(
+      "authentication_info.state = \"Authentication_sTate_sUcCeSs\""); // random
+                                                                       // case
+
+    EXPECT_FALSE(predicate_wrong_case1(conn));
+    EXPECT_FALSE(predicate_wrong_case2(conn));
+    EXPECT_FALSE(predicate_wrong_case3(conn));
+}
+
+TEST_F(KafkaConnectionFilterTest, EnumFieldComparisonOperators) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+
+    // Equality and inequality should work
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+    EXPECT_TRUE(
+      parser().parse("authentication_info.state != \"FAILURE\"")(conn));
+
+    // Other comparison operators should throw for enums
+    EXPECT_THROW(
+      parser().parse("authentication_info.state > \"FAILURE\""),
+      std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse("authentication_info.state < \"UNSPECIFIED\""),
+      std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse(
+        "authentication_info.state >= \"AUTHENTICATION_STATE_SUCCESS\""),
+      std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse(
+        "authentication_info.state <= \"AUTHENTICATION_STATE_SUCCESS\""),
+      std::invalid_argument);
+}
+
+TEST_F(KafkaConnectionFilterTest, EnumFieldLogicalOperations) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::sasl_scram);
+
+    // Test AND operations with enums
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\" AND "
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"")(conn));
+
+    EXPECT_FALSE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\" AND "
+        "authentication_info.mechanism = \"MTLS\"")(conn));
+
+    // Test with mixed field types
+    EXPECT_TRUE(
+      parser().parse(
+        "node_id = 1 AND authentication_info.state = "
+        "\"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+
+    EXPECT_FALSE(
+      parser().parse(
+        "node_id = 2 AND authentication_info.state = "
+        "\"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+}
+
+TEST_F(KafkaConnectionFilterTest, EnumFieldEdgeCases) {
+    auto conn = create_test_connection();
+
+    // Test with unspecified values (default enum values)
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::unspecified);
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::unspecified);
+
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_UNSPECIFIED\"")(
+        conn));
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_UNSPECIFIED\"")(conn));
+
+    // Test inequality with unspecified
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state != \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.mechanism != "
+        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"")(conn));
+}
+
+// =============================================================================
+// AUTO REGISTRY ENUM TESTS - UPDATED TO UPPERCASE
+// =============================================================================
+
+TEST_F(KafkaConnectionAutoFilterTest, AutoRegistryEnumSupport) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::sasl_scram);
+
+    // Auto registry should also support enum fields
+    EXPECT_TRUE(
+      auto_parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+    EXPECT_TRUE(
+      auto_parser().parse(
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"")(conn));
+
+    // Invalid format values should still throw during parsing
+    EXPECT_THROW(
+      auto_parser().parse("authentication_info.state = \"\""),
+      std::invalid_argument);
+
+    // Valid format but invalid enum values should parse but not match
+    auto predicate_invalid = auto_parser().parse(
+      "authentication_info.state = \"INVALID_BUT_FORMATTED_CORRECTLY\"");
+    EXPECT_FALSE(predicate_invalid(conn));
+}
+
+// =============================================================================
+// REGISTRY COMPATIBILITY ENUM TESTS - UPDATED TO UPPERCASE
+// =============================================================================
+
+TEST_F(KafkaConnectionUnifiedFilterTest, EnumCompatibilityBetweenRegistries) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+    conn.get_authentication_info().set_mechanism(
+      proto::admin::authentication_mechanism::sasl_scram);
+
+    const std::string enum_filter
+      = "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\" AND "
+        "authentication_info.mechanism = "
+        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"";
+
+    auto manual_predicate = manual_parser().parse(enum_filter);
+    auto auto_predicate = auto_parser().parse(enum_filter);
+
+    EXPECT_TRUE(manual_predicate(conn));
+    EXPECT_TRUE(auto_predicate(conn));
+
+    // Test with different values
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::failure);
+
+    EXPECT_FALSE(manual_predicate(conn));
+    EXPECT_FALSE(auto_predicate(conn));
+}
+
+// =============================================================================
+// PERFORMANCE AND STRESS TESTS FOR ENUMS - UPDATED TO UPPERCASE
+// =============================================================================
+
+TEST_F(KafkaConnectionFilterTest, EnumPerformanceWithManyConditions) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+
+    // Test many enum conditions
+    std::string filter
+      = "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"";
+    for (int i = 0; i < 50; ++i) {
+        filter += " AND authentication_info.state = "
+                  "\"AUTHENTICATION_STATE_SUCCESS\"";
+    }
+
+    auto predicate = parser().parse(filter);
+    EXPECT_TRUE(predicate(conn));
+}
+
+// =============================================================================
+// RUNTIME ENUM VALIDATION BEHAVIOR TESTS - UPDATED TO UPPERCASE
+// =============================================================================
+
+TEST_F(KafkaConnectionFilterTest, EnumRuntimeValidationBehavior) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+
+    // Test that runtime validation works correctly
+    // These should not match even though they parse successfully
+    std::vector<std::string> invalid_but_well_formatted_values = {
+      "NONEXISTENT_STATE", "SOME_OTHER_VALUE", "DEFINITELY_NOT_AN_ENUM_VALUE"};
+
+    for (const auto& invalid_value : invalid_but_well_formatted_values) {
+        auto predicate = parser().parse(
+          "authentication_info.state = \"" + invalid_value + "\"");
+        EXPECT_FALSE(predicate(conn))
+          << "Should not match invalid enum value: " << invalid_value;
+    }
+
+    // But valid values should still work
+    EXPECT_TRUE(
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
+    EXPECT_TRUE(
+      parser().parse("authentication_info.state != \"FAILURE\"")(conn));
 }
 
 } // namespace redpanda::admin

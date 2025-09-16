@@ -138,6 +138,22 @@ inline bool is_timestamp_literal(const std::string& str) {
            && std::isdigit(str[3]);
 }
 
+/**
+ * Validate that an enum string value has a valid format.
+ * Basic validation: non-empty, contains only letters, numbers, and underscores.
+ *
+ * Note: This doesn't validate that the enum value is actually valid for the
+ * specific enum type - that validation happens at runtime when the field
+ * accessor tries to match the string against the actual enum value.
+ */
+inline bool is_valid_enum_string_format(const std::string& str) {
+    if (str.empty()) return false;
+
+    return std::all_of(str.begin(), str.end(), [](char c) {
+        return std::isalnum(c) || c == '_';
+    });
+}
+
 } // namespace aip_utils
 
 /**
@@ -154,6 +170,7 @@ inline bool is_timestamp_literal(const std::string& str) {
  * - String literals: "quoted strings"
  * - Numeric literals: integers and floating point
  * - Boolean literals: true, false
+ * - Enum literals: "enum_value_name" (case-sensitive, validated at runtime)
  * - Duration literals: absl::ParseDuration format (e.g., "20s", "1.2s", "5m",
  * "1h")
  * - Timestamp literals: RFC-3339 formatted strings (e.g.,
@@ -322,6 +339,30 @@ private:
             case FieldAccessorInfo<T>::String: {
                 return std::make_unique<ComparisonNode<T, std::string>>(
                   info.getString, op, literalText);
+            }
+            case FieldAccessorInfo<T>::Enum: {
+                // Enums only support equality and inequality
+                if (op != ComparisonOp::EQ && op != ComparisonOp::NE) {
+                    throw std::invalid_argument(
+                      "Only '=' or '!=' supported for enum field " + fieldPath);
+                }
+
+                // Basic format validation - actual enum value validation
+                // happens at runtime in the field accessor
+                if (!aip_utils::is_valid_enum_string_format(literalText)) {
+                    throw std::invalid_argument(
+                      "Invalid enum value format for field " + fieldPath + ": "
+                      + literalText);
+                }
+
+                // TODO: Once we have better reflection capabilities, we could
+                // validate that literalText is a valid enum value for this
+                // specific field. For now, validation happens at runtime
+                // when the field accessor compares the literal against the
+                // actual field value.
+
+                return std::make_unique<ComparisonNode<T, std::string>>(
+                  info.getEnum, op, literalText);
             }
             case FieldAccessorInfo<T>::Duration: {
                 absl::Duration val;
