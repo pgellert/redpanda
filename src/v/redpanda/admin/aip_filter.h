@@ -147,11 +147,9 @@ inline bool is_timestamp_literal(const std::string& str) {
  * accessor tries to match the string against the actual enum value.
  */
 inline bool is_valid_enum_string_format(const std::string& str) {
-    if (str.empty()) return false;
-
-    return std::all_of(str.begin(), str.end(), [](char c) {
-        return std::isalnum(c) || c == '_';
-    });
+    return !str.empty() && std::isalpha(str[0])
+           && std::ranges::all_of(
+             str, [](char c) { return std::isalnum(c) || c == '_'; });
 }
 
 } // namespace aip_utils

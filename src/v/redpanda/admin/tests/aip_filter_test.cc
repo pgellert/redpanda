@@ -65,181 +65,14 @@ proto::admin::kafka_connection create_test_connection(
     return conn;
 }
 
-// kafka_connection-specific registry creation using manual approach
-auto create_kafka_connection_field_registry() {
-    using proto::admin::kafka_connection;
-
-    auto builder = ProtobufFieldRegistryBuilder<kafka_connection>{};
-    builder
-      // Basic scalar fields
-      .addInt64Field(
-        "node_id",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_node_id());
-        })
-      .addInt64Field(
-        "shard_id",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_shard_id());
-        })
-      .addStringField(
-        "uid",
-        [](const kafka_connection& c) { return std::string(c.get_uid()); })
-      .addBoolField(
-        "aborting", [](const kafka_connection& c) { return c.get_aborting(); })
-      .addStringField(
-        "listener_name",
-        [](const kafka_connection& c) {
-            return std::string(c.get_listener_name());
-        })
-      .addStringField(
-        "client_id",
-        [](const kafka_connection& c) {
-            return std::string(c.get_client_id());
-        })
-      .addStringField(
-        "client_software_name",
-        [](const kafka_connection& c) {
-            return std::string(c.get_client_software_name());
-        })
-      .addStringField(
-        "client_software_version",
-        [](const kafka_connection& c) {
-            return std::string(c.get_client_software_version());
-        })
-      .addStringField(
-        "transactional_id",
-        [](const kafka_connection& c) {
-            return std::string(c.get_transactional_id());
-        })
-      .addStringField(
-        "group_id",
-        [](const kafka_connection& c) { return std::string(c.get_group_id()); })
-      .addStringField(
-        "group_instance_id",
-        [](const kafka_connection& c) {
-            return std::string(c.get_group_instance_id());
-        })
-      .addStringField(
-        "group_member_id",
-        [](const kafka_connection& c) {
-            return std::string(c.get_group_member_id());
-        })
-
-      // Throughput and count fields
-      .addInt64Field(
-        "produce_tput_total",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_produce_tput_total());
-        })
-      .addInt64Field(
-        "produce_tput_last_1min",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_produce_tput_last_1min());
-        })
-      .addInt64Field(
-        "fetch_tput_total",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_fetch_tput_total());
-        })
-      .addInt64Field(
-        "fetch_tput_last_1min",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_fetch_tput_last_1min());
-        })
-      .addInt64Field(
-        "request_count_total",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_request_count_total());
-        })
-      .addInt64Field(
-        "request_count_last_1min",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_request_count_last_1min());
-        })
-      .addInt64Field(
-        "produce_batch_record_bytes_total",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(
-              c.get_produce_batch_record_bytes_total());
-        })
-      .addInt64Field(
-        "produce_batch_record_count_total",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(
-              c.get_produce_batch_record_count_total());
-        })
-
-      // Legacy field alias for backward compatibility
-      .addInt64Field(
-        "field1",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(
-              c.get_produce_batch_record_count_total());
-        })
-
-      // Nested authentication_info fields
-      .addStringField(
-        "authentication_info.user_principal",
-        [](const kafka_connection& c) {
-            return std::string(
-              c.get_authentication_info().get_user_principal());
-        })
-      .addEnumField(
-        "authentication_info.state",
-        [](const kafka_connection& c) -> std::string {
-            auto state = c.get_authentication_info().get_state();
-            return std::string(proto::admin::enum_to_string(state));
-        })
-      .addEnumField(
-        "authentication_info.mechanism",
-        [](const kafka_connection& c) -> std::string {
-            auto mechanism = c.get_authentication_info().get_mechanism();
-            return std::string(proto::admin::enum_to_string(mechanism));
-        })
-
-      // Nested tls_info fields
-      .addBoolField(
-        "tls_info.enabled",
-        [](const kafka_connection& c) {
-            return c.get_tls_info().get_enabled();
-        })
-
-      // Nested source fields
-      .addStringField(
-        "source.ip_address",
-        [](const kafka_connection& c) {
-            return std::string(c.get_source().get_ip_address());
-        })
-      .addInt64Field(
-        "source.port",
-        [](const kafka_connection& c) {
-            return static_cast<int64_t>(c.get_source().get_port());
-        })
-
-      .addDurationField(
-        "idle_duration",
-        [](const kafka_connection& c) { return c.get_idle_duration(); })
-      .addTimestampField(
-        "open_time",
-        [](const kafka_connection& c) { return c.get_open_time(); })
-      .addTimestampField("close_time", [](const kafka_connection& c) {
-          return c.get_close_time();
-      });
-
-    return std::move(builder).build();
-}
-
+// Single test fixture using auto registry
 class KafkaConnectionFilterTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Create the manual registry and parser in SetUp()
-        auto manual_registry = std::make_unique<
-          ProtobufFieldRegistry<proto::admin::kafka_connection>>(
-          create_kafka_connection_field_registry());
+        auto registry = make_field_registry<proto::admin::kafka_connection>();
         parser_
           = std::make_unique<AIPFilterParser<proto::admin::kafka_connection>>(
-            std::move(manual_registry));
+            std::move(registry));
     }
 
 private:
@@ -249,74 +82,6 @@ protected:
     // Provide access to the parser for tests
     AIPFilterParser<proto::admin::kafka_connection>& parser() {
         return *parser_;
-    }
-};
-
-class KafkaConnectionAutoFilterTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        // Create the automatic registry and parser in SetUp()
-        auto auto_registry
-          = make_auto_field_registry<proto::admin::kafka_connection>();
-        auto_parser_
-          = std::make_unique<AIPFilterParser<proto::admin::kafka_connection>>(
-            std::move(auto_registry));
-    }
-
-private:
-    std::unique_ptr<AIPFilterParser<proto::admin::kafka_connection>>
-      auto_parser_;
-
-protected:
-    // Provide access to the automatic parser for tests
-    AIPFilterParser<proto::admin::kafka_connection>& auto_parser() {
-        return *auto_parser_;
-    }
-};
-
-class KafkaConnectionUnifiedFilterTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        // Test both registry types through the same interface
-        manual_registry_
-          = make_manual_field_registry<proto::admin::kafka_connection>(
-            create_kafka_connection_field_registry().get_accessors());
-        auto_registry_
-          = make_auto_field_registry<proto::admin::kafka_connection>();
-
-        manual_parser_
-          = std::make_unique<AIPFilterParser<proto::admin::kafka_connection>>(
-            *manual_registry_);
-        auto_parser_
-          = std::make_unique<AIPFilterParser<proto::admin::kafka_connection>>(
-            *auto_registry_);
-    }
-
-private:
-    std::unique_ptr<IProtobufFieldRegistry<proto::admin::kafka_connection>>
-      manual_registry_;
-    std::unique_ptr<IProtobufFieldRegistry<proto::admin::kafka_connection>>
-      auto_registry_;
-    std::unique_ptr<AIPFilterParser<proto::admin::kafka_connection>>
-      manual_parser_;
-    std::unique_ptr<AIPFilterParser<proto::admin::kafka_connection>>
-      auto_parser_;
-
-protected:
-    IProtobufFieldRegistry<proto::admin::kafka_connection>& manual_registry() {
-        return *manual_registry_;
-    }
-
-    IProtobufFieldRegistry<proto::admin::kafka_connection>& auto_registry() {
-        return *auto_registry_;
-    }
-
-    AIPFilterParser<proto::admin::kafka_connection>& manual_parser() {
-        return *manual_parser_;
-    }
-
-    AIPFilterParser<proto::admin::kafka_connection>& auto_parser() {
-        return *auto_parser_;
     }
 };
 
@@ -365,8 +130,6 @@ TEST_F(KafkaConnectionFilterTest, SimpleBooleanEquality) {
 // =============================================================================
 
 TEST_F(KafkaConnectionFilterTest, AllComparisonOperators) {
-    using proto::admin::kafka_connection;
-
     auto conn = create_test_connection(
       5, 0, "uid", false, "client", "admin", true, "192.168.1.100", 9092, 100);
 
@@ -433,7 +196,6 @@ TEST_F(KafkaConnectionFilterTest, DeepNestedFieldAccess) {
     conn.get_authentication_info().set_mechanism(
       proto::admin::authentication_mechanism::sasl_scram);
 
-    // FIXED: Use uppercase string representations for enum values
     EXPECT_TRUE(
       parser().parse(
         "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
@@ -522,7 +284,7 @@ TEST_F(KafkaConnectionFilterTest, AIP160DurationEdgeCases) {
 
     // Test very small durations
     conn.set_idle_duration(absl::Milliseconds(1)); // 0.001 seconds
-    EXPECT_TRUE(parser().parse("idle_duration = 0.001s")(conn));
+    EXPECT_TRUE(parser().parse("idle_duration = \"0.001s\"")(conn));
 }
 
 // =============================================================================
@@ -563,8 +325,7 @@ TEST_F(KafkaConnectionFilterTest, AIP160TimestampCompliance) {
 TEST_F(KafkaConnectionFilterTest, AIP160TimestampWithFractions) {
     auto conn = create_test_connection();
 
-    // Test fractional seconds (note: precision limited to seconds in our field
-    // accessors)
+    // Test fractional seconds
     absl::Time test_time;
     std::string error;
     ASSERT_TRUE(
@@ -763,20 +524,6 @@ TEST_F(KafkaConnectionFilterTest, IntegerFieldTypes) {
     EXPECT_TRUE(parser().parse("fetch_tput_total = 50")(conn));
 }
 
-TEST_F(KafkaConnectionFilterTest, LegacyFieldAlias) {
-    auto conn = create_test_connection(
-      1, 0, "uid", false, "client", "admin", true, "192.168.1.100", 9092, 100);
-
-    // field1 should be an alias for produce_batch_record_count_total
-    EXPECT_TRUE(parser().parse("field1 = 100")(conn));
-    EXPECT_TRUE(parser().parse("produce_batch_record_count_total = 100")(conn));
-
-    // Both should give same result
-    auto predicate1 = parser().parse("field1 >= 50");
-    auto predicate2 = parser().parse("produce_batch_record_count_total >= 50");
-    EXPECT_EQ(predicate1(conn), predicate2(conn));
-}
-
 // =============================================================================
 // CASE SENSITIVITY TESTS
 // =============================================================================
@@ -814,190 +561,9 @@ TEST_F(KafkaConnectionFilterTest, CaseInsensitiveBooleanLiterals) {
 }
 
 // =============================================================================
-// AUTO REGISTRY TESTS
-// =============================================================================
-
-TEST_F(KafkaConnectionAutoFilterTest, AutoRegistryBasicFunctionality) {
-    auto conn = create_test_connection(
-      1, 0, "uid", false, "client", "admin", true);
-
-    EXPECT_TRUE(auto_parser().parse("node_id = 1")(conn));
-    EXPECT_TRUE(auto_parser().parse("aborting = false")(conn));
-    EXPECT_TRUE(
-      auto_parser().parse("authentication_info.user_principal = \"admin\"")(
-        conn));
-    EXPECT_TRUE(auto_parser().parse("tls_info.enabled = true")(conn));
-}
-
-TEST_F(KafkaConnectionAutoFilterTest, AutoRegistryComplexFilters) {
-    auto conn = create_test_connection(
-      1, 0, "uid", false, "client", "admin", true, "192.168.1.100", 9092);
-
-    auto predicate = auto_parser().parse(
-      "node_id = 1 AND authentication_info.user_principal = \"admin\" AND "
-      "source.port = 9092");
-    EXPECT_TRUE(predicate(conn));
-}
-
-// =============================================================================
-// REGISTRY COMPATIBILITY TESTS
-// =============================================================================
-
-TEST_F(KafkaConnectionUnifiedFilterTest, BothRegistriesSupportSameFields) {
-    // Both registries should support common fields
-    EXPECT_TRUE(manual_registry().has_field("node_id"));
-    EXPECT_TRUE(auto_registry().has_field("node_id"));
-
-    EXPECT_TRUE(
-      manual_registry().has_field("authentication_info.user_principal"));
-    EXPECT_TRUE(
-      auto_registry().has_field("authentication_info.user_principal"));
-
-    EXPECT_TRUE(manual_registry().has_field("tls_info.enabled"));
-    EXPECT_TRUE(auto_registry().has_field("tls_info.enabled"));
-}
-
-TEST_F(KafkaConnectionUnifiedFilterTest, BothRegistriesProduceSameResults) {
-    auto conn = create_test_connection(
-      1, 0, "uid", false, "client", "admin", true);
-
-    // Same filter should work the same way on both registries
-    const std::string filter_expr = "node_id = 1 AND tls_info.enabled = true";
-
-    auto manual_predicate = manual_parser().parse(filter_expr);
-    auto auto_predicate = auto_parser().parse(filter_expr);
-
-    EXPECT_TRUE(manual_predicate(conn));
-    EXPECT_TRUE(auto_predicate(conn));
-
-    // Test with non-matching data
-    conn.set_node_id(2);
-    EXPECT_FALSE(manual_predicate(conn));
-    EXPECT_FALSE(auto_predicate(conn));
-}
-
-TEST_F(KafkaConnectionUnifiedFilterTest, ComplexFilterCompatibility) {
-    auto conn = create_test_connection(
-      1,
-      2,
-      "test-uid",
-      false,
-      "test-client",
-      "admin",
-      true,
-      "192.168.1.100",
-      9092,
-      100);
-
-    const std::string complex_filter
-      = "node_id = 1 AND shard_id = 2 AND client_id = \"test-client\" AND "
-        "authentication_info.user_principal = \"admin\" AND tls_info.enabled = "
-        "true AND "
-        "source.ip_address = \"192.168.1.100\" AND "
-        "produce_batch_record_count_total = 100";
-
-    auto manual_predicate = manual_parser().parse(complex_filter);
-    auto auto_predicate = auto_parser().parse(complex_filter);
-
-    EXPECT_TRUE(manual_predicate(conn));
-    EXPECT_TRUE(auto_predicate(conn));
-}
-
-// =============================================================================
-// EDGE CASES AND STRESS TESTS
-// =============================================================================
-
-TEST_F(KafkaConnectionFilterTest, LargeIntegerValues) {
-    auto conn = create_test_connection();
-    conn.set_produce_batch_record_count_total(
-      9223372036854775807LL); // max int64_t
-
-    auto predicate = parser().parse(
-      "produce_batch_record_count_total = 9223372036854775807");
-    EXPECT_TRUE(predicate(conn));
-}
-
-TEST_F(KafkaConnectionFilterTest, EmptyStringValues) {
-    auto conn = create_test_connection(1, 0, "", false, "");
-
-    EXPECT_TRUE(parser().parse("uid = \"\"")(conn));
-    EXPECT_TRUE(parser().parse("client_id = \"\"")(conn));
-}
-
-TEST_F(KafkaConnectionFilterTest, VeryLongStringValues) {
-    std::string long_string(1000, 'a');
-    auto conn = create_test_connection(1, 0, "uid", false, long_string);
-
-    auto predicate = parser().parse("client_id = \"" + long_string + "\"");
-    EXPECT_TRUE(predicate(conn));
-}
-
-TEST_F(KafkaConnectionFilterTest, ManyAndConditions) {
-    auto conn = create_test_connection(
-      1, 0, "uid", false, "client", "admin", true);
-
-    std::string filter = "node_id = 1";
-    for (int i = 0; i < 100; ++i) {
-        filter += " AND node_id = 1";
-    }
-
-    auto predicate = parser().parse(filter);
-    EXPECT_TRUE(predicate(conn));
-}
-
-TEST_F(KafkaConnectionFilterTest, FieldPathWithManySegments) {
-    auto conn = create_test_connection();
-
-    // Test nested field access
-    EXPECT_TRUE(
-      parser().parse("authentication_info.user_principal = \"admin\"")(conn));
-    EXPECT_TRUE(parser().parse("source.ip_address = \"192.168.1.100\"")(conn));
-}
-
-// =============================================================================
-// PERFORMANCE HINTS TESTS (for future optimization)
-// =============================================================================
-
-TEST_F(KafkaConnectionFilterTest, FilterReusability) {
-    auto predicate = parser().parse("node_id = 1 AND aborting = false");
-
-    // Test that the same predicate can be used multiple times
-    auto conn1 = create_test_connection(1, 0, "uid1", false);
-    auto conn2 = create_test_connection(1, 0, "uid2", false);
-    auto conn3 = create_test_connection(2, 0, "uid3", false);
-
-    EXPECT_TRUE(predicate(conn1));
-    EXPECT_TRUE(predicate(conn2));
-    EXPECT_FALSE(predicate(conn3));
-}
-
-// =============================================================================
-// REGRESSION TESTS
-// =============================================================================
-
-TEST_F(KafkaConnectionFilterTest, RegressionFieldNameValidation) {
-    // Ensure field names with underscores work correctly
-    auto conn = create_test_connection();
-
-    EXPECT_NO_THROW(parser().parse("node_id = 1"));
-    EXPECT_NO_THROW(parser().parse("shard_id = 0"));
-    EXPECT_NO_THROW(parser().parse("client_id = \"test\""));
-    EXPECT_NO_THROW(
-      parser().parse("authentication_info.user_principal = \"admin\""));
-}
-
-TEST_F(KafkaConnectionFilterTest, RegressionStringEscaping) {
-    // Test various escape sequences
-    auto conn1 = create_test_connection(1, 0, "uid", false, "client\\test");
-    auto conn2 = create_test_connection(1, 0, "uid", false, "client\"test");
-
-    EXPECT_TRUE(parser().parse("client_id = \"client\\\\test\"")(conn1));
-    EXPECT_TRUE(parser().parse("client_id = \"client\\\"test\"")(conn2));
-}
-
-// =============================================================================
 // ENUM SUPPORT TESTS
 // =============================================================================
+
 TEST_F(KafkaConnectionFilterTest, EnumFieldBasicSupport) {
     auto conn = create_test_connection();
     conn.get_authentication_info().set_state(
@@ -1016,9 +582,12 @@ TEST_F(KafkaConnectionFilterTest, EnumFieldBasicSupport) {
 
     // Test negative cases
     EXPECT_FALSE(
-      parser().parse("authentication_info.state = \"FAILURE\"")(conn));
+      parser().parse(
+        "authentication_info.state = \"AUTHENTICATION_STATE_FAILURE\"")(conn));
     EXPECT_FALSE(
-      parser().parse("authentication_info.mechanism = \"MTLS\"")(conn));
+      parser().parse(
+        "authentication_info.mechanism = \"AUTHENTICATION_MECHANISM_MTLS\"")(
+        conn));
 }
 
 TEST_F(KafkaConnectionFilterTest, EnumFieldAllValues) {
@@ -1121,6 +690,45 @@ TEST_F(KafkaConnectionFilterTest, EnumFieldCaseSensitivity) {
     EXPECT_FALSE(predicate_wrong_case3(conn));
 }
 
+TEST_F(KafkaConnectionFilterTest, EnumFieldInvalidFormatValues) {
+    // Invalid enum formats should throw during parsing
+    EXPECT_THROW(
+      parser().parse("authentication_info.state = \"\""),
+      std::invalid_argument);
+
+    // Values with invalid characters should throw during parsing
+    EXPECT_THROW(
+      parser().parse("authentication_info.state = \"invalid-value\""),
+      std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse("authentication_info.state = \"invalid value\""),
+      std::invalid_argument);
+
+    // Numeric values should be invalid (we expect string representation)
+    EXPECT_THROW(
+      parser().parse("authentication_info.state = 2"), std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse("authentication_info.mechanism = 2"),
+      std::invalid_argument);
+}
+
+TEST_F(KafkaConnectionFilterTest, EnumFieldInvalidEnumValues) {
+    auto conn = create_test_connection();
+    conn.get_authentication_info().set_state(
+      proto::admin::authentication_state::success);
+
+    // These have valid format but are not valid enum values
+    // They should parse successfully but fail at runtime (no match)
+    auto predicate_invalid1 = parser().parse(
+      "authentication_info.state = \"INVALID_STATE\"");
+    auto predicate_invalid2 = parser().parse(
+      "authentication_info.mechanism = \"INVALID_MECHANISM\"");
+
+    // But they should not match at runtime
+    EXPECT_FALSE(predicate_invalid1(conn));
+    EXPECT_FALSE(predicate_invalid2(conn));
+}
+
 TEST_F(KafkaConnectionFilterTest, EnumFieldComparisonOperators) {
     auto conn = create_test_connection();
     conn.get_authentication_info().set_state(
@@ -1131,14 +739,17 @@ TEST_F(KafkaConnectionFilterTest, EnumFieldComparisonOperators) {
       parser().parse(
         "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
     EXPECT_TRUE(
-      parser().parse("authentication_info.state != \"FAILURE\"")(conn));
+      parser().parse(
+        "authentication_info.state != \"AUTHENTICATION_STATE_FAILURE\"")(conn));
 
     // Other comparison operators should throw for enums
     EXPECT_THROW(
-      parser().parse("authentication_info.state > \"FAILURE\""),
+      parser().parse(
+        "authentication_info.state > \"AUTHENTICATION_STATE_FAILURE\""),
       std::invalid_argument);
     EXPECT_THROW(
-      parser().parse("authentication_info.state < \"UNSPECIFIED\""),
+      parser().parse(
+        "authentication_info.state < \"AUTHENTICATION_STATE_UNSPECIFIED\""),
       std::invalid_argument);
     EXPECT_THROW(
       parser().parse(
@@ -1167,7 +778,8 @@ TEST_F(KafkaConnectionFilterTest, EnumFieldLogicalOperations) {
     EXPECT_FALSE(
       parser().parse(
         "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\" AND "
-        "authentication_info.mechanism = \"MTLS\"")(conn));
+        "authentication_info.mechanism = \"AUTHENTICATION_MECHANISM_MTLS\"")(
+        conn));
 
     // Test with mixed field types
     EXPECT_TRUE(
@@ -1210,68 +822,7 @@ TEST_F(KafkaConnectionFilterTest, EnumFieldEdgeCases) {
 }
 
 // =============================================================================
-// AUTO REGISTRY ENUM TESTS - UPDATED TO UPPERCASE
-// =============================================================================
-
-TEST_F(KafkaConnectionAutoFilterTest, AutoRegistryEnumSupport) {
-    auto conn = create_test_connection();
-    conn.get_authentication_info().set_state(
-      proto::admin::authentication_state::success);
-    conn.get_authentication_info().set_mechanism(
-      proto::admin::authentication_mechanism::sasl_scram);
-
-    // Auto registry should also support enum fields
-    EXPECT_TRUE(
-      auto_parser().parse(
-        "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
-    EXPECT_TRUE(
-      auto_parser().parse(
-        "authentication_info.mechanism = "
-        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"")(conn));
-
-    // Invalid format values should still throw during parsing
-    EXPECT_THROW(
-      auto_parser().parse("authentication_info.state = \"\""),
-      std::invalid_argument);
-
-    // Valid format but invalid enum values should parse but not match
-    auto predicate_invalid = auto_parser().parse(
-      "authentication_info.state = \"INVALID_BUT_FORMATTED_CORRECTLY\"");
-    EXPECT_FALSE(predicate_invalid(conn));
-}
-
-// =============================================================================
-// REGISTRY COMPATIBILITY ENUM TESTS - UPDATED TO UPPERCASE
-// =============================================================================
-
-TEST_F(KafkaConnectionUnifiedFilterTest, EnumCompatibilityBetweenRegistries) {
-    auto conn = create_test_connection();
-    conn.get_authentication_info().set_state(
-      proto::admin::authentication_state::success);
-    conn.get_authentication_info().set_mechanism(
-      proto::admin::authentication_mechanism::sasl_scram);
-
-    const std::string enum_filter
-      = "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\" AND "
-        "authentication_info.mechanism = "
-        "\"AUTHENTICATION_MECHANISM_SASL_SCRAM\"";
-
-    auto manual_predicate = manual_parser().parse(enum_filter);
-    auto auto_predicate = auto_parser().parse(enum_filter);
-
-    EXPECT_TRUE(manual_predicate(conn));
-    EXPECT_TRUE(auto_predicate(conn));
-
-    // Test with different values
-    conn.get_authentication_info().set_state(
-      proto::admin::authentication_state::failure);
-
-    EXPECT_FALSE(manual_predicate(conn));
-    EXPECT_FALSE(auto_predicate(conn));
-}
-
-// =============================================================================
-// PERFORMANCE AND STRESS TESTS FOR ENUMS - UPDATED TO UPPERCASE
+// PERFORMANCE AND STRESS TESTS
 // =============================================================================
 
 TEST_F(KafkaConnectionFilterTest, EnumPerformanceWithManyConditions) {
@@ -1291,8 +842,59 @@ TEST_F(KafkaConnectionFilterTest, EnumPerformanceWithManyConditions) {
     EXPECT_TRUE(predicate(conn));
 }
 
+TEST_F(KafkaConnectionFilterTest, LargeIntegerValues) {
+    auto conn = create_test_connection();
+    conn.set_produce_batch_record_count_total(
+      9223372036854775807LL); // max int64_t
+
+    auto predicate = parser().parse(
+      "produce_batch_record_count_total = 9223372036854775807");
+    EXPECT_TRUE(predicate(conn));
+}
+
+TEST_F(KafkaConnectionFilterTest, EmptyStringValues) {
+    auto conn = create_test_connection(1, 0, "", false, "");
+
+    EXPECT_TRUE(parser().parse("uid = \"\"")(conn));
+    EXPECT_TRUE(parser().parse("client_id = \"\"")(conn));
+}
+
+TEST_F(KafkaConnectionFilterTest, VeryLongStringValues) {
+    std::string long_string(1000, 'a');
+    auto conn = create_test_connection(1, 0, "uid", false, long_string);
+
+    auto predicate = parser().parse("client_id = \"" + long_string + "\"");
+    EXPECT_TRUE(predicate(conn));
+}
+
+TEST_F(KafkaConnectionFilterTest, ManyAndConditions) {
+    auto conn = create_test_connection(
+      1, 0, "uid", false, "client", "admin", true);
+
+    std::string filter = "node_id = 1";
+    for (int i = 0; i < 100; ++i) {
+        filter += " AND node_id = 1";
+    }
+
+    auto predicate = parser().parse(filter);
+    EXPECT_TRUE(predicate(conn));
+}
+
+TEST_F(KafkaConnectionFilterTest, FilterReusability) {
+    auto predicate = parser().parse("node_id = 1 AND aborting = false");
+
+    // Test that the same predicate can be used multiple times
+    auto conn1 = create_test_connection(1, 0, "uid1", false);
+    auto conn2 = create_test_connection(1, 0, "uid2", false);
+    auto conn3 = create_test_connection(2, 0, "uid3", false);
+
+    EXPECT_TRUE(predicate(conn1));
+    EXPECT_TRUE(predicate(conn2));
+    EXPECT_FALSE(predicate(conn3));
+}
+
 // =============================================================================
-// RUNTIME ENUM VALIDATION BEHAVIOR TESTS - UPDATED TO UPPERCASE
+// RUNTIME ENUM VALIDATION BEHAVIOR TESTS
 // =============================================================================
 
 TEST_F(KafkaConnectionFilterTest, EnumRuntimeValidationBehavior) {
@@ -1317,7 +919,8 @@ TEST_F(KafkaConnectionFilterTest, EnumRuntimeValidationBehavior) {
       parser().parse(
         "authentication_info.state = \"AUTHENTICATION_STATE_SUCCESS\"")(conn));
     EXPECT_TRUE(
-      parser().parse("authentication_info.state != \"FAILURE\"")(conn));
+      parser().parse(
+        "authentication_info.state != \"AUTHENTICATION_STATE_FAILURE\"")(conn));
 }
 
 } // namespace redpanda::admin
