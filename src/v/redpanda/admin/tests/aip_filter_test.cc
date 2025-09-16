@@ -21,884 +21,439 @@
 
 namespace redpanda::admin {
 
-// Helper function to create a test object with various field values
-protobuf_test_messages::editions::test_all_types_edition2023 create_test_object(
-  int32_t int32_val = 1,
-  uint32_t uint32_val = 0,
-  const std::string& string_val = "test-string",
-  bool bool_val = false,
-  const std::string& client_id = "test-client",
-  const std::string& user_name = "admin",
-  bool is_enabled = true,
-  const std::string& ip_address = "192.168.1.100",
-  uint32_t port = 9092,
-  uint64_t count_total = 100,
-  uint64_t count_recent = 50) {
-    protobuf_test_messages::editions::test_all_types_edition2023 obj;
+// Simplified helper function with essential parameters
+aip_filter_test::test_message create_test_message(
+  int32_t int_val = 42,
+  const std::string& str_val = "test",
+  bool bool_val = true,
+  const std::string& nested_name = "nested",
+  int32_t nested_val = 100) {
+    aip_filter_test::test_message msg;
+    msg.set_int_field(int_val);
+    msg.set_string_field(ss::sstring(str_val));
+    msg.set_bool_field(bool_val);
+    msg.set_uint_field(1000);
 
-    obj.set_optional_int32(int32_val);
-    obj.set_optional_uint32(uint32_val);
-    obj.set_optional_string(ss::sstring(string_val));
-    obj.set_optional_bool(bool_val);
-    obj.set_client_id(ss::sstring(client_id));
-    obj.set_user_name(ss::sstring(user_name));
-    obj.set_is_enabled(is_enabled);
-    obj.set_is_active(true);
-    obj.set_count_total(count_total);
-    obj.set_count_recent(count_recent);
+    msg.get_nested().set_name(ss::sstring(nested_name));
+    msg.get_nested().set_value(nested_val);
 
-    // Set nested message fields
-    obj.get_optional_nested_message().set_a(42);
-    obj.get_optional_nested_message().set_nested_string(
-      ss::sstring("nested-value"));
+    // Use the actual enum values from your codegen
+    msg.set_status(aip_filter_test::test_message_status::status_active);
+    msg.set_timestamp_field(absl::Now() - absl::Minutes(5));
+    msg.set_duration_field(absl::Seconds(30));
 
-    obj.get_source_info().set_ip_address(ss::sstring(ip_address));
-    obj.get_source_info().set_port(port);
-
-    // Set enum fields
-
-    obj.set_optional_nested_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_nested_enum::
-        nested_enum_foo);
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
-
-    // Set time-based fields
-    auto now = absl::Now();
-    obj.set_creation_time(now - absl::Minutes(30));
-    obj.set_update_time(absl::Time{}); // Not set
-    obj.set_idle_duration(absl::Seconds(120));
-    obj.set_total_duration(absl::Minutes(10));
-
-    return obj;
+    return msg;
 }
 
-// Single test fixture using auto registry
 class AIPFilterTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        auto registry = make_field_registry<
-          protobuf_test_messages::editions::test_all_types_edition2023>();
-        parser_ = std::make_unique<AIPFilterParser<
-          protobuf_test_messages::editions::test_all_types_edition2023>>(
-          std::move(registry));
+        auto registry = make_field_registry<aip_filter_test::test_message>();
+        parser_
+          = std::make_unique<AIPFilterParser<aip_filter_test::test_message>>(
+            std::move(registry));
+    }
+
+    AIPFilterParser<aip_filter_test::test_message>& parser() {
+        return *parser_;
     }
 
 private:
-    std::unique_ptr<AIPFilterParser<
-      protobuf_test_messages::editions::test_all_types_edition2023>>
-      parser_;
-
-protected:
-    // Provide access to the parser for tests
-    AIPFilterParser<
-      protobuf_test_messages::editions::test_all_types_edition2023>&
-    parser() {
-        return *parser_;
-    }
+    std::unique_ptr<AIPFilterParser<aip_filter_test::test_message>> parser_;
 };
 
 // =============================================================================
-// BASIC FUNCTIONALITY TESTS
+// BASIC FIELD TYPE OPERATIONS
 // =============================================================================
 
-TEST_F(AIPFilterTest, EmptyFilterMatchesAll) {
-    auto predicate = parser().parse("");
-    auto obj = create_test_object();
-    EXPECT_TRUE(predicate(obj));
+TEST_F(AIPFilterTest, IntegerFieldOperations) {
+    auto msg = create_test_message(5);
+
+    // All comparison operators
+    EXPECT_TRUE(parser().parse("int_field = 5")(msg));
+    EXPECT_TRUE(parser().parse("int_field != 6")(msg));
+    EXPECT_TRUE(parser().parse("int_field < 6")(msg));
+    EXPECT_TRUE(parser().parse("int_field <= 5")(msg));
+    EXPECT_TRUE(parser().parse("int_field > 4")(msg));
+    EXPECT_TRUE(parser().parse("int_field >= 5")(msg));
+
+    // Boundary conditions
+    EXPECT_FALSE(parser().parse("int_field < 5")(msg));
+    EXPECT_FALSE(parser().parse("int_field > 5")(msg));
+    EXPECT_TRUE(parser().parse("int_field <= 5")(msg));
+    EXPECT_TRUE(parser().parse("int_field >= 5")(msg));
+
+    // Large values
+    msg.set_uint_field(9223372036854775807ULL);
+    EXPECT_TRUE(parser().parse("uint_field = 9223372036854775807")(msg));
 }
 
-TEST_F(AIPFilterTest, SimpleIntegerEquality) {
-    auto predicate = parser().parse("optional_int32 = 1");
+TEST_F(AIPFilterTest, StringFieldOperations) {
+    auto msg = create_test_message(1, "client-b");
 
-    auto obj1 = create_test_object(1);
-    auto obj2 = create_test_object(2);
+    // All comparison operators
+    EXPECT_TRUE(parser().parse("string_field = \"client-b\"")(msg));
+    EXPECT_TRUE(parser().parse("string_field != \"client-a\"")(msg));
+    EXPECT_TRUE(parser().parse("string_field > \"client-a\"")(msg));
+    EXPECT_TRUE(parser().parse("string_field < \"client-c\"")(msg));
+    EXPECT_TRUE(parser().parse("string_field >= \"client-b\"")(msg));
+    EXPECT_TRUE(parser().parse("string_field <= \"client-b\"")(msg));
 
-    EXPECT_TRUE(predicate(obj1));
-    EXPECT_FALSE(predicate(obj2));
+    // Special characters and escaping
+    msg.set_string_field(ss::sstring("client\"with\"quotes"));
+    EXPECT_TRUE(
+      parser().parse("string_field = \"client\\\"with\\\"quotes\"")(msg));
+
+    msg.set_string_field(ss::sstring("client with spaces"));
+    EXPECT_TRUE(parser().parse("string_field = \"client with spaces\"")(msg));
+
+    msg.set_string_field(ss::sstring("client@domain.com"));
+    EXPECT_TRUE(parser().parse("string_field = \"client@domain.com\"")(msg));
+
+    // Empty strings
+    msg.set_string_field(ss::sstring(""));
+    EXPECT_TRUE(parser().parse("string_field = \"\"")(msg));
+
+    // Very long strings
+    std::string long_string(1000, 'a');
+    msg.set_string_field(ss::sstring(long_string));
+    EXPECT_TRUE(parser().parse("string_field = \"" + long_string + "\"")(msg));
 }
 
-TEST_F(AIPFilterTest, SimpleStringEquality) {
-    auto predicate = parser().parse("client_id = \"test-client\"");
+TEST_F(AIPFilterTest, BooleanFieldOperations) {
+    auto msg_true = create_test_message(1, "test", true);
+    auto msg_false = create_test_message(1, "test", false);
 
-    auto obj1 = create_test_object(1, 0, "string", false, "test-client");
-    auto obj2 = create_test_object(1, 0, "string", false, "other-client");
+    // Only equality and inequality should work
+    EXPECT_TRUE(parser().parse("bool_field = true")(msg_true));
+    EXPECT_TRUE(parser().parse("bool_field = false")(msg_false));
+    EXPECT_TRUE(parser().parse("bool_field != false")(msg_true));
+    EXPECT_TRUE(parser().parse("bool_field != true")(msg_false));
 
-    EXPECT_TRUE(predicate(obj1));
-    EXPECT_FALSE(predicate(obj2));
-}
-
-TEST_F(AIPFilterTest, SimpleBooleanEquality) {
-    auto predicate = parser().parse("optional_bool = true");
-
-    auto obj1 = create_test_object(1, 0, "string", true);
-    auto obj2 = create_test_object(1, 0, "string", false);
-
-    EXPECT_TRUE(predicate(obj1));
-    EXPECT_FALSE(predicate(obj2));
-}
-
-// =============================================================================
-// COMPARISON OPERATORS TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, AllComparisonOperators) {
-    auto obj = create_test_object(
-      5,
-      0,
-      "string",
-      false,
-      "client",
-      "admin",
-      true,
-      "192.168.1.100",
-      9092,
-      100);
-
-    // Test all operators with integers
-    EXPECT_TRUE(parser().parse("optional_int32 = 5")(obj));
-    EXPECT_TRUE(parser().parse("optional_int32 != 6")(obj));
-    EXPECT_TRUE(parser().parse("optional_int32 < 6")(obj));
-    EXPECT_TRUE(parser().parse("optional_int32 <= 5")(obj));
-    EXPECT_TRUE(parser().parse("optional_int32 > 4")(obj));
-    EXPECT_TRUE(parser().parse("optional_int32 >= 5")(obj));
-
-    // Test boundary conditions
-    EXPECT_FALSE(parser().parse("optional_int32 < 5")(obj));
-    EXPECT_FALSE(parser().parse("optional_int32 > 5")(obj));
-    EXPECT_TRUE(parser().parse("optional_int32 <= 5")(obj));
-    EXPECT_TRUE(parser().parse("optional_int32 >= 5")(obj));
-}
-
-TEST_F(AIPFilterTest, StringComparisons) {
-    auto obj = create_test_object(1, 0, "string", false, "client-b");
-
-    EXPECT_TRUE(parser().parse("client_id = \"client-b\"")(obj));
-    EXPECT_TRUE(parser().parse("client_id != \"client-a\"")(obj));
-    EXPECT_TRUE(parser().parse("client_id > \"client-a\"")(obj));
-    EXPECT_TRUE(parser().parse("client_id < \"client-c\"")(obj));
-    EXPECT_TRUE(parser().parse("client_id >= \"client-b\"")(obj));
-    EXPECT_TRUE(parser().parse("client_id <= \"client-b\"")(obj));
-}
-
-TEST_F(AIPFilterTest, BooleanComparisons) {
-    auto obj_true = create_test_object(1, 0, "string", true);
-    auto obj_false = create_test_object(1, 0, "string", false);
-
-    // Only = and != should work for booleans
-    EXPECT_TRUE(parser().parse("optional_bool = true")(obj_true));
-    EXPECT_TRUE(parser().parse("optional_bool = false")(obj_false));
-    EXPECT_TRUE(parser().parse("optional_bool != false")(obj_true));
-    EXPECT_TRUE(parser().parse("optional_bool != true")(obj_false));
+    // Case insensitive boolean literals
+    EXPECT_TRUE(parser().parse("bool_field = TRUE")(msg_true));
+    EXPECT_TRUE(parser().parse("bool_field = True")(msg_true));
+    EXPECT_TRUE(parser().parse("bool_field = FALSE")(msg_false));
+    EXPECT_TRUE(parser().parse("bool_field = False")(msg_false));
 
     // Other operators should throw
-    EXPECT_THROW(parser().parse("optional_bool > true"), std::invalid_argument);
-    EXPECT_THROW(
-      parser().parse("optional_bool < false"), std::invalid_argument);
+    EXPECT_THROW(parser().parse("bool_field > true"), std::invalid_argument);
+    EXPECT_THROW(parser().parse("bool_field < false"), std::invalid_argument);
+    EXPECT_THROW(parser().parse("bool_field >= true"), std::invalid_argument);
+    EXPECT_THROW(parser().parse("bool_field <= false"), std::invalid_argument);
 }
 
 // =============================================================================
-// NESTED FIELD TESTS
+// NESTED FIELDS AND LOGICAL OPERATIONS
 // =============================================================================
 
 TEST_F(AIPFilterTest, NestedFieldAccess) {
-    auto obj = create_test_object(
-      1, 0, "string", false, "client", "admin", true, "192.168.1.100", 9092);
+    auto msg = create_test_message(1, "test", true, "admin", 200);
 
-    EXPECT_TRUE(parser().parse("user_name = \"admin\"")(obj));
-    EXPECT_TRUE(parser().parse("is_enabled = true")(obj));
+    // Basic nested access
+    EXPECT_TRUE(parser().parse("nested.name = \"admin\"")(msg));
+    EXPECT_TRUE(parser().parse("nested.value = 200")(msg));
+
+    // Mixed field types in logical operations
     EXPECT_TRUE(
-      parser().parse("source_info.ip_address = \"192.168.1.100\"")(obj));
-    EXPECT_TRUE(parser().parse("source_info.port = 9092")(obj));
-}
-
-TEST_F(AIPFilterTest, DeepNestedFieldAccess) {
-    auto obj = create_test_object();
-    obj.get_optional_nested_message().set_a(123);
-    obj.get_optional_nested_message().set_nested_string(
-      ss::sstring("deep-value"));
-
-    EXPECT_TRUE(parser().parse("optional_nested_message.a = 123")(obj));
+      parser().parse("int_field = 1 AND nested.name = \"admin\"")(msg));
     EXPECT_TRUE(
-      parser().parse("optional_nested_message.nested_string = \"deep-value\"")(
-        obj));
+      parser().parse("nested.value = 200 AND bool_field = true")(msg));
+    EXPECT_FALSE(
+      parser().parse("nested.value = 200 AND bool_field = false")(msg));
+}
+
+TEST_F(AIPFilterTest, LogicalOperators) {
+    auto msg = create_test_message(1, "test", false);
+
+    // Simple AND operations
+    EXPECT_TRUE(parser().parse("int_field = 1 AND bool_field = false")(msg));
+    EXPECT_FALSE(parser().parse("int_field = 1 AND bool_field = true")(msg));
+    EXPECT_FALSE(parser().parse("int_field = 2 AND bool_field = false")(msg));
+
+    // Multiple AND operations
+    EXPECT_TRUE(
+      parser().parse(
+        "int_field = 1 AND bool_field = false AND string_field = \"test\"")(
+        msg));
+    EXPECT_FALSE(
+      parser().parse(
+        "int_field = 1 AND bool_field = false AND string_field = \"other\"")(
+        msg));
+
+    // Case insensitive logical operators
+    EXPECT_TRUE(parser().parse("int_field = 1 AND bool_field = false")(msg));
+    EXPECT_TRUE(parser().parse("int_field = 1 and bool_field = false")(msg));
+    EXPECT_TRUE(parser().parse("int_field = 1 And bool_field = false")(msg));
+    EXPECT_TRUE(parser().parse("int_field = 1 aNd bool_field = false")(msg));
+
+    // Many conditions (stress test)
+    std::string filter = "int_field = 1";
+    for (int i = 0; i < 50; ++i) {
+        filter += " AND int_field = 1";
+    }
+    EXPECT_TRUE(parser().parse(filter)(msg));
 }
 
 // =============================================================================
-// LOGICAL OPERATORS TESTS
+// ENUM SUPPORT
 // =============================================================================
 
-TEST_F(AIPFilterTest, SimpleAndOperation) {
-    auto predicate = parser().parse(
-      "optional_int32 = 1 AND optional_bool = false");
+TEST_F(AIPFilterTest, EnumFieldOperations) {
+    auto msg = create_test_message();
 
-    auto obj1 = create_test_object(1, 0, "string", false);
-    auto obj2 = create_test_object(1, 0, "string", true);
-    auto obj3 = create_test_object(2, 0, "string", false);
+    // Basic enum operations
+    msg.set_status(aip_filter_test::test_message_status::status_active);
+    EXPECT_TRUE(parser().parse("status = \"STATUS_ACTIVE\"")(msg));
+    EXPECT_FALSE(parser().parse("status = \"STATUS_INACTIVE\"")(msg));
+    EXPECT_TRUE(parser().parse("status != \"STATUS_INACTIVE\"")(msg));
 
-    EXPECT_TRUE(predicate(obj1));
-    EXPECT_FALSE(predicate(obj2));
-    EXPECT_FALSE(predicate(obj3));
-}
+    // All enum values
+    msg.set_status(aip_filter_test::test_message_status::status_unspecified);
+    EXPECT_TRUE(parser().parse("status = \"STATUS_UNSPECIFIED\"")(msg));
 
-TEST_F(AIPFilterTest, MultipleAndOperations) {
-    auto predicate = parser().parse(
-      "optional_int32 = 1 AND optional_bool = false AND is_enabled = true");
+    msg.set_status(aip_filter_test::test_message_status::status_inactive);
+    EXPECT_TRUE(parser().parse("status = \"STATUS_INACTIVE\"")(msg));
 
-    auto obj1 = create_test_object(
-      1, 0, "string", false, "client", "admin", true);
-    auto obj2 = create_test_object(
-      1, 0, "string", false, "client", "admin", false);
+    // Case sensitivity (should fail at runtime)
+    msg.set_status(aip_filter_test::test_message_status::status_active);
+    auto wrong_case = parser().parse("status = \"status_active\"");
+    EXPECT_FALSE(wrong_case(msg));
 
-    EXPECT_TRUE(predicate(obj1));
-    EXPECT_FALSE(predicate(obj2));
-}
+    // Only equality operators should work
+    EXPECT_THROW(
+      parser().parse("status > \"STATUS_ACTIVE\""), std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse("status < \"STATUS_INACTIVE\""), std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse("status >= \"STATUS_ACTIVE\""), std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse("status <= \"STATUS_ACTIVE\""), std::invalid_argument);
 
-TEST_F(AIPFilterTest, ComplexAndWithNestedFields) {
-    auto predicate = parser().parse(
-      "optional_int32 = 1 AND user_name = \"admin\" AND source_info.port = "
-      "9092");
+    // Enum in logical operations
+    EXPECT_TRUE(
+      parser().parse("status = \"STATUS_ACTIVE\" AND int_field = 42")(msg));
+    EXPECT_FALSE(
+      parser().parse("status = \"STATUS_INACTIVE\" AND int_field = 42")(msg));
 
-    auto obj = create_test_object(
-      1, 0, "string", false, "client", "admin", true, "192.168.1.100", 9092);
-    EXPECT_TRUE(predicate(obj));
-
-    // Change one field to make it fail
-    obj.get_source_info().set_port(9093);
-    EXPECT_FALSE(predicate(obj));
-}
-
-// =============================================================================
-// AIP-160 DURATION COMPLIANCE TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, AIP160DurationCompliance) {
-    auto obj = create_test_object();
-
-    // Test various duration formats that absl::ParseDuration supports
-    obj.set_idle_duration(absl::Seconds(20));
-    EXPECT_TRUE(parser().parse("idle_duration = 20s")(obj));
-
-    obj.set_idle_duration(absl::Milliseconds(1200)); // 1.2 seconds
-    EXPECT_TRUE(parser().parse("idle_duration = 1.2s")(obj));
-
-    // Test that minutes, hours etc. work (beyond AIP-160 spec but supported by
-    // absl)
-    obj.set_idle_duration(absl::Minutes(5)); // 300 seconds
-    EXPECT_TRUE(parser().parse("idle_duration = 5m")(obj));
-
-    obj.set_idle_duration(absl::Hours(1)); // 3600 seconds
-    EXPECT_TRUE(parser().parse("idle_duration = 1h")(obj));
-}
-
-TEST_F(AIPFilterTest, AIP160DurationEdgeCases) {
-    auto obj = create_test_object();
-
-    // Test fractional seconds
-    obj.set_idle_duration(absl::Milliseconds(500)); // 0.5 seconds
-    EXPECT_TRUE(parser().parse("idle_duration = 0.5s")(obj));
-
-    // Test zero duration
-    obj.set_idle_duration(absl::ZeroDuration());
-    EXPECT_TRUE(parser().parse("idle_duration = 0s")(obj));
-
-    // Test very small durations
-    obj.set_idle_duration(absl::Milliseconds(1)); // 0.001 seconds
-    EXPECT_TRUE(parser().parse("idle_duration = \"0.001s\"")(obj));
+    // Invalid enum values (should not match)
+    auto invalid_enum = parser().parse("status = \"INVALID_STATUS\"");
+    EXPECT_FALSE(invalid_enum(msg));
 }
 
 // =============================================================================
-// AIP-160 TIMESTAMP COMPLIANCE TESTS
+// AIP-160 TIME FIELD COMPLIANCE
 // =============================================================================
 
-TEST_F(AIPFilterTest, AIP160TimestampCompliance) {
-    auto obj = create_test_object();
+TEST_F(AIPFilterTest, DurationFieldCompliance) {
+    auto msg = create_test_message();
 
-    // Test basic RFC-3339 formats
+    // Basic duration formats
+    msg.set_duration_field(absl::Seconds(20));
+    EXPECT_TRUE(parser().parse("duration_field = 20s")(msg));
+
+    msg.set_duration_field(absl::Milliseconds(1200)); // 1.2 seconds
+    EXPECT_TRUE(parser().parse("duration_field = 1.2s")(msg));
+
+    // Extended units (beyond AIP-160 but supported by absl)
+    msg.set_duration_field(absl::Minutes(5));
+    EXPECT_TRUE(parser().parse("duration_field = 5m")(msg));
+
+    msg.set_duration_field(absl::Hours(1));
+    EXPECT_TRUE(parser().parse("duration_field = 1h")(msg));
+
+    // Edge cases
+    msg.set_duration_field(absl::Milliseconds(500)); // 0.5 seconds
+    EXPECT_TRUE(parser().parse("duration_field = 0.5s")(msg));
+
+    msg.set_duration_field(absl::ZeroDuration());
+    EXPECT_TRUE(parser().parse("duration_field = 0s")(msg));
+
+    msg.set_duration_field(absl::Milliseconds(1)); // 0.001 seconds
+    EXPECT_TRUE(parser().parse("duration_field = \"0.001s\"")(msg));
+}
+
+TEST_F(AIPFilterTest, TimestampFieldCompliance) {
+    auto msg = create_test_message();
     absl::Time test_time;
     std::string error;
 
-    // UTC timezone
+    // RFC-3339 formats
     ASSERT_TRUE(
       absl::ParseTime(
         absl::RFC3339_full, "2012-04-21T11:30:00Z", &test_time, &error));
-    obj.set_creation_time(absl::Time{test_time});
+    msg.set_timestamp_field(std::move(test_time));
     EXPECT_TRUE(
-      parser().parse("creation_time = \"2012-04-21T11:30:00Z\"")(obj));
+      parser().parse("timestamp_field = \"2012-04-21T11:30:00Z\"")(msg));
 
-    // Timezone with offset
+    // Timezone with negative offset
     ASSERT_TRUE(
       absl::ParseTime(
         absl::RFC3339_full, "2012-04-21T11:30:00-04:00", &test_time, &error));
-    obj.set_creation_time(absl::Time{test_time});
+    msg.set_timestamp_field(std::move(test_time));
     EXPECT_TRUE(
-      parser().parse("creation_time = \"2012-04-21T11:30:00-04:00\"")(obj));
+      parser().parse("timestamp_field = \"2012-04-21T11:30:00-04:00\"")(msg));
 
-    // Positive timezone offset
+    // Timezone with positive offset
     ASSERT_TRUE(
       absl::ParseTime(
         absl::RFC3339_full, "2012-04-21T11:30:00+05:30", &test_time, &error));
-    obj.set_creation_time(absl::Time{test_time});
+    msg.set_timestamp_field(std::move(test_time));
     EXPECT_TRUE(
-      parser().parse("creation_time = \"2012-04-21T11:30:00+05:30\"")(obj));
-}
+      parser().parse("timestamp_field = \"2012-04-21T11:30:00+05:30\"")(msg));
 
-TEST_F(AIPFilterTest, AIP160TimestampWithFractions) {
-    auto obj = create_test_object();
-
-    // Test fractional seconds
-    absl::Time test_time;
-    std::string error;
-    ASSERT_TRUE(
-      absl::ParseTime(
-        absl::RFC3339_full, "2012-04-21T11:30:00.123Z", &test_time, &error));
-
-    // Convert to second precision for comparison
-    auto unix_seconds = absl::ToUnixSeconds(test_time);
-    auto truncated_time = absl::FromUnixSeconds(unix_seconds);
-    obj.set_creation_time(absl::Time{truncated_time});
-
-    // Should match the truncated version
-    EXPECT_TRUE(
-      parser().parse("creation_time = \"2012-04-21T11:30:00Z\"")(obj));
-}
-
-TEST_F(AIPFilterTest, TimezoneEquivalence) {
-    auto obj = create_test_object();
-
-    // These times should be equivalent
+    // Timezone equivalence
     absl::Time utc_time, offset_time;
-    std::string error;
-
     ASSERT_TRUE(
       absl::ParseTime(
         absl::RFC3339_full, "2012-04-21T15:30:00Z", &utc_time, &error));
     ASSERT_TRUE(
       absl::ParseTime(
         absl::RFC3339_full, "2012-04-21T11:30:00-04:00", &offset_time, &error));
-
-    // They should represent the same instant
     EXPECT_EQ(absl::ToUnixSeconds(utc_time), absl::ToUnixSeconds(offset_time));
 
-    obj.set_creation_time(absl::Time{utc_time});
+    msg.set_timestamp_field(std::move(utc_time));
     EXPECT_TRUE(
-      parser().parse("creation_time = \"2012-04-21T15:30:00Z\"")(obj));
+      parser().parse("timestamp_field = \"2012-04-21T15:30:00Z\"")(msg));
     EXPECT_TRUE(
-      parser().parse("creation_time = \"2012-04-21T11:30:00-04:00\"")(obj));
+      parser().parse("timestamp_field = \"2012-04-21T11:30:00-04:00\"")(msg));
 }
 
 // =============================================================================
-// ERROR HANDLING WITH ABSL
+// ERROR HANDLING AND VALIDATION
 // =============================================================================
 
-TEST_F(AIPFilterTest, AbslDurationErrorHandling) {
-    // Test invalid duration formats that absl will reject
-    EXPECT_THROW(
-      parser().parse("idle_duration = invalid"), std::invalid_argument);
-    EXPECT_THROW(
-      parser().parse("idle_duration = 120"),
-      std::invalid_argument); // Missing unit
-    EXPECT_THROW(
-      parser().parse("idle_duration = s"),
-      std::invalid_argument); // No number
-}
+TEST_F(AIPFilterTest, ParsingAndValidationErrors) {
+    // Empty filter should always match
+    EXPECT_TRUE(parser().parse("")(create_test_message()));
 
-TEST_F(AIPFilterTest, AbslTimestampErrorHandling) {
-    // Test invalid timestamp formats that absl will reject
-    EXPECT_THROW(
-      parser().parse("creation_time = \"invalid-timestamp\""),
-      std::invalid_argument);
-    EXPECT_THROW(
-      parser().parse("creation_time = \"2012-04-21 11:30:00\""),
-      std::invalid_argument); // Missing T
-    EXPECT_THROW(
-      parser().parse("creation_time = \"2012-04-21T25:30:00Z\""),
-      std::invalid_argument); // Invalid hour
-    EXPECT_THROW(
-      parser().parse("creation_time = \"2012-13-21T11:30:00Z\""),
-      std::invalid_argument); // Invalid month
-}
-
-// =============================================================================
-// VALIDATION AND ERROR HANDLING TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, ValidationMethod) {
-    EXPECT_TRUE(parser().validate("optional_int32 = 1"));
-    EXPECT_TRUE(
-      parser().validate("optional_int32 = 1 AND optional_bool = false"));
+    // Validation method
+    EXPECT_TRUE(parser().validate("int_field = 1"));
+    EXPECT_TRUE(parser().validate("int_field = 1 AND bool_field = false"));
     EXPECT_TRUE(parser().validate(""));
-
     EXPECT_FALSE(parser().validate("invalid_field = 1"));
-    EXPECT_FALSE(parser().validate("optional_int32 ="));
+    EXPECT_FALSE(parser().validate("int_field ="));
     EXPECT_FALSE(parser().validate("= 1"));
-    EXPECT_FALSE(parser().validate("optional_int32 1"));
-}
+    EXPECT_FALSE(parser().validate("int_field 1"));
 
-TEST_F(AIPFilterTest, UnknownFieldError) {
+    // Unknown field errors
     EXPECT_THROW(parser().parse("unknown_field = 1"), std::invalid_argument);
     EXPECT_THROW(
-      parser().parse("optional_int32 = 1 AND unknown_field = 2"),
+      parser().parse("int_field = 1 AND unknown_field = 2"),
       std::invalid_argument);
-}
 
-TEST_F(AIPFilterTest, MalformedExpressionErrors) {
-    EXPECT_THROW(parser().parse("optional_int32 ="), std::invalid_argument);
+    // Malformed expressions
+    EXPECT_THROW(parser().parse("int_field ="), std::invalid_argument);
     EXPECT_THROW(parser().parse("= 1"), std::invalid_argument);
-    EXPECT_THROW(parser().parse("optional_int32 1"), std::invalid_argument);
-    EXPECT_THROW(
-      parser().parse("optional_int32 = 1 AND"), std::invalid_argument);
-    EXPECT_THROW(parser().parse("optional_int32 = 1 ="), std::invalid_argument);
-}
+    EXPECT_THROW(parser().parse("int_field 1"), std::invalid_argument);
+    EXPECT_THROW(parser().parse("int_field = 1 AND"), std::invalid_argument);
+    EXPECT_THROW(parser().parse("int_field = 1 ="), std::invalid_argument);
 
-TEST_F(AIPFilterTest, InvalidLiteralValues) {
+    // Type mismatches
     EXPECT_THROW(
-      parser().parse("optional_int32 = \"not_a_number\""),
-      std::invalid_argument);
+      parser().parse("int_field = \"not_a_number\""), std::invalid_argument);
     EXPECT_THROW(
-      parser().parse("optional_bool = \"not_a_boolean\""),
-      std::invalid_argument);
+      parser().parse("bool_field = \"not_a_boolean\""), std::invalid_argument);
     EXPECT_THROW(
-      parser().parse("optional_int32 = 9223372036854775808"),
+      parser().parse("int_field = 9223372036854775808"),
       std::invalid_argument); // Overflow
-}
 
-TEST_F(AIPFilterTest, UnterminatedStringLiteral) {
+    // String literal errors
     EXPECT_THROW(
-      parser().parse("client_id = \"unterminated"), std::invalid_argument);
-    EXPECT_THROW(parser().parse("client_id = \""), std::invalid_argument);
-}
+      parser().parse("string_field = \"unterminated"), std::invalid_argument);
+    EXPECT_THROW(parser().parse("string_field = \""), std::invalid_argument);
 
-TEST_F(AIPFilterTest, TrailingCharacters) {
+    // Trailing characters
+    EXPECT_THROW(parser().parse("int_field = 1 extra"), std::invalid_argument);
     EXPECT_THROW(
-      parser().parse("optional_int32 = 1 extra"), std::invalid_argument);
-    EXPECT_THROW(
-      parser().parse("optional_int32 = 1 AND optional_bool = false extra"),
+      parser().parse("int_field = 1 AND bool_field = false extra"),
       std::invalid_argument);
-}
 
-// =============================================================================
-// STRING LITERAL HANDLING TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, StringLiteralEscaping) {
-    auto obj = create_test_object(
-      1, 0, "string", false, "client\"with\"quotes");
-
-    auto predicate = parser().parse("client_id = \"client\\\"with\\\"quotes\"");
-    EXPECT_TRUE(predicate(obj));
-}
-
-TEST_F(AIPFilterTest, StringLiteralWithSpaces) {
-    auto obj = create_test_object(1, 0, "string", false, "client with spaces");
-
-    auto predicate = parser().parse("client_id = \"client with spaces\"");
-    EXPECT_TRUE(predicate(obj));
-}
-
-TEST_F(AIPFilterTest, StringLiteralWithSpecialChars) {
-    auto obj = create_test_object(1, 0, "string", false, "client@domain.com");
-
-    auto predicate = parser().parse("client_id = \"client@domain.com\"");
-    EXPECT_TRUE(predicate(obj));
-}
-
-// =============================================================================
-// WHITESPACE HANDLING TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, WhitespaceHandling) {
-    auto obj = create_test_object(1, 0, "string", false);
-
-    // All these should work the same
-    EXPECT_TRUE(parser().parse("optional_int32=1")(obj));
-    EXPECT_TRUE(parser().parse("optional_int32 = 1")(obj));
-    EXPECT_TRUE(parser().parse("  optional_int32  =  1  ")(obj));
-    EXPECT_TRUE(parser().parse("\toptional_int32\t=\t1\t")(obj));
-    EXPECT_TRUE(parser().parse("\noptional_int32\n=\n1\n")(obj));
-
-    // Multiple conditions with various whitespace
-    EXPECT_TRUE(
-      parser().parse("optional_int32=1 AND optional_bool=false")(obj));
-    EXPECT_TRUE(
-      parser().parse("  optional_int32  =  1  AND  optional_bool  =  false  ")(
-        obj));
+    // Invalid time formats
     EXPECT_THROW(
-      parser().parse("optional_int32=1AND optional_bool=false"),
-      std::invalid_argument);
-}
-
-// =============================================================================
-// FIELD TYPE CONVERSION TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, IntegerFieldTypes) {
-    auto obj = create_test_object(
-      1,
-      2,
-      "string",
-      false,
-      "client",
-      "admin",
-      true,
-      "192.168.1.100",
-      9092,
-      100,
-      50);
-
-    // Test various integer fields
-    EXPECT_TRUE(parser().parse("optional_int32 = 1")(obj));
-    EXPECT_TRUE(parser().parse("optional_uint32 = 2")(obj));
-    EXPECT_TRUE(parser().parse("source_info.port = 9092")(obj));
-    EXPECT_TRUE(parser().parse("count_total = 100")(obj));
-    EXPECT_TRUE(parser().parse("count_recent = 50")(obj));
-}
-
-// =============================================================================
-// CASE SENSITIVITY TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, CaseSensitiveFieldNames) {
-    auto obj = create_test_object(1);
-
-    // Field names should be case sensitive
-    EXPECT_NO_THROW(parser().parse("optional_int32 = 1"));
-    EXPECT_THROW(parser().parse("OPTIONAL_INT32 = 1"), std::invalid_argument);
-    EXPECT_THROW(parser().parse("Optional_Int32 = 1"), std::invalid_argument);
-}
-
-TEST_F(AIPFilterTest, CaseInsensitiveLogicalOperators) {
-    auto obj = create_test_object(1, 0, "string", false);
-
-    // AND should be case insensitive
-    EXPECT_TRUE(
-      parser().parse("optional_int32 = 1 AND optional_bool = false")(obj));
-    EXPECT_TRUE(
-      parser().parse("optional_int32 = 1 and optional_bool = false")(obj));
-    EXPECT_TRUE(
-      parser().parse("optional_int32 = 1 And optional_bool = false")(obj));
-    EXPECT_TRUE(
-      parser().parse("optional_int32 = 1 aNd optional_bool = false")(obj));
-}
-
-TEST_F(AIPFilterTest, CaseInsensitiveBooleanLiterals) {
-    auto obj_true = create_test_object(1, 0, "string", true);
-    auto obj_false = create_test_object(1, 0, "string", false);
-
-    // Boolean literals should be case insensitive
-    EXPECT_TRUE(parser().parse("optional_bool = true")(obj_true));
-    EXPECT_TRUE(parser().parse("optional_bool = TRUE")(obj_true));
-    EXPECT_TRUE(parser().parse("optional_bool = True")(obj_true));
-    EXPECT_TRUE(parser().parse("optional_bool = false")(obj_false));
-    EXPECT_TRUE(parser().parse("optional_bool = FALSE")(obj_false));
-    EXPECT_TRUE(parser().parse("optional_bool = False")(obj_false));
-}
-
-// =============================================================================
-// ENUM SUPPORT TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, EnumFieldBasicSupport) {
-    auto obj = create_test_object();
-    obj.set_optional_nested_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_nested_enum::
-        nested_enum_foo);
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
-
-    // Test enum field access with uppercase string values
-    EXPECT_TRUE(
-      parser().parse("optional_nested_enum = \"NESTED_ENUM_FOO\"")(obj));
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_SUCCESS\"")(obj));
-
-    // Test negative cases
-    EXPECT_FALSE(
-      parser().parse("optional_nested_enum = \"NESTED_ENUM_BAR\"")(obj));
-    EXPECT_FALSE(parser().parse("status_enum = \"STATUS_FAILURE\"")(obj));
-}
-
-TEST_F(AIPFilterTest, EnumFieldAllValues) {
-    auto obj = create_test_object();
-
-    // Test all NestedEnum values
-    obj.set_optional_nested_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_nested_enum::
-        nested_enum_unspecified);
-    EXPECT_TRUE(
-      parser().parse("optional_nested_enum = \"NESTED_ENUM_UNSPECIFIED\"")(
-        obj));
-
-    obj.set_optional_nested_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_nested_enum::
-        nested_enum_foo);
-    EXPECT_TRUE(
-      parser().parse("optional_nested_enum = \"NESTED_ENUM_FOO\"")(obj));
-
-    obj.set_optional_nested_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_nested_enum::
-        nested_enum_bar);
-    EXPECT_TRUE(
-      parser().parse("optional_nested_enum = \"NESTED_ENUM_BAR\"")(obj));
-
-    obj.set_optional_nested_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_nested_enum::
-        nested_enum_baz);
-    EXPECT_TRUE(
-      parser().parse("optional_nested_enum = \"NESTED_ENUM_BAZ\"")(obj));
-
-    // Test all StatusEnum values
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_unspecified);
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_UNSPECIFIED\"")(obj));
-
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_SUCCESS\"")(obj));
-
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_failure);
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_FAILURE\"")(obj));
-
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_pending);
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_PENDING\"")(obj));
-}
-
-TEST_F(AIPFilterTest, EnumFieldCaseSensitivity) {
-    auto obj = create_test_object();
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
-
-    // Enum values should be case-sensitive (AIP-160 requirement)
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_SUCCESS\"")(obj));
-
-    // These should fail due to case sensitivity - they will parse successfully
-    // but won't match at runtime
-    auto predicate_wrong_case1 = parser().parse(
-      "status_enum = \"status_success\""); // lowercase
-    auto predicate_wrong_case2 = parser().parse(
-      "status_enum = \"Status_Success\""); // mixed case
-    auto predicate_wrong_case3 = parser().parse(
-      "status_enum = \"StAtUs_SuCcEsS\""); // random case
-
-    EXPECT_FALSE(predicate_wrong_case1(obj));
-    EXPECT_FALSE(predicate_wrong_case2(obj));
-    EXPECT_FALSE(predicate_wrong_case3(obj));
-}
-
-TEST_F(AIPFilterTest, EnumFieldInvalidFormatValues) {
-    // Invalid enum formats should throw during parsing
-    EXPECT_THROW(parser().parse("status_enum = \"\""), std::invalid_argument);
-
-    // Values with invalid characters should throw during parsing
+      parser().parse("duration_field = invalid"), std::invalid_argument);
     EXPECT_THROW(
-      parser().parse("status_enum = \"invalid-value\""), std::invalid_argument);
+      parser().parse("duration_field = 120"),
+      std::invalid_argument); // Missing unit
     EXPECT_THROW(
-      parser().parse("status_enum = \"invalid value\""), std::invalid_argument);
+      parser().parse("duration_field = s"), std::invalid_argument); // No number
 
-    // Numeric values should be invalid (we expect string representation)
-    EXPECT_THROW(parser().parse("status_enum = 2"), std::invalid_argument);
     EXPECT_THROW(
-      parser().parse("optional_nested_enum = 2"), std::invalid_argument);
-}
-
-TEST_F(AIPFilterTest, EnumFieldInvalidEnumValues) {
-    auto obj = create_test_object();
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
-
-    // These have valid format but are not valid enum values
-    // They should parse successfully but fail at runtime (no match)
-    auto predicate_invalid1 = parser().parse(
-      "status_enum = \"INVALID_STATUS\"");
-    auto predicate_invalid2 = parser().parse(
-      "optional_nested_enum = \"INVALID_ENUM\"");
-
-    // But they should not match at runtime
-    EXPECT_FALSE(predicate_invalid1(obj));
-    EXPECT_FALSE(predicate_invalid2(obj));
-}
-
-TEST_F(AIPFilterTest, EnumFieldComparisonOperators) {
-    auto obj = create_test_object();
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
-
-    // Equality and inequality should work
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_SUCCESS\"")(obj));
-    EXPECT_TRUE(parser().parse("status_enum != \"STATUS_FAILURE\"")(obj));
-
-    // Other comparison operators should throw for enums
-    EXPECT_THROW(
-      parser().parse("status_enum > \"STATUS_FAILURE\""),
+      parser().parse("timestamp_field = \"invalid-timestamp\""),
       std::invalid_argument);
     EXPECT_THROW(
-      parser().parse("status_enum < \"STATUS_UNSPECIFIED\""),
-      std::invalid_argument);
+      parser().parse("timestamp_field = \"2012-04-21 11:30:00\""),
+      std::invalid_argument); // Missing T
     EXPECT_THROW(
-      parser().parse("status_enum >= \"STATUS_SUCCESS\""),
-      std::invalid_argument);
+      parser().parse("timestamp_field = \"2012-04-21T25:30:00Z\""),
+      std::invalid_argument); // Invalid hour
     EXPECT_THROW(
-      parser().parse("status_enum <= \"STATUS_SUCCESS\""),
-      std::invalid_argument);
-}
+      parser().parse("timestamp_field = \"2012-13-21T11:30:00Z\""),
+      std::invalid_argument); // Invalid month
 
-TEST_F(AIPFilterTest, EnumFieldLogicalOperations) {
-    auto obj = create_test_object();
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
-    obj.set_optional_nested_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_nested_enum::
-        nested_enum_foo);
-
-    // Test AND operations with enums
-    EXPECT_TRUE(
-      parser().parse(
-        "status_enum = \"STATUS_SUCCESS\" AND optional_nested_enum = "
-        "\"NESTED_ENUM_FOO\"")(obj));
-
-    EXPECT_FALSE(
-      parser().parse(
-        "status_enum = \"STATUS_SUCCESS\" AND optional_nested_enum = "
-        "\"NESTED_ENUM_BAR\"")(obj));
-
-    // Test with mixed field types
-    EXPECT_TRUE(
-      parser().parse("optional_int32 = 1 AND status_enum = \"STATUS_SUCCESS\"")(
-        obj));
-
-    EXPECT_FALSE(
-      parser().parse("optional_int32 = 2 AND status_enum = \"STATUS_SUCCESS\"")(
-        obj));
-}
-
-TEST_F(AIPFilterTest, EnumFieldEdgeCases) {
-    auto obj = create_test_object();
-
-    // Test with unspecified values (default enum values)
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_unspecified);
-    obj.set_optional_nested_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_nested_enum::
-        nested_enum_unspecified);
-
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_UNSPECIFIED\"")(obj));
-    EXPECT_TRUE(
-      parser().parse("optional_nested_enum = \"NESTED_ENUM_UNSPECIFIED\"")(
-        obj));
-
-    // Test inequality with unspecified
-    EXPECT_TRUE(parser().parse("status_enum != \"STATUS_SUCCESS\"")(obj));
-    EXPECT_TRUE(
-      parser().parse("optional_nested_enum != \"NESTED_ENUM_FOO\"")(obj));
+    // Invalid enum formats
+    EXPECT_THROW(parser().parse("status = \"\""), std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse("status = \"invalid-value\""), std::invalid_argument);
+    EXPECT_THROW(
+      parser().parse("status = \"invalid value\""), std::invalid_argument);
+    EXPECT_THROW(parser().parse("status = 2"), std::invalid_argument);
 }
 
 // =============================================================================
-// PERFORMANCE AND STRESS TESTS
+// WHITESPACE AND SYNTAX FLEXIBILITY
 // =============================================================================
 
-TEST_F(AIPFilterTest, EnumPerformanceWithManyConditions) {
-    auto obj = create_test_object();
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
+TEST_F(AIPFilterTest, WhitespaceAndSyntaxHandling) {
+    auto msg = create_test_message(1, "test", false);
 
-    // Test many enum conditions
-    std::string filter = "status_enum = \"STATUS_SUCCESS\"";
-    for (int i = 0; i < 50; ++i) {
-        filter += " AND status_enum = \"STATUS_SUCCESS\"";
+    // Whitespace variations
+    EXPECT_TRUE(parser().parse("int_field=1")(msg));
+    EXPECT_TRUE(parser().parse("int_field = 1")(msg));
+    EXPECT_TRUE(parser().parse("  int_field  =  1  ")(msg));
+    EXPECT_TRUE(parser().parse("\tint_field\t=\t1\t")(msg));
+    EXPECT_TRUE(parser().parse("\nint_field\n=\n1\n")(msg));
+
+    // Multiple conditions with whitespace
+    EXPECT_TRUE(parser().parse("int_field=1 AND bool_field=false")(msg));
+    EXPECT_TRUE(
+      parser().parse("  int_field  =  1  AND  bool_field  =  false  ")(msg));
+
+    // Missing space should cause error
+    EXPECT_THROW(
+      parser().parse("int_field=1AND bool_field=false"), std::invalid_argument);
+
+    // Case sensitivity for field names
+    EXPECT_NO_THROW(parser().parse("int_field = 1"));
+    EXPECT_THROW(parser().parse("INT_FIELD = 1"), std::invalid_argument);
+    EXPECT_THROW(parser().parse("Int_Field = 1"), std::invalid_argument);
+}
+
+// =============================================================================
+// PREDICATE REUSABILITY AND PERFORMANCE
+// =============================================================================
+
+TEST_F(AIPFilterTest, PredicateReusabilityAndPerformance) {
+    auto predicate = parser().parse("int_field = 1 AND bool_field = false");
+
+    // Same predicate can be used multiple times
+    auto msg1 = create_test_message(1, "uid1", false);
+    auto msg2 = create_test_message(1, "uid2", false);
+    auto msg3 = create_test_message(2, "uid3", false);
+
+    EXPECT_TRUE(predicate(msg1));
+    EXPECT_TRUE(predicate(msg2));
+    EXPECT_FALSE(predicate(msg3));
+
+    // Complex filter should still work efficiently
+    std::string complex_filter
+      = "int_field = 1 AND bool_field = false AND string_field = \"test\"";
+    for (int i = 0; i < 20; ++i) {
+        complex_filter += " AND int_field = 1";
     }
-
-    auto predicate = parser().parse(filter);
-    EXPECT_TRUE(predicate(obj));
-}
-
-TEST_F(AIPFilterTest, LargeIntegerValues) {
-    auto obj = create_test_object();
-    obj.set_count_total(9223372036854775807LL); // max int64_t
-
-    auto predicate = parser().parse("count_total = 9223372036854775807");
-    EXPECT_TRUE(predicate(obj));
-}
-
-TEST_F(AIPFilterTest, EmptyStringValues) {
-    auto obj = create_test_object(1, 0, "", false, "");
-
-    EXPECT_TRUE(parser().parse("optional_string = \"\"")(obj));
-    EXPECT_TRUE(parser().parse("client_id = \"\"")(obj));
-}
-
-TEST_F(AIPFilterTest, VeryLongStringValues) {
-    std::string long_string(1000, 'a');
-    auto obj = create_test_object(1, 0, "string", false, long_string);
-
-    auto predicate = parser().parse("client_id = \"" + long_string + "\"");
-    EXPECT_TRUE(predicate(obj));
-}
-
-TEST_F(AIPFilterTest, ManyAndConditions) {
-    auto obj = create_test_object(
-      1, 0, "string", false, "client", "admin", true);
-
-    std::string filter = "optional_int32 = 1";
-    for (int i = 0; i < 100; ++i) {
-        filter += " AND optional_int32 = 1";
-    }
-
-    auto predicate = parser().parse(filter);
-    EXPECT_TRUE(predicate(obj));
-}
-
-TEST_F(AIPFilterTest, FilterReusability) {
-    auto predicate = parser().parse(
-      "optional_int32 = 1 AND optional_bool = false");
-
-    // Test that the same predicate can be used multiple times
-    auto obj1 = create_test_object(1, 0, "uid1", false);
-    auto obj2 = create_test_object(1, 0, "uid2", false);
-    auto obj3 = create_test_object(2, 0, "uid3", false);
-
-    EXPECT_TRUE(predicate(obj1));
-    EXPECT_TRUE(predicate(obj2));
-    EXPECT_FALSE(predicate(obj3));
-}
-
-// =============================================================================
-// RUNTIME ENUM VALIDATION BEHAVIOR TESTS
-// =============================================================================
-
-TEST_F(AIPFilterTest, EnumRuntimeValidationBehavior) {
-    auto obj = create_test_object();
-    obj.set_status_enum(
-      protobuf_test_messages::editions::test_all_types_edition2023_status_enum::
-        status_success);
-
-    // Test that runtime validation works correctly
-    // These should not match even though they parse successfully
-    std::vector<std::string> invalid_but_well_formatted_values = {
-      "NONEXISTENT_STATUS", "SOME_OTHER_VALUE", "DEFINITELY_NOT_AN_ENUM_VALUE"};
-
-    for (const auto& invalid_value : invalid_but_well_formatted_values) {
-        auto predicate = parser().parse(
-          "status_enum = \"" + invalid_value + "\"");
-        EXPECT_FALSE(predicate(obj))
-          << "Should not match invalid enum value: " << invalid_value;
-    }
-
-    // But valid values should still work
-    EXPECT_TRUE(parser().parse("status_enum = \"STATUS_SUCCESS\"")(obj));
-    EXPECT_TRUE(parser().parse("status_enum != \"STATUS_FAILURE\"")(obj));
+    auto complex_predicate = parser().parse(complex_filter);
+    auto test_msg = create_test_message(1, "test", false);
+    EXPECT_TRUE(complex_predicate(test_msg));
 }
 
 } // namespace redpanda::admin
