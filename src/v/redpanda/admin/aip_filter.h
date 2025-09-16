@@ -12,7 +12,6 @@
 #pragma once
 
 #include "absl/time/time.h"
-#include "base/unreachable.h"
 #include "redpanda/admin/field_registry.h"
 
 #include <algorithm>
@@ -78,7 +77,6 @@ struct ComparisonNode : public ASTNode<T> {
         case ComparisonOp::GE:
             return fieldVal >= literalValue;
         }
-        unreachable();
     }
 };
 
