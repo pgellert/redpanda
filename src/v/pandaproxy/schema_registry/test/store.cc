@@ -85,7 +85,7 @@ bool upsert(
 }
 
 BOOST_AUTO_TEST_CASE(test_store_upsert_in_order) {
-    const auto expected = std::vector<pps::schema_version>(
+    const auto expected = chunked_vector<pps::schema_version>(
       {pps::schema_version{0}, pps::schema_version{1}});
 
     pps::store s;
@@ -116,7 +116,7 @@ BOOST_AUTO_TEST_CASE(test_store_upsert_in_order) {
 }
 
 BOOST_AUTO_TEST_CASE(test_store_upsert_reverse_order) {
-    const auto expected = std::vector<pps::schema_version>(
+    const auto expected = chunked_vector<pps::schema_version>(
       {pps::schema_version{0}, pps::schema_version{1}});
 
     pps::store s;
@@ -147,7 +147,7 @@ BOOST_AUTO_TEST_CASE(test_store_upsert_reverse_order) {
 }
 
 BOOST_AUTO_TEST_CASE(test_store_upsert_override) {
-    const auto expected = std::vector<pps::schema_version>(
+    const auto expected = chunked_vector<pps::schema_version>(
       {pps::schema_version{0}});
 
     pps::store s;
@@ -541,7 +541,7 @@ BOOST_AUTO_TEST_CASE(test_store_invalid_subject_compat) {
 }
 
 BOOST_AUTO_TEST_CASE(test_store_delete_subject) {
-    const std::vector<pps::schema_version> expected_vers{
+    const chunked_vector<pps::schema_version> expected_vers{
       {pps::schema_version{1}, pps::schema_version{2}}};
 
     pps::store s;
@@ -659,7 +659,7 @@ BOOST_AUTO_TEST_CASE(test_store_delete_subject) {
 }
 
 BOOST_AUTO_TEST_CASE(test_store_delete_subject_version) {
-    const std::vector<pps::schema_version> expected_vers{
+    const chunked_vector<pps::schema_version> expected_vers{
       {pps::schema_version{1}, pps::schema_version{2}}};
 
     pps::seq_marker dummy_marker;
@@ -783,7 +783,7 @@ BOOST_AUTO_TEST_CASE(test_store_subject_version_latest) {
 }
 
 BOOST_AUTO_TEST_CASE(test_store_delete_subject_after_delete_version) {
-    std::vector<pps::schema_version> expected_vers{{pps::schema_version{2}}};
+    chunked_vector<pps::schema_version> expected_vers{{pps::schema_version{2}}};
 
     pps::store s;
     s.set_compatibility(pps::compatibility_level::none).value();

@@ -104,7 +104,7 @@ inline auto get_subject_versions(
       ppj::serialization_format::schema_registry_v1_json);
 }
 
-inline std::vector<pps::schema_version>
+inline chunked_vector<pps::schema_version>
 get_body_versions(const ss::sstring& body) {
     json::Document doc;
     if (doc.Parse(body).HasParseError()) {
@@ -115,7 +115,7 @@ get_body_versions(const ss::sstring& body) {
           ppj::error_code::invalid_json, "Body is not an array"};
     }
     const auto& arr = doc.GetArray();
-    std::vector<pps::schema_version> found_versions;
+    chunked_vector<pps::schema_version> found_versions;
     found_versions.reserve(arr.Size());
     std::ranges::transform(
       arr, std::back_inserter(found_versions), [](const auto& v) {

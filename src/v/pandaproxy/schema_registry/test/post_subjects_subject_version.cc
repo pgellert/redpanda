@@ -178,7 +178,7 @@ FIXTURE_TEST(
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
 
-        std::vector<pps::schema_version> expected{pps::schema_version{1}};
+        chunked_vector<pps::schema_version> expected{pps::schema_version{1}};
         auto versions = get_body_versions(res.body);
         BOOST_REQUIRE_EQUAL(versions, expected);
     }
@@ -200,7 +200,7 @@ FIXTURE_TEST(
         BOOST_REQUIRE_EQUAL(
           res.headers.result(), boost::beast::http::status::ok);
 
-        std::vector<pps::schema_version> expected{
+        chunked_vector<pps::schema_version> expected{
           pps::schema_version{1}, pps::schema_version{2}};
         auto versions = get_body_versions(res.body);
         BOOST_REQUIRE_EQUAL(versions, expected);

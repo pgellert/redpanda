@@ -13,6 +13,7 @@
 
 #include "base/outcome.h"
 #include "base/seastarx.h"
+#include "container/chunked_vector.h"
 #include "json/iobuf_writer.h"
 #include "kafka/protocol/errors.h"
 #include "model/metadata.h"
@@ -166,7 +167,7 @@ public:
         explicit raw_string(std::string_view sv)
           : schema_definition_iobuf{iobuf::from(sv)} {}
     };
-    using references = std::vector<schema_reference>;
+    using references = chunked_vector<schema_reference>;
 
     schema_definition() = default;
     schema_definition(schema_definition&&) noexcept = default;
@@ -205,14 +206,16 @@ public:
     const references& refs() const& { return _refs; }
     references refs() && { return std::move(_refs); }
 
-    schema_definition share() const { return {shared_raw(), type(), refs()}; }
+    schema_definition share() const {
+        return {shared_raw(), type(), refs().copy()};
+    }
 
     schema_definition copy() const {
-        return {raw_string{_def().copy()}, type(), refs()};
+        return {raw_string{_def().copy()}, type(), refs().copy()};
     }
 
     auto destructure() && {
-        return make_tuple(std::move(_def), _type, std::move(_refs));
+        return std::make_tuple(std::move(_def), _type, std::move(_refs));
     }
 
 private:
@@ -241,7 +244,7 @@ public:
     constexpr schema_type type() const { return schema_type::avro; }
 
     explicit operator schema_definition() const {
-        return {raw(), type(), refs()};
+        return {raw(), type(), refs().copy()};
     }
 
     ss::sstring name() const;
@@ -306,7 +309,7 @@ public:
     constexpr schema_type type() const { return schema_type::json; }
 
     explicit operator schema_definition() const {
-        return {raw(), type(), refs()};
+        return {raw(), type(), refs().copy()};
     }
 
     ss::sstring name() const;
@@ -359,13 +362,13 @@ public:
     }
 
     schema_definition::raw_string raw() const& {
-        return visit([](auto&& def) {
+        return visit([](const auto& def) {
             return schema_definition::raw_string{def.raw()()};
         });
     }
 
     schema_definition::raw_string raw() && {
-        return visit([](auto def) {
+        return visit([](auto& def) {
             return schema_definition::raw_string{std::move(def).raw()()};
         });
     }
@@ -460,7 +463,7 @@ public:
     subject_schema copy() const { return {sub(), def().copy()}; }
 
     auto destructure() && {
-        return make_tuple(std::move(_sub), std::move(_def));
+        return std::make_tuple(std::move(_sub), std::move(_def));
     }
 
 private:
@@ -483,16 +486,24 @@ struct stored_schema {
 ///\brief A mapping of version and schema id for a subject.
 struct subject_version_entry {
     subject_version_entry(
-      schema_version version, schema_id id, is_deleted deleted)
+      schema_version version,
+      schema_id id,
+      is_deleted deleted,
+      chunked_vector<seq_marker> written_at = {})
       : version{version}
       , id{id}
-      , deleted(deleted) {}
+      , deleted(deleted)
+      , written_at{std::move(written_at)} {}
 
     schema_version version;
     schema_id id;
     is_deleted deleted{is_deleted::no};
 
-    std::vector<seq_marker> written_at;
+    chunked_vector<seq_marker> written_at;
+
+    subject_version_entry copy() const {
+        return {version, id, deleted, written_at.copy()};
+    }
 };
 
 enum class compatibility_level {

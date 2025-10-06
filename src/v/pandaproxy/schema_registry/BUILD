@@ -36,6 +36,7 @@ redpanda_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/v/base",
+        "//src/v/container:chunked_vector",
         "//src/v/json",
         "//src/v/kafka/protocol",
         "//src/v/utils:named_type",
