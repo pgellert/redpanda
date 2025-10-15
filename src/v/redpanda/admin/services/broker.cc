@@ -105,10 +105,8 @@ ss::future<connection_gather_result> gather_connections(
     auto conn_ptrs = server.list_connections();
     co_await ss::coroutine::maybe_yield();
 
-    co_await ssx::async_for_each(
-      conn_ptrs, [&result, limit, &filter](const auto& conn_ptr) {
-          auto conn_proto = conn_ptr->to_proto();
-
+    auto process_conn =
+      [&result, limit, &filter](proto::admin::kafka_connection&& conn_proto) {
           bool matches_filter = filter(conn_proto);
 
           if (matches_filter) {
@@ -118,7 +116,17 @@ ss::future<connection_gather_result> gather_connections(
                   result.connections.emplace_back(std::move(conn_proto));
               }
           }
+      };
+
+    co_await ssx::async_for_each(
+      conn_ptrs, [&process_conn](const auto& conn_ptr) {
+          process_conn(conn_ptr->to_proto());
       });
+
+    const auto& closed_conns = server.list_closed_connections();
+    for (auto& elem : closed_conns) {
+        process_conn(std::move(*elem));
+    }
 
     co_return result;
 }
