@@ -39,6 +39,10 @@ public:
         serde::pb::rpc::context,
         proto::admin::list_kafka_connections_request) override;
 
+    ss::future<proto::admin::list_kafka_connections_response>
+    list_kafka_connections_local(
+      const proto::admin::list_kafka_connections_request& req);
+
 private:
     proto::admin::broker self_broker() const;
 

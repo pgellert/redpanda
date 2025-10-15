@@ -22,6 +22,8 @@
 
 #include <seastar/core/coroutine.hh>
 
+#include <iterator>
+
 namespace proto {
 using namespace proto::admin;
 }
@@ -31,6 +33,10 @@ namespace admin {
 namespace {
 // NOLINTNEXTLINE(*-non-const-global-variables,cert-err58-*)
 ss::logger brlog{"admin_api_server/broker_service"};
+
+// TODO: consider reducing this further now that we support cluster-wide
+// responses, e.g. 10-100?
+constexpr static size_t default_page_size_limit = 1000;
 
 } // namespace
 
@@ -144,31 +150,30 @@ void check_license(const features::feature_table& ft) {
     }
 }
 
+auto copy(const proto::admin::list_kafka_connections_request& req) {
+    proto::admin::list_kafka_connections_request res;
+    res.set_filter(ss::sstring{req.get_filter()});
+    res.set_node_id(req.get_node_id());
+    res.set_order_by(ss::sstring{req.get_order_by()});
+    res.set_page_size(req.get_page_size());
+    // TODO: how do ensure that we don't forget to update this... maybe use
+    // co_await from_proto(req.to_proto())
+    return res;
+}
+
+size_t get_limit(const proto::admin::list_kafka_connections_request& req) {
+    return (req.get_page_size() == 0) ? default_page_size_limit
+                                      : req.get_page_size();
+}
+
 } // namespace
 
 ss::future<proto::admin::list_kafka_connections_response>
-broker_service_impl::list_kafka_connections(
-  serde::pb::rpc::context ctx,
-  proto::admin::list_kafka_connections_request req) {
-    vlog(brlog.trace, "list_kafka_connections: {}", req);
-
-    check_license(_feature_table.local());
-
-    // Proxy to the target node id specified in the request
-    auto target = model::node_id{req.get_node_id()};
-    if (target != -1 && target != _proxy_client.self_node_id()) {
-        vlog(brlog.debug, "Redirecting to target node id {}", target);
-        co_return co_await _proxy_client
-          .make_client_for_node<proto::admin::broker_service_client>(target)
-          .list_kafka_connections(ctx, std::move(req));
-    }
-
+broker_service_impl::list_kafka_connections_local(
+  const proto::admin::list_kafka_connections_request& req) {
     auto resp = proto::admin::list_kafka_connections_response{};
 
-    constexpr size_t default_limit = 1000;
-    auto limit = (req.get_page_size() == 0) ? default_limit
-                                            : req.get_page_size();
-
+    auto limit = get_limit(req);
     auto filter_cfg = make_aip_filter_config<proto::kafka_connection>(
       req.get_filter());
     auto filter = aip_filter_parser::create_aip_filter(std::move(filter_cfg));
@@ -207,6 +212,83 @@ broker_service_impl::list_kafka_connections(
       resp.get_total_size());
 
     co_return resp;
+}
+
+ss::future<proto::admin::list_kafka_connections_response>
+broker_service_impl::list_kafka_connections(
+  serde::pb::rpc::context ctx,
+  proto::admin::list_kafka_connections_request req) {
+    vlog(brlog.trace, "list_kafka_connections: {}", req);
+
+    // TODO: as planned, introduce concurrency limiting based on the concurrency
+    // limiting section of the RFC, now with potentially lower limits (TBD on
+    // scale testing) --> safeguards against customers DoS'ing their clusters
+    // https://docs.google.com/document/d/1mTTu1Ihbh1hc2vZpGMwLAWGbIJ5GCz0rWhn__uleboQ/edit?tab=t.0#heading=h.wbvlexs3bfrq
+
+    check_license(_feature_table.local());
+
+    // Proxy to the target node id specified in the request
+    auto target = model::node_id{req.get_node_id()};
+    if (target == -1 || target == _proxy_client.self_node_id()) {
+        auto res = co_await list_kafka_connections_local(req);
+
+        // TODO: do we need to limit proxied request sizes here? Or is the
+        // "concurrency limiting" above sufficient. If so, should we limit the
+        // size of the response here, or rather limit the size of proxied
+        // responses in the proxying client to a cluster-configurable limit,
+        // after which we throw instead of returning the response.
+        //
+        // constexpr static size_t max_connections_in_proxied_response = 1000;
+        // if (
+        //   ctx.is_proxied()
+        //   && res.get_connections().size()
+        //        > max_connections_in_proxied_response) {
+        //     throw serde::pb::rpc::invalid_argument_exception(
+        //       fmt::format(
+        //         "Internal response size exceeds limit: {} > {}",
+        //         res.get_connections().size(),
+        //         max_connections_in_proxied_response));
+        // }
+
+        co_return res;
+    } else if (target == -2) {
+        auto resp = proto::admin::list_kafka_connections_response{};
+        auto add_to_response = [&resp](auto& client_resp) {
+            for (auto& conn : client_resp.get_connections()) {
+                resp.get_connections().push_back(std::move(conn));
+            }
+            resp.set_total_size(
+              resp.get_total_size() + client_resp.get_total_size());
+        };
+
+        auto other_node_clients = _proxy_client.make_clients_for_other_nodes<
+          proto::admin::broker_service_client>();
+        for (auto& [_, client] : other_node_clients) {
+            auto client_req = copy(req);
+            client_req.set_node_id(-1);
+            auto client_resp = co_await client.list_kafka_connections(
+              ctx, std::move(client_req));
+
+            add_to_response(client_resp);
+        }
+
+        auto local_resp = co_await list_kafka_connections_local(req);
+        add_to_response(local_resp);
+
+        // TODO: hook up ordering here as welll
+
+        auto limit = get_limit(req);
+        if (resp.get_connections().size() > limit) {
+            resp.get_connections().erase_to_end(
+              resp.get_connections().cbegin() + limit);
+        }
+        co_return resp;
+    } else {
+        vlog(brlog.debug, "Redirecting to target node id {}", target);
+        co_return co_await _proxy_client
+          .make_client_for_node<proto::admin::broker_service_client>(target)
+          .list_kafka_connections(ctx, std::move(req));
+    }
 }
 
 } // namespace admin

@@ -71,8 +71,11 @@ message ListBrokersResponse {
 }
 
 message ListKafkaConnectionsRequest {
+    // TODO: decide whether this is still considered a Broker API or if it
+    // should now be a Cluster API
     // The node ID for the broker. If set to -1, the broker handling the RPC
-    // request returns information about itself.
+    // request returns information about itself. If set to -2, the broker
+    // collects information about all of the nodes in the cluster.
     int32 node_id = 1;
 
     // The maximum number of connections to return. If unspecified or 0, a
