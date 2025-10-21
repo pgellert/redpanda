@@ -28,6 +28,9 @@ namespace admin {
 
 namespace {
 
+using make_local_collector_t
+  = ss::noncopyable_function<ss::shared_ptr<connection_collector>(size_t)>;
+
 struct connection_gather_result {
     chunked_vector<proto::admin::kafka_connection> connections;
     size_t total_matching_count;
@@ -64,14 +67,14 @@ ss::future<connection_gather_result> gather_connections(
         process_conn(std::move(elem_copy));
     }
 
-    result.connections = std::move(*collector).extract();
+    result.connections = std::move(*collector).extract_unordered();
     co_return result;
 }
 
 ss::future<size_t> gather_all_shards(
   ss::sharded<kafka::server>& kafka_server,
   const filter_predicate& filter,
-  const auto& make_local_collector,
+  const make_local_collector_t& make_local_collector,
   connection_collector& global_collector) {
     size_t total_matching_connections = 0;
 
@@ -110,39 +113,44 @@ kafka_connections_service::list_kafka_connections_local(
       req.get_filter());
     auto filter = aip_filter_parser::create_aip_filter(std::move(filter_cfg));
 
-    if (req.get_order_by().empty()) {
-        auto global_collector = unordered_collector{limit};
+    auto [global_collector, make_local_collector] =
+      [&req, limit]() -> std::pair<
+                        ss::shared_ptr<connection_collector>,
+                        make_local_collector_t> {
+        if (req.get_order_by().empty()) {
+            auto global_collector = ss::make_shared<unordered_collector>(limit);
 
-        auto make_local_collector = [limit](size_t accumulated_count) {
-            return ss::make_shared<unordered_collector>(
-              limit - accumulated_count);
-        };
+            auto make_local_collector = [limit](size_t accumulated_count) {
+                return ss::make_shared<unordered_collector>(
+                  limit - accumulated_count);
+            };
 
-        auto total_matching_connections = co_await gather_all_shards(
-          _kafka_server, filter, make_local_collector, global_collector);
+            return std::make_pair(
+              std::move(global_collector), std::move(make_local_collector));
+        } else {
+            auto ordering_conf
+              = make_ordering_config<proto::admin::kafka_connection>(
+                req.get_order_by());
+            auto comp = sort_order::parse(ordering_conf);
 
-        resp.set_connections(std::move(global_collector).extract());
-        resp.set_total_size(total_matching_connections);
-    } else {
-        auto ordering_conf
-          = make_ordering_config<proto::admin::kafka_connection>(
-            req.get_order_by());
-        auto comp = sort_order::parse(ordering_conf);
+            auto global_collector
+              = ss::make_shared<ordered_collector<sort_order>>(limit, comp);
 
-        auto global_collector = ordered_collector{limit, comp};
+            auto make_local_collector = [limit, comp](size_t) {
+                return ss::make_shared<ordered_collector<decltype(comp)>>(
+                  limit, comp);
+            };
 
-        auto make_local_collector = [limit, &comp](size_t) {
-            return ss::make_shared<ordered_collector<decltype(comp)>>(
-              limit, comp);
-        };
+            return std::make_pair(
+              std::move(global_collector), std::move(make_local_collector));
+        }
+    }();
 
-        auto total_matching_connections = co_await gather_all_shards(
-          _kafka_server, filter, make_local_collector, global_collector);
+    auto total_matching_connections = co_await gather_all_shards(
+      _kafka_server, filter, make_local_collector, *global_collector);
 
-        resp.set_connections(
-          co_await std::move(global_collector).extract_sorted());
-        resp.set_total_size(total_matching_connections);
-    }
+    resp.set_connections(co_await std::move(*global_collector).extract());
+    resp.set_total_size(total_matching_connections);
     co_return resp;
 }
 
