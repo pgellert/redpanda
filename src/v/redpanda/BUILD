@@ -68,6 +68,7 @@ redpanda_cc_library(
         "//src/v/pandaproxy/rest:server",
         "//src/v/raft",
         "//src/v/redpanda/admin",
+        "//src/v/redpanda/admin:kafka_connections_service",
         "//src/v/redpanda/admin/proxy:service",
         "//src/v/redpanda/admin/proxy:client",
         "//src/v/redpanda/admin/services/shadow_link",

@@ -12,8 +12,8 @@
 #pragma once
 
 #include "features/fwd.h"
-#include "kafka/server/fwd.h"
 #include "proto/redpanda/core/admin/v2/broker.proto.h"
+#include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/admin/proxy/client.h"
 
 namespace admin {
@@ -26,7 +26,7 @@ public:
     broker_service_impl(
       admin::proxy::client,
       std::vector<std::unique_ptr<serde::pb::rpc::base_service>>* services,
-      ss::sharded<kafka::server>& kafka_server,
+      ss::sharded<kafka_connections_service>& kafka_connections_service,
       ss::sharded<features::feature_table>& _feature_table);
 
     ss::future<proto::admin::get_broker_response> get_broker(
@@ -44,7 +44,7 @@ private:
 
     admin::proxy::client _proxy_client;
     std::vector<std::unique_ptr<serde::pb::rpc::base_service>>* _services;
-    ss::sharded<kafka::server>& _kafka_server;
+    ss::sharded<kafka_connections_service>& _kafka_connections_service;
     ss::sharded<features::feature_table>& _feature_table;
 };
 
