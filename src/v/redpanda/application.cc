@@ -138,6 +138,7 @@
 #include "raft/coordinated_recovery_throttle.h"
 #include "raft/group_manager.h"
 #include "raft/service.h"
+#include "redpanda/admin/kafka_connections_service.h"
 #include "redpanda/admin/proxy/client.h"
 #include "redpanda/admin/proxy/service.h"
 #include "redpanda/admin/server.h"
@@ -1151,7 +1152,8 @@ void application::configure_admin_server(model::node_id node_id) {
       std::ref(_tx_manager_migrator),
       std::ref(_kafka_server.ref()),
       std::ref(tx_gateway_frontend),
-      std::ref(_debug_bundle_service))
+      std::ref(_debug_bundle_service),
+      std::ref(_kafka_connections_service))
       .get();
     _admin
       .invoke_on_all([this, node_id](admin_server& s) {
@@ -1566,6 +1568,9 @@ void application::wire_up_runtime_services(
     construct_service(_debug_bundle_service, &storage.local().kvs()).get();
 
     construct_single_service(_host_metrics_watcher, std::ref(_log));
+
+    construct_service(_kafka_connections_service, std::ref(_kafka_server.ref()))
+      .get();
 
     configure_admin_server(node_id);
 }
