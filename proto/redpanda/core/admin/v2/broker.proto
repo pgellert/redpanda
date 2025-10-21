@@ -70,6 +70,8 @@ message ListBrokersResponse {
     repeated Broker brokers = 1;
 }
 
+// ListKafkaConnectionsRequest return information about the broker's Kafka
+// connections.
 message ListKafkaConnectionsRequest {
     // The node ID for the broker. If set to -1, the broker handling the RPC
     // request returns information about itself.
@@ -100,7 +102,7 @@ message ListKafkaConnectionsRequest {
     //
     // Example filters:
     // - `state = KAFKA_CONNECTION_STATE_OPEN`
-    // - `idle_duration > 30s AND request_count_total > 100`
+    // - `idle_duration > 30s AND total_request_statistics.request_count > 100`
     // - `authentication_info.user_principal = "my-producer"`
     // - `recent_request_statistics.produce_bytes > 1000 AND
     // client_software_name = "kgo"`
@@ -122,6 +124,8 @@ message ListKafkaConnectionsRequest {
     string order_by = 4;
 }
 
+// ListKafkaConnectionsResponse is the response from the ListKafkaConnections
+// RPC.
 message ListKafkaConnectionsResponse {
     // The list of connections matching the request.
     // Note that in addition to open connections, some recently-closed

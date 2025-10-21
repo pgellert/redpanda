@@ -657,7 +657,7 @@ class TopicMetadataSyncOptions(google.protobuf.message.Message):
 
     @typing.final
     class EarliestOffset(google.protobuf.message.Message):
-        """Start at the earliest offset in the partition"""
+        """Start at the earliest offset in the partition."""
         DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
         def __init__(self) -> None:
@@ -665,7 +665,7 @@ class TopicMetadataSyncOptions(google.protobuf.message.Message):
 
     @typing.final
     class LatestOffset(google.protobuf.message.Message):
-        """Start at the latest offset in the partition"""
+        """Start at the latest offset in the partition."""
         DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
         def __init__(self) -> None:
@@ -725,15 +725,22 @@ class TopicMetadataSyncOptions(google.protobuf.message.Message):
 
     @property
     def earliest(self) -> global___TopicMetadataSyncOptions.EarliestOffset:
-        ...
+        """Enables data replication from the earliest offset
+        on the source topic/partition.
+        """
 
     @property
     def latest(self) -> global___TopicMetadataSyncOptions.LatestOffset:
-        ...
+        """Enables data replication from the latest offset
+        on the source topic/partition.
+        """
 
     @property
     def timestamp(self) -> google.protobuf.timestamp_pb2.Timestamp:
-        ...
+        """Enables data replication from the first offset on the
+        source topic/partition where the record's timestamp is
+        at or after the specified timestamp.
+        """
 
     def __init__(self, *, interval: google.protobuf.duration_pb2.Duration | None=..., auto_create_shadow_topic_filters: collections.abc.Iterable[global___NameFilter] | None=..., synced_shadow_topic_properties: collections.abc.Iterable[builtins.str] | None=..., exclude_default: builtins.bool=..., earliest: global___TopicMetadataSyncOptions.EarliestOffset | None=..., latest: global___TopicMetadataSyncOptions.LatestOffset | None=..., timestamp: google.protobuf.timestamp_pb2.Timestamp | None=...) -> None:
         ...

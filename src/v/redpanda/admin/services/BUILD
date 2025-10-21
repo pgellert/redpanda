@@ -8,6 +8,7 @@ redpanda_cc_library(
     hdrs = ["broker.h"],
     deps = [
         "//proto/redpanda/core/admin/v2:broker_redpanda_proto",
+        "//proto/redpanda/core/admin/v2:kafka_connections_redpanda_proto",
         "//src/v/container:priority_queue",
         "//src/v/features",
         "//src/v/kafka/server",

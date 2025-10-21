@@ -87,6 +87,9 @@ global___ListBrokersResponse = ListBrokersResponse
 
 @typing.final
 class ListKafkaConnectionsRequest(google.protobuf.message.Message):
+    """ListKafkaConnectionsRequest return information about the broker's Kafka
+    connections.
+    """
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
     NODE_ID_FIELD_NUMBER: builtins.int
     PAGE_SIZE_FIELD_NUMBER: builtins.int
@@ -97,7 +100,7 @@ class ListKafkaConnectionsRequest(google.protobuf.message.Message):
     page_size: builtins.int
     'The maximum number of connections to return. If unspecified or 0, a\n    default value may be applied. Note that paging is currently not fully\n    supported, and this field only acts as a limit for the first page of data\n    returned. Subsequent pages of data cannot be requested.\n    '
     filter: builtins.str
-    'Filter expression to apply to the connection list.\n    Uses a subset of AIP-160 filter syntax supporting:\n    - Field comparisons (`=`, `!=`, `<`, `>`, `<=`, `>=`)\n    - Logical AND chaining: condition1 AND condition2\n    - Nested field access: parent.child = value\n    - Escape sequences: field = "string with \\"quotes\\""\n    - Enum types\n    - RFC3339 timestamps and ISO-like duration\n\n    Limitations (not supported):\n    - Logical OR chaining\n    - Parentheses `(` `)` for grouping\n    - Map and repeated types\n    - HAS (:) operator\n    - Negation (-, NOT)\n    - Bare literal matching\n\n    Example filters:\n    - `state = KAFKA_CONNECTION_STATE_OPEN`\n    - `idle_duration > 30s AND request_count_total > 100`\n    - `authentication_info.user_principal = "my-producer"`\n    - `recent_request_statistics.produce_bytes > 1000 AND\n    client_software_name = "kgo"`\n    - `open_time >= 2025-09-01T10:22:54Z`\n\n    Reference: https://google.aip.dev/160\n    '
+    'Filter expression to apply to the connection list.\n    Uses a subset of AIP-160 filter syntax supporting:\n    - Field comparisons (`=`, `!=`, `<`, `>`, `<=`, `>=`)\n    - Logical AND chaining: condition1 AND condition2\n    - Nested field access: parent.child = value\n    - Escape sequences: field = "string with \\"quotes\\""\n    - Enum types\n    - RFC3339 timestamps and ISO-like duration\n\n    Limitations (not supported):\n    - Logical OR chaining\n    - Parentheses `(` `)` for grouping\n    - Map and repeated types\n    - HAS (:) operator\n    - Negation (-, NOT)\n    - Bare literal matching\n\n    Example filters:\n    - `state = KAFKA_CONNECTION_STATE_OPEN`\n    - `idle_duration > 30s AND total_request_statistics.request_count > 100`\n    - `authentication_info.user_principal = "my-producer"`\n    - `recent_request_statistics.produce_bytes > 1000 AND\n    client_software_name = "kgo"`\n    - `open_time >= 2025-09-01T10:22:54Z`\n\n    Reference: https://google.aip.dev/160\n    '
     order_by: builtins.str
     'Field-based ordering specification following AIP-132 syntax.\n    Supports multiple fields with `asc`/`desc` direction indicators.\n    Examples:\n    - `idle_duration desc` - longest idle connections first\n    - `open_time desc, total_request_statistics.request_count desc` - newest\n    connections first, then most active\n    - `recent_request_statistics.produce_bytes desc` - connections with\n    highest current produce throughput first\n\n    Reference: https://google.aip.dev/132#ordering\n    '
 
@@ -110,6 +113,9 @@ global___ListKafkaConnectionsRequest = ListKafkaConnectionsRequest
 
 @typing.final
 class ListKafkaConnectionsResponse(google.protobuf.message.Message):
+    """ListKafkaConnectionsResponse is the response from the ListKafkaConnections
+    RPC.
+    """
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
     CONNECTIONS_FIELD_NUMBER: builtins.int
     TOTAL_SIZE_FIELD_NUMBER: builtins.int
