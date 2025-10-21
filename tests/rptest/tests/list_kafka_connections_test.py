@@ -160,6 +160,58 @@ class AdminV2ListKafkaConnectionsTest(RedpandaTest):
         assert conn.state == kafka_connections_pb.KAFKA_CONNECTION_STATE_CLOSED
         assert conn.close_time.ToDatetime() > datetime(year=2025, month=1, day=1)
 
+    @cluster(num_nodes=4)
+    def test_cluster_service_list_kafka_connections(self):
+        """
+        Tests that the ClusterService's ListKafkaConnection endpoint aggregates kafka connections across brokers correctly
+        """
+
+        self.logger.debug("Start a consumer to open some kafka connections")
+        self.consumer.start()
+
+        admin_v2 = AdminV2(
+            self.redpanda,
+            auth=(self.superuser.username, self.superuser.password),
+        )
+        req = cluster_pb.ListKafkaConnectionsRequest(
+            page_size=10, order_by="source.port desc"
+        )
+
+        def valid_response() -> bool:
+            resp = admin_v2.cluster().list_kafka_connections(req)
+
+            self.logger.info(
+                f"ListKafkaConnectionsResponse: total_size={resp.total_size}, connections={len(resp.connections)}"
+            )
+            self.logger.debug(f"ListKafkaConnectionsResponse: {resp}")
+
+            # Sanity check the response
+            assert len(resp.connections) >= 2
+            assert resp.connections[0].source.port >= resp.connections[1].source.port
+
+            return True
+
+        wait_until(
+            valid_response,
+            timeout_sec=15,
+            retry_on_exc=True,
+            err_msg="Did not observe a valid ListKafkaConnectionsResponse",
+        )
+
+        self.logger.info(
+            "Test the filtering integration by filtering for an unknown UUID, expect an empty response"
+        )
+        filtered_resp = admin_v2.cluster().list_kafka_connections(
+            cluster_pb.ListKafkaConnectionsRequest(
+                filter='uid = "ba26cadd-90f6-4999-b2c9-a89b5f033507"',
+            )
+        )
+        self.logger.debug(f"Filtered response: {filtered_resp}")
+        assert len(filtered_resp.connections) == 0
+        assert filtered_resp.total_size == 0
+
+        self.consumer.stop()
+
 
 class AdminV2ListKafkaConnectionsLicenseTest(RedpandaTest):
     """
