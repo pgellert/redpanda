@@ -89,10 +89,7 @@ ss::future<size_t> gather_all_shards(
           });
 
         total_matching_connections += shard_result.total_matching_count;
-
-        for (auto& conn : shard_result.connections) {
-            global_collector.add(std::move(conn));
-        }
+        co_await global_collector.add_all(std::move(shard_result.connections));
 
         co_await ss::coroutine::maybe_yield();
     }

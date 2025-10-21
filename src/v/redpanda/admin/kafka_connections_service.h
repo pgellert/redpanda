@@ -15,6 +15,7 @@
 #include "container/priority_queue.h"
 #include "kafka/server/fwd.h"
 #include "proto/redpanda/core/admin/v2/broker.proto.h"
+#include "ssx/async_algorithm.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
@@ -26,6 +27,8 @@ namespace admin {
 struct connection_collector {
     virtual ~connection_collector() = default;
     virtual void add(proto::admin::kafka_connection conn) = 0;
+    virtual ss::future<>
+    add_all(chunked_vector<proto::admin::kafka_connection> conns) = 0;
     virtual chunked_vector<proto::admin::kafka_connection>
     extract_unordered() && = 0;
     virtual ss::future<chunked_vector<proto::admin::kafka_connection>>
@@ -45,6 +48,19 @@ public:
         if (_connections.size() < _limit) {
             _connections.emplace_back(std::move(conn));
         }
+    }
+
+    ss::future<>
+    add_all(chunked_vector<proto::admin::kafka_connection> conns) final {
+        auto to_add_count = std::min(
+          conns.size(), _limit - _connections.size());
+        if (conns.size() > to_add_count) {
+            conns.pop_back_n(conns.size() - to_add_count);
+        }
+        _connections.reserve(_connections.size() + conns.size());
+        co_await ssx::async_for_each(std::move(conns), [this](auto& conn) {
+            _connections.emplace_back(std::move(conn));
+        });
     }
 
     chunked_vector<proto::admin::kafka_connection> extract_unordered()
@@ -74,6 +90,11 @@ public:
 
     void add(proto::admin::kafka_connection conn) final {
         _pq.push(std::move(conn));
+    }
+
+    ss::future<>
+    add_all(chunked_vector<proto::admin::kafka_connection> conns) final {
+        co_await _pq.async_push_range(std::move(conns));
     }
 
     chunked_vector<proto::admin::kafka_connection> extract_unordered()
