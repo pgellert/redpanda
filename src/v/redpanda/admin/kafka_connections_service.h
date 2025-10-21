@@ -26,7 +26,10 @@ namespace admin {
 struct connection_collector {
     virtual ~connection_collector() = default;
     virtual void add(proto::admin::kafka_connection conn) = 0;
-    virtual chunked_vector<proto::admin::kafka_connection> extract() && = 0;
+    virtual chunked_vector<proto::admin::kafka_connection>
+    extract_unordered() && = 0;
+    virtual ss::future<chunked_vector<proto::admin::kafka_connection>>
+    extract() && = 0;
     virtual size_t size() const = 0;
 };
 
@@ -44,9 +47,15 @@ public:
         }
     }
 
-    chunked_vector<proto::admin::kafka_connection> extract() && final {
+    chunked_vector<proto::admin::kafka_connection> extract_unordered()
+      && final {
         return std::move(_connections);
     }
+
+    ss::future<chunked_vector<proto::admin::kafka_connection>> extract()
+      && final {
+        co_return std::move(_connections);
+    };
 
     size_t size() const final { return _connections.size(); }
 };
@@ -67,16 +76,17 @@ public:
         _pq.push(std::move(conn));
     }
 
-    chunked_vector<proto::admin::kafka_connection> extract() && final {
+    chunked_vector<proto::admin::kafka_connection> extract_unordered()
+      && final {
         return std::move(_pq).extract_heap();
     }
 
-    size_t size() const final { return _pq.size(); }
-
-    ss::future<chunked_vector<proto::admin::kafka_connection>>
-    extract_sorted() && {
+    ss::future<chunked_vector<proto::admin::kafka_connection>> extract()
+      && final {
         return std::move(_pq).async_extract_sorted();
     }
+
+    size_t size() const final { return _pq.size(); }
 };
 
 class kafka_connections_service {
