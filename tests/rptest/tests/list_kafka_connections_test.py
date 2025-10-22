@@ -12,7 +12,7 @@ from typing import Any
 from ducktape.tests.test import TestContext
 
 from rptest.clients.admin.v2 import Admin as AdminV2
-from rptest.clients.admin.v2 import broker_pb, kafka_connections_pb
+from rptest.clients.admin.v2 import cluster_pb, kafka_connections_pb
 from rptest.clients.rpk import RpkTool
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
@@ -74,12 +74,12 @@ class AdminV2ListKafkaConnectionsTest(RedpandaTest):
             auth=(self.superuser.username, self.superuser.password),
         )
         node_id = self.redpanda.node_id(self.redpanda.nodes[0])
-        req = broker_pb.ListKafkaConnectionsRequest(
+        req = cluster_pb.ListKafkaConnectionsRequest(
             node_id=node_id, page_size=10, order_by="source.port desc"
         )
 
         def valid_response() -> bool:
-            resp = admin_v2.broker().list_kafka_connections(req)
+            resp = admin_v2.cluster().list_kafka_connections(req)
 
             self.logger.info(
                 f"ListKafkaConnectionsResponse: total_size={resp.total_size}, connections={len(resp.connections)}"
@@ -133,8 +133,8 @@ class AdminV2ListKafkaConnectionsTest(RedpandaTest):
         self.logger.info(
             "Test the filtering integration by filtering for an unknown UUID, expect an empty response"
         )
-        filtered_resp = admin_v2.broker().list_kafka_connections(
-            broker_pb.ListKafkaConnectionsRequest(
+        filtered_resp = admin_v2.cluster().list_kafka_connections(
+            cluster_pb.ListKafkaConnectionsRequest(
                 node_id=-1,
                 filter='uid = "ba26cadd-90f6-4999-b2c9-a89b5f033507"',
             )
@@ -148,8 +148,8 @@ class AdminV2ListKafkaConnectionsTest(RedpandaTest):
         self.logger.info(
             "Test that closed connections can also be included in the response"
         )
-        closed_conns_resp = admin_v2.broker().list_kafka_connections(
-            broker_pb.ListKafkaConnectionsRequest(
+        closed_conns_resp = admin_v2.cluster().list_kafka_connections(
+            cluster_pb.ListKafkaConnectionsRequest(
                 node_id=-1,
                 filter="state = KAFKA_CONNECTION_STATE_CLOSED",
             )
@@ -178,8 +178,8 @@ class AdminV2ListKafkaConnectionsLicenseTest(RedpandaTest):
     @cluster(num_nodes=1)
     def test_without_license(self):
         admin = AdminV2(self.redpanda)
-        resp = admin.broker().call_list_kafka_connections(
-            broker_pb.ListKafkaConnectionsRequest(node_id=-1)
+        resp = admin.cluster().call_list_kafka_connections(
+            cluster_pb.ListKafkaConnectionsRequest(node_id=-1)
         )
         err = resp.error()
         assert err is not None, f"expected error response without license, got {err}"

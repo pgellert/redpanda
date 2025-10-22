@@ -14,7 +14,7 @@
 #include "base/seastarx.h"
 #include "container/priority_queue.h"
 #include "kafka/server/fwd.h"
-#include "proto/redpanda/core/admin/v2/broker.proto.h"
+#include "proto/redpanda/core/admin/v2/cluster.proto.h"
 #include "ssx/async_algorithm.h"
 
 #include <seastar/core/future.hh>
