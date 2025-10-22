@@ -60,7 +60,7 @@ class AdminV2ListKafkaConnectionsTest(RedpandaTest):
 
         self.super_rpk.create_topic(self.test_topic)
 
-    @cluster(num_nodes=2)
+    @cluster(num_nodes=4)
     def test_list_kafka_connections(self):
         """
         Tests the AdminV2 list_connections endpoint by verifying active Kafka connections are correctly reported
@@ -123,7 +123,7 @@ class AdminV2ListKafkaConnectionsTest(RedpandaTest):
 
         wait_until(
             valid_response,
-            timeout_sec=15,
+            timeout_sec=30,
             retry_on_exc=True,
             err_msg="Did not observe a valid ListKafkaConnectionsResponse",
         )

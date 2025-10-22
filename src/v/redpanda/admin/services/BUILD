@@ -33,7 +33,9 @@ redpanda_cc_library(
     deps = [
         ":utils",
         "//proto/redpanda/core/admin/v2:cluster_redpanda_proto",
+        "//proto/redpanda/core/admin/v2:kafka_connections_redpanda_proto",
         "//src/v/features",
+        "//src/v/redpanda/admin:aip_ordering",
         "//src/v/redpanda/admin:kafka_connections_service",
         "//src/v/redpanda/admin/proxy:client",
         "//src/v/serde/protobuf:rpc",

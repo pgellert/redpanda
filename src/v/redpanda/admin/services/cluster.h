@@ -31,6 +31,19 @@ public:
         proto::admin::list_kafka_connections_request) override;
 
 private:
+    using response_consumer_t = ss::noncopyable_function<ss::future<>(
+      proto::admin::list_kafka_connections_response)>;
+
+    ss::future<> gather_all_brokers(
+      const serde::pb::rpc::context& ctx,
+      const response_consumer_t& add_to_response,
+      const proto::admin::list_kafka_connections_request& req);
+
+    ss::future<proto::admin::list_kafka_connections_response>
+    list_kafka_connections_cluster_wide(
+      const serde::pb::rpc::context& ctx,
+      proto::admin::list_kafka_connections_request req);
+
     admin::proxy::client _proxy_client;
     ss::sharded<kafka_connections_service>& _kafka_connections_service;
     ss::sharded<features::feature_table>& _feature_table;
