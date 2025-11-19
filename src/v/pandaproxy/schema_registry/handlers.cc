@@ -49,22 +49,33 @@ namespace pandaproxy::schema_registry {
 
 using server = ctx_server<service>;
 
-void parse_accept_header(const server::request_t& rq, server::reply_t& rp) {
-    static const std::vector<ppj::serialization_format> headers{
-      ppj::serialization_format::schema_registry_v1_json,
-      ppj::serialization_format::schema_registry_json,
-      ppj::serialization_format::application_json,
-      ppj::serialization_format::none};
-    rp.mime_type = parse::accept_header(*rq.req, headers);
+static const std::vector<ppj::serialization_format>
+  default_allowed_accept_types{
+    ppj::serialization_format::schema_registry_v1_json,
+    ppj::serialization_format::schema_registry_json,
+    ppj::serialization_format::application_json,
+    ppj::serialization_format::none};
+
+void parse_accept_header(
+  const server::request_t& rq,
+  server::reply_t& rp,
+  const std::vector<ppj::serialization_format>& allowed_formats
+  = default_allowed_accept_types) {
+    rp.mime_type = parse::accept_header(*rq.req, allowed_formats);
 }
 
-void parse_content_type_header(const server::request_t& rq) {
-    static const std::vector<ppj::serialization_format> headers{
-      ppj::serialization_format::schema_registry_v1_json,
-      ppj::serialization_format::schema_registry_json,
-      ppj::serialization_format::application_json,
-      ppj::serialization_format::application_octet};
-    parse::content_type_header(*rq.req, headers);
+static const std::vector<ppj::serialization_format>
+  default_allowed_content_types{
+    ppj::serialization_format::schema_registry_v1_json,
+    ppj::serialization_format::schema_registry_json,
+    ppj::serialization_format::application_json,
+    ppj::serialization_format::application_octet};
+
+void parse_content_type_header(
+  const server::request_t& rq,
+  const std::vector<ppj::serialization_format>& allowed_formats
+  = default_allowed_content_types) {
+    parse::content_type_header(*rq.req, allowed_formats);
 }
 
 result<schema_version> parse_numerical_schema_version(const ss::sstring& ver) {
@@ -682,7 +693,9 @@ ss::future<ctx_server<service>::reply_t> get_subject_versions_version(
 
 ss::future<ctx_server<service>::reply_t> get_subject_versions_version_schema(
   ctx_server<service>::request_t rq, ctx_server<service>::reply_t rp) {
-    parse_accept_header(rq, rp);
+    static const std::vector<ppj::serialization_format> allowed_formats{
+      ppj::serialization_format::text_plain};
+    parse_accept_header(rq, rp, allowed_formats);
     auto sub = parse::request_param<subject>(*rq.req, "subject");
     auto ver = parse::request_param<ss::sstring>(*rq.req, "version");
     auto inc_del{

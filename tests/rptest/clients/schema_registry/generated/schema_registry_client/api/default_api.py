@@ -5593,11 +5593,7 @@ class DefaultApi:
         # set the HTTP header `Accept`
         if "Accept" not in _header_params:
             _header_params["Accept"] = self.api_client.select_header_accept(
-                [
-                    "application/vnd.schemaregistry.v1+json",
-                    "application/vnd.schemaregistry+json",
-                    "application/json",
-                ]
+                ["text/plain"]
             )
 
         # authentication setting
