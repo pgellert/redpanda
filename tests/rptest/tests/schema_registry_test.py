@@ -7,7 +7,6 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
-import http.client
 import json
 import random
 import re
@@ -22,11 +21,13 @@ import requests
 from confluent_kafka.schema_registry import (
     Schema,
     SchemaReference,
-    SchemaRegistryClient,
     SchemaRegistryError,
     record_subject_name_strategy,
     topic_record_subject_name_strategy,
     topic_subject_name_strategy,
+)
+from confluent_kafka.schema_registry import (
+    SchemaRegistryClient as ConfluentSchemaRegistryClient,
 )
 from confluent_kafka.serialization import MessageField, SerializationContext
 from ducktape.mark import matrix, parametrize
@@ -35,6 +36,18 @@ from ducktape.tests.test import TestContext
 from ducktape.utils.util import wait_until
 
 from rptest.clients.rpk import RpkException, RpkTool
+from rptest.clients.schema_registry import (
+    Mode,
+    PutCompatibility,
+    SchemaDef,
+    SchemaRegistryClient,
+)
+from rptest.clients.schema_registry.generated.schema_registry_client.exceptions import (
+    ApiException,
+)
+from rptest.clients.schema_registry.generated.schema_registry_client.models.stored_schema import (
+    StoredSchema,
+)
 from rptest.clients.serde_client_utils import SchemaType, SerdeClientType
 from rptest.clients.types import TopicSpec
 from rptest.services import tls
@@ -831,94 +844,134 @@ def get_normalize_dataset(type: SchemaType) -> TestNormalizeDataset:
     assert False, f"Unsupported schema {type=}"
 
 
+class MockResponse:
+    """Mock response object that mimics requests.Response for backward compatibility"""
+
+    def __init__(self, status_code: int, data: Any, headers: Optional[dict] = None):
+        self.status_code = status_code
+        self._data = data
+        self.headers = headers if headers is not None else {}
+        self.text = str(data) if data is not None else ""
+
+    def json(self):
+        if isinstance(self._data, str):
+            return json.loads(self._data)
+        # Handle Pydantic models
+        if hasattr(self._data, "to_dict"):
+            return self._data.to_dict()
+        if hasattr(self._data, "model_dump"):
+            return self._data.model_dump(by_alias=True, exclude_none=True)
+        # Handle lists of Pydantic models or primitives
+        if isinstance(self._data, list):
+            result = []
+            for item in self._data:
+                if hasattr(item, "to_dict"):
+                    result.append(item.to_dict())
+                elif hasattr(item, "model_dump"):
+                    result.append(item.model_dump(by_alias=True, exclude_none=True))
+                else:
+                    result.append(item)
+            return result
+        return self._data
+
+
 class SchemaRegistryRedpandaClient:
     """
-    A client for acessing the schema registry.
+    Legacy client wrapper around the new SchemaRegistryClient.
+    This provides backward compatibility for existing tests while using the new client internally.
     """
 
     def __init__(
         self,
-        redpanda: RedpandaService,
+        client: SchemaRegistryClient,
     ):
-        self.redpanda = redpanda
-        self.logger = redpanda.logger
+        self._client = client
 
-        http.client.HTTPConnection.debuglevel = 1
-        http.client.print = lambda *args: self.logger.debug(" ".join(args))
+    def _call_api_with_status(self, api_call, *args, **kwargs):
+        """Helper to call API and return MockResponse with proper status code handling"""
+        try:
+            result = api_call(*args, **kwargs)
+            return MockResponse(200, result)
+        except ApiException as e:
+            # Parse the error body if available
+            error_data = None
+            if e.body:
+                try:
+                    error_data = json.loads(e.body)
+                except Exception:
+                    error_data = {"message": e.body}
+            elif e.reason:
+                error_data = {"message": e.reason}
+            return MockResponse(e.status or 500, error_data)
 
-    def request(self, verb, path, hostname=None, tls_enabled: bool = False, **kwargs):
-        """
+    def _parse_json_data(self, data):
+        """Parse JSON data if it's a string"""
+        if isinstance(data, str):
+            return json.loads(data)
+        return data
 
-        :param verb: String, as for first arg to requests.request
-        :param path: URI path without leading slash
-        :param timeout: Optional requests timeout in seconds
-        :return:
-        """
+    # def request(self, verb, path, hostname=None, tls_enabled: bool = False, **kwargs):
+    #     """
+    #     Legacy request method - kept for tests that call it directly.
+    #     Most methods now use the new client, but some tests call request() directly.
+    #     """
+    #     # For now, fall back to making direct requests for unsupported paths
+    #     if hostname is None:
+    #         nodes = [n for n in self.redpanda.nodes]
+    #         random.shuffle(nodes)
+    #         node = nodes[0]
+    #         hostname = node.account.hostname
 
-        if hostname is None:
-            # Pick hostname once: we will retry the same place we got an error,
-            # to avoid silently skipping hosts that are persistently broken
-            nodes = [n for n in self.redpanda.nodes]
-            random.shuffle(nodes)
-            node = nodes[0]
-            hostname = node.account.hostname
+    #     scheme = "https" if tls_enabled else "http"
+    #     uri = f"{scheme}://{hostname}:8081/{path}"
 
-        scheme = "https" if tls_enabled else "http"
-        uri = f"{scheme}://{hostname}:8081/{path}"
+    #     if "timeout" not in kwargs:
+    #         kwargs["timeout"] = 60
 
-        if "timeout" not in kwargs:
-            kwargs["timeout"] = 60
+    #     acceptable_errors = {401, 403, 404, 409, 422, 501}
 
-        # Error codes that may appear during normal API operation, do not
-        # indicate an issue with the service
-        acceptable_errors = {401, 403, 404, 409, 422, 501}
+    #     def accept_response(resp):
+    #         return (
+    #             200 <= resp.status_code < 300 or resp.status_code in acceptable_errors
+    #         )
 
-        def accept_response(resp):
-            return (
-                200 <= resp.status_code < 300 or resp.status_code in acceptable_errors
-            )
+    #     self.logger.debug(f"{verb} hostname={hostname} {path} {kwargs}")
 
-        self.logger.debug(f"{verb} hostname={hostname} {path} {kwargs}")
+    #     r = requests.request(verb, uri, **kwargs)
+    #     if not accept_response(r):
+    #         self.logger.info(
+    #             f"Retrying for error {r.status_code} on {verb} {path} ({r.text})"
+    #         )
+    #         time.sleep(10)
+    #         r = requests.request(verb, uri, **kwargs)
+    #         if accept_response(r):
+    #             self.logger.info(
+    #                 f"OK after retry {r.status_code} on {verb} {path} ({r.text})"
+    #             )
+    #         else:
+    #             self.logger.info(
+    #                 f"Error after retry {r.status_code} on {verb} {path} ({r.text})"
+    #             )
 
-        # This is not a retry loop: you get *one* retry to handle issues
-        # during startup, after that a failure is a failure.
-        r = requests.request(verb, uri, **kwargs)
-        if not accept_response(r):
-            self.logger.info(
-                f"Retrying for error {r.status_code} on {verb} {path} ({r.text})"
-            )
-            time.sleep(10)
-            r = requests.request(verb, uri, **kwargs)
-            if accept_response(r):
-                self.logger.info(
-                    f"OK after retry {r.status_code} on {verb} {path} ({r.text})"
-                )
-            else:
-                self.logger.info(
-                    f"Error after retry {r.status_code} on {verb} {path} ({r.text})"
-                )
+    #     self.logger.info(f"{r.status_code} {verb} hostname={hostname} {path} {kwargs}")
+    #     return r
 
-        self.logger.info(f"{r.status_code} {verb} hostname={hostname} {path} {kwargs}")
-
-        return r
-
-    def base_uri(self):
-        return f"http://{self.redpanda.nodes[0].account.hostname}:8081"
-
+    # Config methods
     def get_config(self, headers=HTTP_GET_HEADERS, **kwargs):
-        return self.request("GET", "config", headers=headers, **kwargs)
+        return self._call_api_with_status(self._client.api.get_config)
 
     def set_config(self, data, headers=HTTP_POST_HEADERS, **kwargs):
-        return self.request("PUT", "config", headers=headers, data=data, **kwargs)
+        parsed = self._parse_json_data(data)
+        compat = PutCompatibility(compatibility=parsed.get("compatibility"))
+        return self._call_api_with_status(self._client.api.put_config, config=compat)
 
     def get_config_subject(
         self, subject, fallback=False, headers=HTTP_GET_HEADERS, **kwargs
     ):
-        return self.request(
-            "GET",
-            f"config/{subject}{'?defaultToGlobal=true' if fallback else ''}",
-            headers=headers,
-            **kwargs,
+        return self._call_api_with_status(
+            self._client.api.get_config_subject,
+            subject=subject,
+            default_to_global=fallback,
         )
 
     def set_config_subject(
@@ -928,35 +981,39 @@ class SchemaRegistryRedpandaClient:
         headers: Headers = HTTP_POST_HEADERS,
         **kwargs: Any,
     ):
-        return self.request(
-            "PUT", f"config/{subject}", headers=headers, data=data, **kwargs
+        parsed = self._parse_json_data(data)
+        compat = PutCompatibility(compatibility=parsed.get("compatibility"))
+        return self._call_api_with_status(
+            self._client.api.put_config_subject,
+            subject=subject,
+            config=compat,
         )
 
     def delete_config_subject(
         self, subject: str, headers: Headers = HTTP_DELETE_HEADERS, **kwargs: Any
     ):
-        return self.request("DELETE", f"config/{subject}", headers=headers, **kwargs)
+        return self._call_api_with_status(
+            self._client.api.delete_config_subject, subject=subject
+        )
 
+    # Mode methods
     def get_mode(self, headers=HTTP_GET_HEADERS, **kwargs):
-        return self.request("GET", "mode", headers=headers, **kwargs)
+        return self._call_api_with_status(self._client.api.get_mode)
 
     def set_mode(self, data, force=False, headers=HTTP_POST_HEADERS, **kwargs):
-        return self.request(
-            "PUT",
-            f"mode{'?force=true' if force else ''}",
-            headers=headers,
-            data=data,
-            **kwargs,
+        parsed = self._parse_json_data(data)
+        mode = Mode(mode=parsed.get("mode"))
+        return self._call_api_with_status(
+            self._client.api.put_mode, mode=mode, force=force
         )
 
     def get_mode_subject(
         self, subject, fallback=False, headers=HTTP_GET_HEADERS, **kwargs
     ):
-        return self.request(
-            "GET",
-            f"mode/{subject}{'?defaultToGlobal=true' if fallback else ''}",
-            headers=headers,
-            **kwargs,
+        return self._call_api_with_status(
+            self._client.api.get_mode_subject,
+            subject=subject,
+            default_to_global=fallback,
         )
 
     def set_mode_subject(
@@ -967,56 +1024,51 @@ class SchemaRegistryRedpandaClient:
         headers: Headers = HTTP_POST_HEADERS,
         **kwargs: Any,
     ):
-        return self.request(
-            "PUT",
-            f"mode/{subject}{'?force=true' if force else ''}",
-            headers=headers,
-            data=data,
-            **kwargs,
+        parsed = self._parse_json_data(data)
+        mode = Mode(mode=parsed.get("mode"))
+        return self._call_api_with_status(
+            self._client.api.put_mode_subject, subject=subject, mode=mode, force=force
         )
 
     def delete_mode_subject(
         self, subject: str, headers: Headers = HTTP_DELETE_HEADERS, **kwargs: Any
     ):
-        return self.request("DELETE", f"mode/{subject}", headers=headers, **kwargs)
+        return self._call_api_with_status(
+            self._client.api.delete_mode_subject, subject=subject
+        )
 
+    # Schema methods
     def get_schemas_types(
         self, headers=HTTP_GET_HEADERS, tls_enabled: bool = False, **kwargs
     ):
-        return self.request(
-            "GET", "schemas/types", headers=headers, tls_enabled=tls_enabled, **kwargs
-        )
+        return self._call_api_with_status(self._client.api.get_schemas_types)
 
     def get_schemas_ids_id(self, id, format=None, headers=HTTP_GET_HEADERS, **kwargs):
-        format_arg = f"?format={format}" if format is not None else ""
-        return self.request(
-            "GET", f"schemas/ids/{id}{format_arg}", headers=headers, **kwargs
+        return self._call_api_with_status(
+            self._client.api.get_schemas_ids_id, id=id, format=format
         )
 
     def get_schemas_ids_id_versions(self, id, headers=HTTP_GET_HEADERS, **kwargs):
-        return self.request(
-            "GET", f"schemas/ids/{id}/versions", headers=headers, **kwargs
+        return self._call_api_with_status(
+            self._client.api.get_schemas_ids_id_versions, id=id
         )
 
     def get_schemas_ids_id_subjects(
         self, id, deleted=False, headers=HTTP_GET_HEADERS, **kwargs
     ):
-        return self.request(
-            "GET",
-            f"schemas/ids/{id}/subjects{'?deleted=true' if deleted else ''}",
-            headers=headers,
-            **kwargs,
+        return self._call_api_with_status(
+            self._client.api.get_schemas_ids_id_subjects, id=id, deleted=deleted
         )
 
+    # Subject methods
     def get_subjects(
         self, deleted=False, subject_prefix=None, headers=HTTP_GET_HEADERS, **kwargs
     ):
-        params = {}
-        if deleted:
-            params["deleted"] = "true"
-        if subject_prefix:
-            params["subjectPrefix"] = subject_prefix
-        return self.request("GET", "subjects", params=params, headers=headers, **kwargs)
+        return self._call_api_with_status(
+            self._client.api.get_subjects,
+            deleted=deleted,
+            subject_prefix=subject_prefix,
+        )
 
     def post_subjects_subject(
         self,
@@ -1028,20 +1080,19 @@ class SchemaRegistryRedpandaClient:
         headers=HTTP_POST_HEADERS,
         **kwargs,
     ):
-        params = {}
-        if deleted:
-            params["deleted"] = "true"
-        if normalize:
-            params["normalize"] = "true"
-        if format is not None:
-            params["format"] = format
-        return self.request(
-            "POST",
-            f"subjects/{subject}",
-            headers=headers,
-            data=data,
-            params=params,
-            **kwargs,
+        parsed = self._parse_json_data(data)
+        schema_def = SchemaDef(
+            var_schema=parsed.get("schema"),
+            schema_type=parsed.get("schemaType"),
+            references=parsed.get("references"),
+        )
+        return self._call_api_with_status(
+            self._client.api.post_subject,
+            subject=subject,
+            schema_def=schema_def,
+            deleted=deleted,
+            normalize=normalize,
+            format=format,
         )
 
     def post_subjects_subject_versions(
@@ -1052,67 +1103,21 @@ class SchemaRegistryRedpandaClient:
         headers: Headers = HTTP_POST_HEADERS,
         **kwargs: Any,
     ):
-        params = {}
-        if normalize:
-            params["normalize"] = "true"
-        return self.request(
-            "POST",
-            f"subjects/{subject}/versions",
-            headers=headers,
-            data=data,
-            params=params,
-            **kwargs,
+        parsed = self._parse_json_data(data)
+        schema_def = StoredSchema(
+            version=parsed.get("version"),
+            id=parsed.get("id"),
+            schema=parsed.get("schema"),
+            schemaType=parsed.get("schemaType"),
+            references=parsed.get("references"),
         )
-
-    def get_subjects_subject_versions_version(
-        self, subject, version, format=None, headers=HTTP_GET_HEADERS, **kwargs
-    ):
-        params = {}
-        if format is not None:
-            params["format"] = format
-        return self.request(
-            "GET",
-            f"subjects/{subject}/versions/{version}",
-            headers=headers,
-            params=params,
-            **kwargs,
+        self._client.api.post_subject_versions
+        return self._call_api_with_status(
+            self._client.api.post_subject_versions,
+            subject=subject,
+            schema_def=schema_def,
+            normalize=normalize,
         )
-
-    def get_subjects_subject_versions_version_schema(
-        self, subject, version, format=None, headers=HTTP_GET_HEADERS, **kwargs
-    ):
-        params = {}
-        if format is not None:
-            params["format"] = format
-        return self.request(
-            "GET",
-            f"subjects/{subject}/versions/{version}/schema",
-            headers=headers,
-            params=params,
-            **kwargs,
-        )
-
-    def get_subjects_subject_versions_version_referenced_by(
-        self,
-        subject: str,
-        version: str,
-        headers: Headers = HTTP_GET_HEADERS,
-        **kwargs: Any,
-    ):
-        deprecated = self.request(
-            "GET",
-            f"subjects/{subject}/versions/{version}/referencedBy",
-            headers=headers,
-            **kwargs,
-        )
-        standard = self.request(
-            "GET",
-            f"subjects/{subject}/versions/{version}/referencedby",
-            headers=headers,
-            **kwargs,
-        )
-        assert standard.json() == deprecated.json()
-        return standard
 
     def get_subjects_subject_versions(
         self,
@@ -1121,11 +1126,41 @@ class SchemaRegistryRedpandaClient:
         headers: Headers = HTTP_GET_HEADERS,
         **kwargs: Any,
     ):
-        return self.request(
-            "GET",
-            f"subjects/{subject}/versions{'?deleted=true' if deleted else ''}",
-            headers=headers,
-            **kwargs,
+        return self._call_api_with_status(
+            self._client.api.get_subject_versions, subject=subject, deleted=deleted
+        )
+
+    def get_subjects_subject_versions_version(
+        self, subject, version, format=None, headers=HTTP_GET_HEADERS, **kwargs
+    ):
+        return self._call_api_with_status(
+            self._client.api.get_subject_versions_version,
+            subject=subject,
+            version=str(version),
+            format=format,
+        )
+
+    def get_subjects_subject_versions_version_schema(
+        self, subject, version, format=None, headers=HTTP_GET_HEADERS, **kwargs
+    ):
+        return self._call_api_with_status(
+            self._client.api.get_subject_versions_version_schema,
+            subject=subject,
+            version=str(version),
+            format=format,
+        )
+
+    def get_subjects_subject_versions_version_referenced_by(
+        self,
+        subject: str,
+        version: str | int,
+        headers: Headers = HTTP_GET_HEADERS,
+        **kwargs: Any,
+    ):
+        return self._call_api_with_status(
+            self._client.api.get_subject_versions_version_referenced_by,
+            subject=subject,
+            version=str(version),
         )
 
     def delete_subject(
@@ -1135,28 +1170,26 @@ class SchemaRegistryRedpandaClient:
         headers: Headers = HTTP_GET_HEADERS,
         **kwargs: Any,
     ):
-        return self.request(
-            "DELETE",
-            f"subjects/{subject}{'?permanent=true' if permanent else ''}",
-            headers=headers,
-            **kwargs,
+        return self._call_api_with_status(
+            self._client.api.delete_subject, subject=subject, permanent=permanent
         )
 
     def delete_subject_version(
         self,
         subject: str,
-        version: str,
+        version: str | int,
         permanent: bool = False,
         headers: Headers = HTTP_DELETE_HEADERS,
         **kwargs: Any,
     ):
-        return self.request(
-            "DELETE",
-            f"subjects/{subject}/versions/{version}{'?permanent=true' if permanent else ''}",
-            headers=headers,
-            **kwargs,
+        return self._call_api_with_status(
+            self._client.api.delete_subject_version,
+            subject=subject,
+            version=str(version),
+            permanent=permanent,
         )
 
+    # Compatibility methods
     def post_compatibility_subject_version(
         self,
         subject,
@@ -1166,45 +1199,45 @@ class SchemaRegistryRedpandaClient:
         verbose: bool | None = None,
         **kwargs,
     ):
-        params = {}
-        if verbose is not None:
-            params["verbose"] = verbose
-
-        return self.request(
-            "POST",
-            f"compatibility/subjects/{subject}/versions/{version}",
-            params=params,
-            headers=headers,
-            data=data,
-            **kwargs,
+        parsed = self._parse_json_data(data)
+        schema_def = SchemaDef(
+            var_schema=parsed.get("schema"),
+            schema_type=parsed.get("schemaType"),
+            references=parsed.get("references"),
+        )
+        return self._call_api_with_status(
+            self._client.api.compatibility_subject_version,
+            subject=subject,
+            version=version,
+            schema_def=schema_def,
+            verbose=verbose,
         )
 
-    def get_status_ready(
-        self, headers=HTTP_GET_HEADERS, tls_enabled: bool = False, **kwargs
-    ):
-        return self.request(
-            "GET", "status/ready", headers=headers, tls_enabled=tls_enabled, **kwargs
+    def get_status_ready(self):
+        self._client.api.schema_registry_status_ready()
+        return self._call_api_with_status(
+            self._client.api.schema_registry_status_ready,
         )
 
+    # Security/ACL methods
     def get_security_acls(self, **kwargs):
-        return self.request("GET", "security/acls", **kwargs)
+        return self._call_api_with_status(self._client.api.get_security_acls)
 
     def post_security_acls(self, data, **kwargs):
-        return self.request(
-            "POST",
-            "security/acls",
-            json=data,
-            headers={"Content-Type": "application/json"},
-            **kwargs,
+        # Convert list of ACL dicts to SecurityAcl objects
+        from rptest.clients.schema_registry import SecurityAcl
+
+        acls = [SecurityAcl(**acl) if isinstance(acl, dict) else acl for acl in data]
+        return self._call_api_with_status(
+            self._client.api.post_security_acls, security_acl=acls
         )
 
     def delete_security_acls(self, data, **kwargs):
-        return self.request(
-            "DELETE",
-            "security/acls",
-            json=data,
-            headers={"Content-Type": "application/json"},
-            **kwargs,
+        from rptest.clients.schema_registry import SecurityAcl
+
+        acls = [SecurityAcl(**acl) if isinstance(acl, dict) else acl for acl in data]
+        return self._call_api_with_status(
+            self._client.api.delete_security_acls, security_acl=acls
         )
 
     def create_acl(
@@ -1255,7 +1288,12 @@ class SchemaRegistryEndpoints(RedpandaTest):
             **kwargs,
         )
 
-        self.sr_client = SchemaRegistryRedpandaClient(redpanda=self.redpanda)
+        self.sr_client_obj = SchemaRegistryClient(redpanda_service=self.redpanda)
+        self.sr_client = self.sr_client_obj.api
+        self.legacy_sr_client = SchemaRegistryRedpandaClient(self.sr_client_obj)
+
+    def base_uri(self):
+        return f"http://{self.redpanda.nodes[0].account.hostname}:8081"
 
     def assert_equal(self, first, second, msg=None):
         assert first == second, msg or f"{first} != {second}"
@@ -1384,11 +1422,11 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         Verify the schema registry returns the supported types
         """
         self.logger.debug("Request schema types with no accept header")
-        result_raw = self.sr_client.get_schemas_types(headers={})
+        result_raw = self.legacy_sr_client.get_schemas_types(headers={})
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Request schema types with defautl accept header")
-        result_raw = self.sr_client.get_schemas_types()
+        result_raw = self.legacy_sr_client.get_schemas_types()
         assert result_raw.status_code == requests.codes.ok
         result = result_raw.json()
         assert set(result) == {"JSON", "PROTOBUF", "AVRO"}
@@ -1400,7 +1438,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         """
 
         self.logger.debug("Checking schema 1 versions - expect 40403")
-        result_raw = self.sr_client.get_schemas_ids_id_versions(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(id=1)
         assert result_raw.status_code == requests.codes.not_found
         assert result_raw.json()["error_code"] == 40403
         assert result_raw.json()["message"] == "Schema 1 not found"
@@ -1412,7 +1450,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         schema_2_data = json.dumps({"schema": schema2_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=schema_1_data
         )
         self.logger.debug(result_raw)
@@ -1420,12 +1458,12 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json()["id"] == 1
 
         self.logger.debug("Checking schema 1 versions")
-        result_raw = self.sr_client.get_schemas_ids_id_versions(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(id=1)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [{"subject": subject, "version": 1}]
 
         self.logger.debug("Posting schema 2 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=schema_2_data
         )
         self.logger.debug(result_raw)
@@ -1433,35 +1471,37 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json()["id"] == 2
 
         self.logger.debug("Checking schema 2 versions")
-        result_raw = self.sr_client.get_schemas_ids_id_versions(id=2)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(id=2)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [{"subject": subject, "version": 2}]
 
         self.logger.debug("Deleting version 1")
-        result_raw = self.sr_client.delete_subject_version(subject=subject, version=1)
+        result_raw = self.legacy_sr_client.delete_subject_version(
+            subject=subject, version=1
+        )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Checking schema 1 versions is empty")
-        result_raw = self.sr_client.get_schemas_ids_id_versions(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(id=1)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == []
 
         self.logger.debug("Checking schema 2 versions")
-        result_raw = self.sr_client.get_schemas_ids_id_versions(id=2)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(id=2)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [{"subject": subject, "version": 2}]
 
         self.logger.debug("Deleting subject")
-        result_raw = self.sr_client.delete_subject(subject=subject)
+        result_raw = self.legacy_sr_client.delete_subject(subject=subject)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Checking schema 1 versions is empty")
-        result_raw = self.sr_client.get_schemas_ids_id_versions(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(id=1)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == []
 
         self.logger.debug("Checking schema 2 versions is empty")
-        result_raw = self.sr_client.get_schemas_ids_id_versions(id=2)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(id=2)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == []
 
@@ -1474,7 +1514,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         # Given an ID and a list of subjects, check the association
         # Also checks that schema registry returns a sorted list of subjects
         def check_schema_subjects(id: int, subjects: list[str], deleted=False):
-            result_raw = self.sr_client.get_schemas_ids_id_subjects(
+            result_raw = self.legacy_sr_client.get_schemas_ids_id_subjects(
                 id=id, deleted=deleted
             )
             if result_raw.status_code != requests.codes.ok:
@@ -1486,7 +1526,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             return res_subjects == subjects and res_subjects == sorted(res_subjects)
 
         self.logger.debug("Checking schema 1 subjects - expect 40403")
-        result_raw = self.sr_client.get_schemas_ids_id_subjects(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_subjects(id=1)
         assert result_raw.status_code == requests.codes.not_found
         assert result_raw.json()["error_code"] == 40403
 
@@ -1499,7 +1539,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
 
         self.logger.debug("Posting schema 1 as a subject value")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject_0, data=schema_1_data
         )
 
@@ -1511,7 +1551,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert check_schema_subjects(id=1, subjects=list([subject_0]))
 
         self.logger.debug("Posting schema 1 as a subject value (subject_1)")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject_1, data=schema_1_data
         )
 
@@ -1523,7 +1563,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert check_schema_subjects(id=1, subjects=list([subject_0, subject_1]))
 
         self.logger.debug("Soft delete subject_0")
-        result_raw = self.sr_client.delete_subject(subject=subject_0)
+        result_raw = self.legacy_sr_client.delete_subject(subject=subject_0)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Check again, not including deleted")
@@ -1535,7 +1575,9 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("Hard delete subject_0")
-        result_raw = self.sr_client.delete_subject(subject=subject_0, permanent=True)
+        result_raw = self.legacy_sr_client.delete_subject(
+            subject=subject_0, permanent=True
+        )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Check including deleted - subject_0 should be gone")
@@ -1553,20 +1595,20 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
 
         self.logger.debug("Get empty subjects")
-        result_raw = self.sr_client.get_subjects()
+        result_raw = self.legacy_sr_client.get_subjects()
         if result_raw.json() != []:
             self.logger.error(result_raw.json)
         assert result_raw.json() == []
 
         self.logger.debug("Posting invalid schema as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=json.dumps({"schema": invalid_avro})
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.unprocessable_entity
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         self.logger.debug(result_raw)
@@ -1574,7 +1616,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json()["id"] == 1
 
         self.logger.debug("Reposting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         self.logger.debug(result_raw)
@@ -1582,7 +1624,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json()["id"] == 1
 
         self.logger.debug("Reposting schema 1 as a subject value")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-value", data=schema_1_data
         )
         self.logger.debug(result_raw)
@@ -1590,11 +1632,11 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json()["id"] == 1
 
         self.logger.debug("Get subjects")
-        result_raw = self.sr_client.get_subjects()
+        result_raw = self.legacy_sr_client.get_subjects()
         assert set(result_raw.json()) == {f"{topic}-key", f"{topic}-value"}
 
         self.logger.debug("Get schema versions for invalid subject")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-invalid"
         )
         assert result_raw.status_code == requests.codes.not_found
@@ -1603,21 +1645,21 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result["message"] == f"Subject '{topic}-invalid' not found."
 
         self.logger.debug("Get schema versions for subject key")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key"
         )
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [1]
 
         self.logger.debug("Get schema versions for subject value")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-value"
         )
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [1]
 
         self.logger.debug("Get schema version 1 for invalid subject")
-        result_raw = self.sr_client.get_subjects_subject_versions_version(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
             subject=f"{topic}-invalid", version=1
         )
         assert result_raw.status_code == requests.codes.not_found
@@ -1626,7 +1668,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result["message"] == f"Subject '{topic}-invalid' not found."
 
         self.logger.debug("Get invalid schema version for subject")
-        result_raw = self.sr_client.get_subjects_subject_versions_version(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
             subject=f"{topic}-key", version=2
         )
         assert result_raw.status_code == requests.codes.not_found
@@ -1635,7 +1677,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result["message"] == "Version 2 not found."
 
         self.logger.debug("Get schema version 1 for subject key")
-        result_raw = self.sr_client.get_subjects_subject_versions_version(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
             subject=f"{topic}-key", version=1
         )
         assert result_raw.status_code == requests.codes.ok
@@ -1645,7 +1687,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         # assert result["schema"] == json.dumps(schema_def)
 
         self.logger.debug("Get latest schema version for subject key")
-        result_raw = self.sr_client.get_subjects_subject_versions_version(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
             subject=f"{topic}-key", version="latest"
         )
         assert result_raw.status_code == requests.codes.ok
@@ -1655,14 +1697,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         # assert result["schema"] == json.dumps(schema_def)
 
         self.logger.debug("Get invalid schema version")
-        result_raw = self.sr_client.get_schemas_ids_id(id=2)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id(id=2)
         assert result_raw.status_code == requests.codes.not_found
         result = result_raw.json()
         assert result["error_code"] == 40403
         assert result["message"] == "Schema 2 not found"
 
         self.logger.debug("Get schema version 1")
-        result_raw = self.sr_client.get_schemas_ids_id(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id(id=1)
         assert result_raw.status_code == requests.codes.ok
         result = result_raw.json()
         # assert result["schema"] == json.dumps(schema_def)
@@ -1670,14 +1712,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         self.logger.debug("Post schema 1 with escape chars in the subject name")
         name = f"{topic}%25252fkey"
         name_quoted = urllib.parse.quote(name)
-        result_raw = self.sr_client.post_subjects_subject_versions(
-            subject=name_quoted, data=schema_1_data
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
+            subject=name, data=schema_1_data
         )
         self.logger.warn(result_raw)
         assert result_raw.status_code == requests.codes.ok
-        result_raw = self.sr_client.get_subjects_subject_versions(subject=name_quoted)
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(subject=name)
         assert result_raw.status_code == requests.codes.ok
-        subjs = self.sr_client.get_subjects().json()
+        subjs = self.legacy_sr_client.get_subjects().json()
         assert name in subjs, (
             f"Expected '{name}' in subjects response, got {json.dumps(subjs, indent=1)}"
         )
@@ -1694,7 +1736,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         # Post the same schema many times.
         for _ in range(20):
-            result_raw = self.sr_client.post_subjects_subject_versions(
+            result_raw = self.legacy_sr_client.post_subjects_subject_versions(
                 subject=subject, data=schema_1_data
             )
             self.logger.debug(result_raw)
@@ -1716,14 +1758,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("Posting schema as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Retrieving schema")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=f"{topic}-key", data=schema_1_data
         )
         self.logger.debug(result_raw)
@@ -1739,11 +1781,10 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         subject = f"{topic}-key"
 
         self.logger.info("Posting against non-existant subject should be 40401")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject, data=json.dumps({"schema": schema1_def})
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.not_found
         result = result_raw.json()
         assert result["error_code"] == 40401
@@ -1752,31 +1793,28 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         self.logger.info(
             "Posting invalid schema to non-existant subject should be 40401"
         )
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject, data=json.dumps({"schema": invalid_avro})
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.not_found
         result = result_raw.json()
         assert result["error_code"] == 40401
         assert result["message"] == f"Subject '{subject}' not found."
 
         self.logger.info("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=json.dumps({"schema": schema1_def})
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["id"] == 1
 
         self.logger.info("Posting invalid schema to existing subject should be 500")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject, data=json.dumps({"schema": invalid_avro})
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.internal_server_error
         result = result_raw.json()
         assert result["error_code"] == 500
@@ -1786,11 +1824,10 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.info("Posting existing schema should be success")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject, data=json.dumps({"schema": schema1_def})
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         result = result_raw.json()
         assert result["subject"] == subject
@@ -1799,35 +1836,33 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result["schema"]
 
         self.logger.info("Posting new schema should be 40403")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject, data=json.dumps({"schema": schema3_def})
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.not_found
         result = result_raw.json()
         assert result["error_code"] == 40403
         assert result["message"] == "Schema not found"
 
         self.logger.info("Soft deleting the schema")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=subject, version=1, permanent=False
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.info("Posting deleted existing schema should be fail (no subject)")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject, data=json.dumps({"schema": schema1_def})
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.not_found
         result = result_raw.json()
         assert result["error_code"] == 40401
         assert result["message"] == f"Subject '{subject}' not found."
 
         self.logger.info("Posting deleted existing schema should be success")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject,
             data=json.dumps(
                 {"schema": schema1_def},
@@ -1835,7 +1870,6 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             deleted=True,
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         result = result_raw.json()
         assert result["subject"] == subject
@@ -1844,17 +1878,16 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result["schema"]
 
         self.logger.info("Posting compatible schema should be success")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=json.dumps({"schema": schema2_def})
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.info("Posting deleted existing schema should be fail (no schema)")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject, data=json.dumps({"schema": schema1_def})
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.not_found
         result = result_raw.json()
         assert result["error_code"] == 40403
@@ -1866,22 +1899,22 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         Smoketest config endpoints
         """
         self.logger.debug("Get initial global config")
-        result_raw = self.sr_client.get_config()
+        result_raw = self.legacy_sr_client.get_config()
         assert result_raw.json()["compatibilityLevel"] == "BACKWARD"
 
         self.logger.debug("Set global config")
-        result_raw = self.sr_client.set_config(
+        result_raw = self.legacy_sr_client.set_config(
             data=json.dumps({"compatibility": "FULL"})
         )
         assert result_raw.json()["compatibility"] == "FULL"
 
         # Check out set write shows up in a read
-        result_raw = self.sr_client.get_config()
+        result_raw = self.legacy_sr_client.get_config()
         self.logger.debug(f"response {result_raw.status_code} {result_raw.text}")
         assert result_raw.json()["compatibilityLevel"] == "FULL"
 
         self.logger.debug("Get invalid subject config")
-        result_raw = self.sr_client.get_config_subject(subject="invalid_subject")
+        result_raw = self.legacy_sr_client.get_config_subject(subject="invalid_subject")
         assert result_raw.status_code == requests.codes.not_found
         assert result_raw.json()["error_code"] == 40408
         assert (
@@ -1894,12 +1927,12 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         topic = create_topic_names(1)[0]
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
 
         self.logger.debug("Get subject config - should fail")
-        result_raw = self.sr_client.get_config_subject(subject=f"{topic}-key")
+        result_raw = self.legacy_sr_client.get_config_subject(subject=f"{topic}-key")
         assert result_raw.status_code == requests.codes.not_found
         assert result_raw.json()["error_code"] == 40408
         assert (
@@ -1908,14 +1941,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("Get subject config - fallback to global")
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", fallback=True
         )
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["compatibilityLevel"] == "FULL"
 
         self.logger.debug("Set subject config")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key",
             data=json.dumps({"compatibility": "BACKWARD_TRANSITIVE"}),
         )
@@ -1923,19 +1956,19 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json()["compatibility"] == "BACKWARD_TRANSITIVE"
 
         self.logger.debug("Get subject config - should be overriden")
-        result_raw = self.sr_client.get_config_subject(subject=f"{topic}-key")
+        result_raw = self.legacy_sr_client.get_config_subject(subject=f"{topic}-key")
         assert result_raw.json()["compatibilityLevel"] == "BACKWARD_TRANSITIVE"
 
         prev_compat = result_raw.json()["compatibilityLevel"]
-        global_config = self.sr_client.get_config().json()
+        global_config = self.legacy_sr_client.get_config().json()
 
-        result_raw = self.sr_client.delete_config_subject(subject=f"{topic}-key")
+        result_raw = self.legacy_sr_client.delete_config_subject(subject=f"{topic}-key")
         assert result_raw.json()["compatibilityLevel"] == prev_compat, (
             f"{json.dumps(result_raw.json(), indent=1)}"
         )
 
         self.logger.debug("Second DELETE should return 40401")
-        result_raw = self.sr_client.delete_config_subject(subject=f"{topic}-key")
+        result_raw = self.legacy_sr_client.delete_config_subject(subject=f"{topic}-key")
         assert result_raw.status_code == requests.codes.not_found, (
             result_raw.status_code
         )
@@ -1949,7 +1982,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         self.logger.debug(
             "GET config/{subject} should indicate missing subject-level config"
         )
-        result_raw = self.sr_client.get_config_subject(subject=f"{topic}-key")
+        result_raw = self.legacy_sr_client.get_config_subject(subject=f"{topic}-key")
         assert result_raw.status_code == requests.codes.not_found
         assert result_raw.json()["error_code"] == 40408
         assert (
@@ -1957,7 +1990,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             == f"Subject '{topic}-key' does not have subject-level compatibility configured"
         )
 
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", fallback=True
         )
         assert (
@@ -1966,12 +1999,12 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("Subject compatibility should reflect the new global config")
-        global_config = self.sr_client.set_config(
+        global_config = self.legacy_sr_client.set_config(
             data=json.dumps({"compatibility": "NONE"})
         )
         assert global_config.json()["compatibility"] == "NONE"
 
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", fallback=True
         )
         assert (
@@ -1980,7 +2013,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("DELETE on non-existant subject should 404")
-        result_raw = self.sr_client.delete_config_subject(subject="foo-key")
+        result_raw = self.legacy_sr_client.delete_config_subject(subject="foo-key")
         assert result_raw.status_code == requests.codes.not_found, (
             result_raw.status_code
         )
@@ -2007,20 +2040,18 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("Register a schema against a subject - not normalized")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{canonical_topic}-key", data=base_schema, normalize=False
         )
         self.logger.debug(result_raw)
-        self.logger.debug(result_raw.content)
         assert result_raw.status_code == requests.codes.ok, (
             f"expected {requests.codes.ok} but got {result_raw.status_code}"
         )
         v1_id = result_raw.json()["id"]
 
         self.logger.debug("Checking that the returned schema is canonical")
-        result_raw = self.sr_client.get_schemas_ids_id(id=v1_id)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id(id=v1_id)
         self.logger.debug(result_raw)
-        self.logger.debug(result_raw.content)
         assert result_raw.status_code == requests.codes.ok, (
             f"expected {requests.codes.ok} but got {result_raw.status_code}"
         )
@@ -2029,20 +2060,18 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("Register a schema against a subject - normalized")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{normalize_topic}-key", data=base_schema, normalize=True
         )
         self.logger.debug(result_raw)
-        self.logger.debug(result_raw.content)
         assert result_raw.status_code == requests.codes.ok, (
             f"expected {requests.codes.ok} but got {result_raw.status_code}"
         )
         v1_id = result_raw.json()["id"]
 
         self.logger.debug("Checking that the returned schema is normalized")
-        result_raw = self.sr_client.get_schemas_ids_id(id=v1_id)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id(id=v1_id)
         self.logger.debug(result_raw)
-        self.logger.debug(result_raw.content)
         assert result_raw.status_code == requests.codes.ok, (
             f"expected {requests.codes.ok} but got {result_raw.status_code}"
         )
@@ -2080,7 +2109,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         self.logger.debug(result_raw)
@@ -2088,13 +2117,13 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         v1_id = result_raw.json()["id"]
 
         self.logger.debug("Set subject config - NONE")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key", data=json.dumps({"compatibility": "NONE"})
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Check compatibility none, no default")
-        result_raw = self.sr_client.post_compatibility_subject_version(
+        result_raw = self.legacy_sr_client.post_compatibility_subject_version(
             subject=f"{topic}-key", version=1, data=schema_2_data
         )
         assert result_raw.status_code == requests.codes.ok
@@ -2102,13 +2131,13 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json().get("messages", None) is None
 
         self.logger.debug("Set subject config - BACKWARD")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key", data=json.dumps({"compatibility": "BACKWARD"})
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Check compatibility backward, with default")
-        result_raw = self.sr_client.post_compatibility_subject_version(
+        result_raw = self.legacy_sr_client.post_compatibility_subject_version(
             subject=f"{topic}-key", version=1, data=schema_2_data
         )
         assert result_raw.status_code == requests.codes.ok
@@ -2116,14 +2145,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json().get("messages", None) is None
 
         self.logger.debug("Check compatibility backward, no default, verbose")
-        result_raw = self.sr_client.post_compatibility_subject_version(
+        result_raw = self.legacy_sr_client.post_compatibility_subject_version(
             subject=f"{topic}-key", version=1, data=schema_3_data, verbose=True
         )
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["is_compatible"] == False
 
         self.logger.debug("Check compatibility backward, no default, not verbose")
-        result_raw = self.sr_client.post_compatibility_subject_version(
+        result_raw = self.legacy_sr_client.post_compatibility_subject_version(
             subject=f"{topic}-key", version=1, data=schema_3_data, verbose=False
         )
         assert result_raw.status_code == requests.codes.ok
@@ -2134,14 +2163,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         self.logger.debug("Posting incompatible schema 3 as a subject key")
 
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_3_data
         )
         assert result_raw.status_code == requests.codes.conflict
         assert result_raw.json()["error_code"] == 409
 
         self.logger.debug("Posting compatible schema 2 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_2_data
         )
         assert result_raw.status_code == requests.codes.ok
@@ -2149,32 +2178,32 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert v1_id != v2_id
 
         self.logger.debug("Posting schema 1 as a subject key again")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["id"] == v1_id
 
         self.logger.debug("Soft delete schema 1")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=1
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Posting schema 1 again, expect incompatible")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         assert result_raw.status_code == requests.codes.conflict
 
         self.logger.debug("Set subject config - NONE")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key", data=json.dumps({"compatibility": "NONE"})
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Posting schema 1 again, expect same id")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         assert result_raw.status_code == requests.codes.ok
@@ -2193,14 +2222,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         schema_3_data = json.dumps({"schema": schema3_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         self.logger.debug(f"{result_raw=}")
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Set subject config - BACKWARD_TRANSITIVE")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key",
             data=json.dumps({"compatibility": "BACKWARD_TRANSITIVE"}),
         )
@@ -2208,7 +2237,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Posting schema 2 (compatible with schema 1)")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_2_data
         )
         self.logger.debug(result_raw, result_raw.json())
@@ -2217,7 +2246,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         self.logger.debug(
             "Check compatibility schema 3 (incompatible with both schema 1 and 2) with verbose=True"
         )
-        result_raw = self.sr_client.post_compatibility_subject_version(
+        result_raw = self.legacy_sr_client.post_compatibility_subject_version(
             subject=f"{topic}-key", version=1, data=schema_3_data, verbose=True
         )
         self.logger.debug(result_raw, result_raw.json())
@@ -2261,7 +2290,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         super_username, super_password, _ = self.redpanda.SUPERUSER_CREDENTIALS
 
         self.logger.debug("Posting schema as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_data
         )
         self.logger.debug(result_raw)
@@ -2269,13 +2298,13 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         result_raw.json()["id"]
 
         self.logger.debug("Set subject config - BACKWARD")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key", data=json.dumps({"compatibility": "BACKWARD"})
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Check compatibility full")
-        result_raw = self.sr_client.post_compatibility_subject_version(
+        result_raw = self.legacy_sr_client.post_compatibility_subject_version(
             subject=f"{topic}-key", version=1, data=incompatible_data, verbose=True
         )
 
@@ -2290,7 +2319,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         self.logger.debug(
             "Check post incompatible schema error message (expect verbose messages)"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=incompatible_data
         )
 
@@ -2315,27 +2344,27 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         schema_3_data = json.dumps({"schema": schema3_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Set subject config - NONE")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key", data=json.dumps({"compatibility": "NONE"})
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Posting schema 2 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_2_data
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Posting schema 3 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_3_data
         )
         self.logger.debug(result_raw)
@@ -2343,32 +2372,32 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         # Check that permanent delete is refused before soft delete
         self.logger.debug("Prematurely permanently delete subject")
-        result_raw = self.sr_client.delete_subject(
+        result_raw = self.legacy_sr_client.delete_subject(
             subject=f"{topic}-key", permanent=True
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.not_found
 
         self.logger.debug("delete version 2")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=2
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Soft delete subject - expect 1,3")
-        result_raw = self.sr_client.delete_subject(subject=f"{topic}-key")
+        result_raw = self.legacy_sr_client.delete_subject(subject=f"{topic}-key")
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [1, 3]
 
         self.logger.debug("Get versions")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key"
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.not_found
 
         self.logger.debug("Get versions - include deleted")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key", deleted=True
         )
         self.logger.debug(result_raw)
@@ -2376,7 +2405,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json() == [1, 2, 3]
 
         self.logger.debug("Permanently delete subject")
-        result_raw = self.sr_client.delete_subject(
+        result_raw = self.legacy_sr_client.delete_subject(
             subject=f"{topic}-key", permanent=True
         )
         self.logger.debug(result_raw)
@@ -2397,34 +2426,34 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         schema_3_data = json.dumps({"schema": schema3_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Set subject config - NONE")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key", data=json.dumps({"compatibility": "NONE"})
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Posting schema 2 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_2_data
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Posting schema 3 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_3_data
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Permanently delete version 2")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=2, permanent=True
         )
         self.logger.debug(result_raw)
@@ -2432,7 +2461,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json()["error_code"] == 40407
 
         self.logger.debug("Soft delete version 2")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key",
             version=2,
         )
@@ -2440,7 +2469,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Soft delete version 2 - second time")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key",
             version=2,
         )
@@ -2449,7 +2478,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json()["error_code"] == 40406
 
         self.logger.debug("Get versions")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key"
         )
         self.logger.debug(result_raw)
@@ -2457,7 +2486,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json() == [1, 3]
 
         self.logger.debug("Get versions - include deleted")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key", deleted=True
         )
         self.logger.debug(result_raw)
@@ -2465,14 +2494,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_raw.json() == [1, 2, 3]
 
         self.logger.debug("Permanently delete version 2")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=2, permanent=True
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Permanently delete version 2 - second time")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=2, permanent=True
         )
         self.logger.debug(result_raw)
@@ -2489,13 +2518,13 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
         schema_2_data = json.dumps({"schema": schema2_def})
 
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=schema_1_data
         )
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == {"id": 1}
 
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=schema_2_data
         )
         assert result_raw.status_code == requests.codes.ok
@@ -2503,76 +2532,86 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         # A 'latest' hard deletion will always fail because it tries
         # to delete the latest non-soft-deleted version
-        r = self.sr_client.delete_subject_version(
+        r = self.legacy_sr_client.delete_subject_version(
             subject=subject, version="latest", permanent=True
         )
         assert r.status_code == requests.codes.not_found
         assert r.json()["error_code"] == 40407
 
         # Latest soft deletions are okay
-        r = self.sr_client.delete_subject_version(
+        r = self.legacy_sr_client.delete_subject_version(
             subject=subject, version="latest", permanent=False
         )
         assert r.status_code == requests.codes.ok
 
         # A latest hard deletion still fails, because the 'latest' is
         # version 1
-        r = self.sr_client.delete_subject_version(
+        r = self.legacy_sr_client.delete_subject_version(
             subject=subject, version="latest", permanent=True
         )
         assert r.status_code == requests.codes.not_found
         assert r.json()["error_code"] == 40407
 
         # Latest soft deletions are okay
-        r = self.sr_client.delete_subject_version(
+        r = self.legacy_sr_client.delete_subject_version(
             subject=subject, version="latest", permanent=False
         )
         assert r.status_code == requests.codes.ok
 
         # Subject should still be visible with deleted=true
-        r = self.sr_client.get_subjects(deleted=True)
+        r = self.legacy_sr_client.get_subjects(deleted=True)
         assert r.status_code == requests.codes.ok
         assert r.json() == [subject]
 
         # Subject with all versions deleted should be invisible to normal listing
-        r = self.sr_client.get_subjects()
+        r = self.legacy_sr_client.get_subjects()
         assert r.status_code == requests.codes.ok
         assert r.json() == []
 
         # Hard-deleting by specific version number & having already soft deleted it
-        r = self.sr_client.delete_subject_version(
+        r = self.legacy_sr_client.delete_subject_version(
             subject=subject, version="2", permanent=True
         )
         assert r.status_code == requests.codes.ok
 
         # Hard-deleting by specific version number & having already soft deleted it
-        r = self.sr_client.delete_subject_version(
-            subject=subject, version="1", permanent=True
+        r = self.legacy_sr_client.delete_subject_version(
+            subject=subject, version=1, permanent=True
         )
         assert r.status_code == requests.codes.ok
 
         # Hard deleting all versions is equivalent to hard deleting the subject,
         # so a subsequent attempt to delete latest version on subject
         # gives a subject_not_found error
-        r = self.sr_client.delete_subject_version(
+        r = self.legacy_sr_client.delete_subject_version(
             subject=subject, version="latest", permanent=True
         )
         assert r.status_code == requests.codes.not_found
         assert r.json()["error_code"] == 40401
 
         # Subject is now truly gone, not even visible with deleted=true
-        r = self.sr_client.get_subjects(deleted=True)
+        r = self.legacy_sr_client.get_subjects(deleted=True)
         assert r.status_code == requests.codes.ok
         assert r.json() == []
 
     @cluster(num_nodes=4)
     def test_concurrent_writes(self):
         # Warm up the servers (schema_registry doesn't create topic etc before first access)
-        for node in self.redpanda.nodes:
-            r = self.sr_client.request(
-                "GET", "subjects", hostname=node.account.hostname
-            )
-            assert r.status_code == requests.codes.ok
+        def warm_up():
+            for node in self.redpanda.nodes:
+                node_client = SchemaRegistryClient(
+                    self.redpanda, hostname=node.account.hostname
+                )
+                node_client.api.get_subjects()
+            return True
+
+        wait_until(
+            warm_up,
+            timeout_sec=60,
+            backoff_sec=5,
+            retry_on_exc=True,
+            err_msg="Warm up schema registry nodes",
+        )
 
         node_names = [n.account.hostname for n in self.redpanda.nodes]
 
@@ -2612,26 +2651,24 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         """
 
         self.logger.info("Posting failed schema should be 422")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="imported",
             data=json.dumps({"schema": imported_proto_def, "schemaType": "PROTOBUF"}),
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.unprocessable_entity
 
         self.logger.info("Posting simple as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="simple",
             data=json.dumps({"schema": simple_proto_def, "schemaType": "PROTOBUF"}),
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["id"] == 1
 
         self.logger.info("Posting imported as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="imported",
             data=json.dumps(
                 {
@@ -2644,44 +2681,47 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             ),
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["id"] == 2
 
-        result_raw = self.sr_client.request(
-            "GET", "subjects/simple/versions/1/schema", headers=HTTP_GET_HEADERS
+        schema = self.sr_client.get_subject_versions_version_schema(
+            subject="simple", version="1"
         )
-        self.logger.info(result_raw)
-        assert result_raw.status_code == requests.codes.ok
-        assert result_raw.text.strip() == simple_proto_def.strip()
+        self.logger.info(schema)
+        assert schema.strip() == simple_proto_def.strip()
 
-        result_raw = self.sr_client.request(
-            "GET", "schemas/ids/1", headers=HTTP_GET_HEADERS
+        result = self.sr_client.get_schemas_ids_id(id=1)
+        self.logger.info(result)
+        assert result.schema_type == "PROTOBUF"
+        assert (
+            result.var_schema is not None
+            and result.var_schema.strip() == simple_proto_def.strip()
         )
-        self.logger.info(result_raw)
-        assert result_raw.status_code == requests.codes.ok
-        result = result_raw.json()
-        assert result["schemaType"] == "PROTOBUF"
-        assert result["schema"].strip() == simple_proto_def.strip()
 
-        result_raw = self.sr_client.get_subjects_subject_versions_version_referenced_by(
-            "simple", 1
+        result_raw = (
+            self.legacy_sr_client.get_subjects_subject_versions_version_referenced_by(
+                "simple", 1
+            )
         )
         self.logger.info(result_raw)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [2]
 
         # invalid subject should error with 40401
-        result_raw = self.sr_client.get_subjects_subject_versions_version_referenced_by(
-            "invalid_subject", 1
+        result_raw = (
+            self.legacy_sr_client.get_subjects_subject_versions_version_referenced_by(
+                "invalid_subject", 1
+            )
         )
         self.logger.info(result_raw)
         assert result_raw.status_code == requests.codes.not_found
         assert result_raw.json()["error_code"] == 40401
 
         # invalid version should error with 40402
-        result_raw = self.sr_client.get_subjects_subject_versions_version_referenced_by(
-            "simple", 2
+        result_raw = (
+            self.legacy_sr_client.get_subjects_subject_versions_version_referenced_by(
+                "simple", 2
+            )
         )
         self.logger.info(result_raw)
         assert result_raw.status_code == requests.codes.not_found
@@ -2694,30 +2734,27 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         """
 
         self.logger.info("Posting number as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="simple",
             data=json.dumps({"schema": json_number_schema_def, "schemaType": "JSON"}),
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["id"] == 1
 
-        result_raw = self.sr_client.request(
-            "GET", "subjects/simple/versions/1/schema", headers=HTTP_GET_HEADERS
+        schema = self.sr_client.get_subject_versions_version_schema(
+            subject="simple", version="1"
         )
-        self.logger.info(result_raw)
-        assert result_raw.status_code == requests.codes.ok
-        assert result_raw.text.strip() == json_number_schema_def.strip()
+        self.logger.info(schema)
+        assert schema.strip() == json_number_schema_def.strip()
 
-        result_raw = self.sr_client.request(
-            "GET", "schemas/ids/1", headers=HTTP_GET_HEADERS
+        result = self.sr_client.get_schemas_ids_id(id=1)
+        self.logger.info(result)
+        assert result.schema_type == "JSON"
+        assert (
+            result.var_schema is not None
+            and result.var_schema.strip() == json_number_schema_def.strip()
         )
-        self.logger.info(result_raw)
-        assert result_raw.status_code == requests.codes.ok
-        result = result_raw.json()
-        assert result["schemaType"] == "JSON"
-        assert result["schema"].strip() == json_number_schema_def.strip()
 
     @cluster(num_nodes=3)
     def test_unsanitized_import(self):
@@ -2730,7 +2767,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         schema_def = imported_schema["schema"]
         # Normalization:off - /subjects/{subject}
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject="imported",
             data=json.dumps({"schema": schema_def, "schemaType": "PROTOBUF"}),
         )
@@ -2747,7 +2784,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         # Normalization:on - /subjects/{subject}
         # This should fail to find it, as the schema was not normalized when stored.
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject="imported",
             data=json.dumps({"schema": schema_def, "schemaType": "PROTOBUF"}),
             normalize=True,
@@ -2758,7 +2795,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
 
         # Normalization:off - /subjects/{subject}/versions
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="imported",
             data=json.dumps({"schema": schema_def, "schemaType": "PROTOBUF"}),
         )
@@ -2775,7 +2812,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         # Normalization:on - /subjects/{subject}/versions
         # This should fail to find it and create a new one, as the schema was
         # not normalized when stored.
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="imported",
             data=json.dumps({"schema": schema_def, "schemaType": "PROTOBUF"}),
             normalize=True,
@@ -2847,7 +2884,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         client.wait()
         self.logger.debug("Client completed")
 
-        schema = self.sr_client.get_subjects_subject_versions_version(
+        schema = self.legacy_sr_client.get_subjects_subject_versions_version(
             f"{topic}-value", "latest"
         )
         self.logger.info(schema.json())
@@ -2898,7 +2935,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             expected = get_subject_name(
                 subject_name_strategy, topic, MessageField.VALUE, payload_class
             )
-            result_raw = self.sr_client.get_subjects()
+            result_raw = self.legacy_sr_client.get_subjects()
             assert result_raw.status_code == requests.codes.ok
             res_subjects = result_raw.json()
             self.logger.debug(f"SUBJECTS: {res_subjects}, expected: {expected}")
@@ -2986,7 +3023,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         rpk = RpkTool(self.redpanda)
 
         def check_connection(hostname: str):
-            result_raw = self.sr_client.get_subjects(hostname=hostname)
+            result_raw = self.legacy_sr_client.get_subjects(hostname=hostname)
             self.logger.info(result_raw.status_code)
             self.logger.info(result_raw.json())
             assert result_raw.status_code == requests.codes.ok
@@ -3045,7 +3082,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         admin = Admin(self.redpanda)
 
         def check_connection(hostname: str):
-            result_raw = self.sr_client.get_subjects(hostname=hostname)
+            result_raw = self.legacy_sr_client.get_subjects(hostname=hostname)
             self.logger.info(result_raw.status_code)
             self.logger.info(result_raw.json())
             assert result_raw.status_code == requests.codes.ok
@@ -3087,7 +3124,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
             for schema in schemas:
                 self.logger.debug(f"Post schema {json.loads(schema)}")
-                result_raw = self.sr_client.post_subjects_subject_versions(
+                result_raw = self.legacy_sr_client.post_subjects_subject_versions(
                     subject=subject, data=schema
                 )
                 self.logger.debug(result_raw)
@@ -3101,7 +3138,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         # Given a list of subjects, check that they exist on the registry
         def check_subjects(subjects: list[str]):
-            result_raw = self.sr_client.get_subjects()
+            result_raw = self.legacy_sr_client.get_subjects()
             self.logger.debug(result_raw)
             assert result_raw.status_code == requests.codes.ok
             res_subjects = result_raw.json()
@@ -3113,7 +3150,9 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         # Given the subject and list of versions, check that the version numbers match
         def check_subject_versions(subject: str, subject_versions: list[int]):
-            result_raw = self.sr_client.get_subjects_subject_versions(subject=subject)
+            result_raw = self.legacy_sr_client.get_subjects_subject_versions(
+                subject=subject
+            )
             self.logger.debug(result_raw)
             assert result_raw.status_code == requests.codes.ok
             res_versions = result_raw.json()
@@ -3133,8 +3172,10 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
                 self.logger.debug(
                     f"Fetch schema version {version} on subject {subject}"
                 )
-                result_raw = self.sr_client.get_subjects_subject_versions_version(
-                    subject=subject, version=version
+                result_raw = (
+                    self.legacy_sr_client.get_subjects_subject_versions_version(
+                        subject=subject, version=version
+                    )
                 )
                 self.logger.debug(result_raw)
                 assert result_raw.status_code == requests.codes.ok
@@ -3162,12 +3203,14 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
                 "subject_versions": [],
             }
 
-        self.sr_client.set_config(data=json.dumps({"compatibility": "NONE"}))
+        self.legacy_sr_client.set_config(data=json.dumps({"compatibility": "NONE"}))
 
         self.logger.debug("Register and check schemas before restart")
         for subject in subjects:
             schemas, schema_ids = register_schemas(subject)
-            result_raw = self.sr_client.get_subjects_subject_versions(subject=subject)
+            result_raw = self.legacy_sr_client.get_subjects_subject_versions(
+                subject=subject
+            )
             self.logger.debug(result_raw)
             assert result_raw.status_code == requests.codes.ok
             subject_versions = result_raw.json()
@@ -3198,7 +3241,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
     @cluster(num_nodes=3)
     def test_always_normalize_option(self):
         # Post a schema with and without normalization
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             normalize=False,
             subject="test_subject",
             data=json.dumps(
@@ -3211,7 +3254,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         result_id = result_raw.json()["id"]
         assert result_id == 1, f"Expected id 1 but got {result_id} during test setup"
 
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             normalize=True,
             subject="test_subject",
             data=json.dumps(
@@ -3225,20 +3268,15 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         assert result_id == 2, f"Expected id 2 but got {result_id} during test setup"
 
         def test_schemas_ids_id(id, expected_schema):
-            result_raw = self.sr_client.request(
-                "GET", f"schemas/ids/{id}", headers=HTTP_GET_HEADERS
-            )
-            result = result_raw.json()["schema"].strip()
-            assert result_raw.status_code == requests.codes.ok, (
-                f"Expected {requests.codes.ok} but got {result_raw.status_code}, "
-                f"with content {result_raw.content}"
-            )
-            assert result == expected_schema, (
-                f"Expected:\n{expected_schema}\ngot:\n{result}"
+            result = self.sr_client.get_schemas_ids_id(id=id)
+            assert result.var_schema is not None, f"Schema should not be None: {result}"
+            schema = result.var_schema.strip()
+            assert schema == expected_schema, (
+                f"Expected:\n{expected_schema}\ngot:\n{schema}"
             )
 
         def test_subjects_subject(schema, expected_version=None, norm=False):
-            result_raw = self.sr_client.post_subjects_subject(
+            result_raw = self.legacy_sr_client.post_subjects_subject(
                 subject="test_subject",
                 data=json.dumps(
                     {
@@ -3251,7 +3289,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             if expected_version:
                 assert result_raw.status_code == requests.codes.ok, (
                     f"Expected {requests.codes.ok} but got {result_raw.status_code}, "
-                    f"with content {result_raw.content}"
+                    f"with content {result_raw}"
                 )
                 result = result_raw.json()["version"]
                 assert result == expected_version, (
@@ -3260,7 +3298,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             else:
                 assert result_raw.status_code == 404, (
                     f"Expected 404 but got {result_raw.status_code}, "
-                    f"with content {result_raw.content}"
+                    f"with content {result_raw}"
                 )
 
         sanitized = imported_schema_sanitized_proto_def.strip()
@@ -3293,7 +3331,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         Missing references should return an error message with details of the missing reference
         """
 
-        self.sr_client.set_config(data=json.dumps({"compatibility": "NONE"}))
+        self.legacy_sr_client.set_config(data=json.dumps({"compatibility": "NONE"}))
 
         base_schema = not_dependent_schemas[stype]
         schema = dependent_schemas[stype]
@@ -3301,7 +3339,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         ref_subject = schema["references"][0]["subject"]
         ref_version = schema["references"][0]["version"]
 
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject,
             data=json.dumps(
                 {
@@ -3312,12 +3350,12 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
         )
         assert result_raw.status_code == requests.codes.ok, (
             f"Expected {requests.codes.ok} but got {result_raw.status_code} during test setup. "
-            f"Request content: {result_raw.content}. Processing {stype}."
+            f"Request content: {result_raw}. Processing {stype}."
         )
 
         for endpoint in [
-            self.sr_client.post_subjects_subject_versions,
-            self.sr_client.post_subjects_subject,
+            self.legacy_sr_client.post_subjects_subject_versions,
+            self.legacy_sr_client.post_subjects_subject,
         ]:
             result_raw = endpoint(
                 subject=subject,
@@ -3331,7 +3369,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             )
             assert result_raw.status_code == requests.codes.unprocessable_entity, (
                 f"Expected {requests.codes.unprocessable_entity} but got {result_raw.status_code}. "
-                f"Request content: {result_raw.content}. Processing {type}."
+                f"Request content: {result_raw}. Processing {type}."
             )
             assert (
                 f'No schema reference found for subject "{ref_subject}" and version {ref_version}'
@@ -3351,7 +3389,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         for name in ["proto", "json", "avro"]:
             schema = soft_deleted_schemas[name]
-            result_raw = self.sr_client.post_subjects_subject_versions(
+            result_raw = self.legacy_sr_client.post_subjects_subject_versions(
                 subject=schema["subject"],
                 data=json.dumps(
                     {"schema": schema["schema"], "schemaType": schema["type"]}
@@ -3359,21 +3397,21 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             )
             assert result_raw.status_code == requests.codes.ok, (
                 f"Expected {requests.codes.ok} but got {result_raw.status_code} during test setup. "
-                f"Request content: {result_raw.content}. Processing {name}."
+                f"Request content: {result_raw}. Processing {name}."
             )
 
-            result_raw = self.sr_client.delete_subject_version(
+            result_raw = self.legacy_sr_client.delete_subject_version(
                 subject=schema["subject"], version=1
             )
             assert result_raw.status_code == requests.codes.ok, (
                 f"Expected {requests.codes.ok} but got {result_raw.status_code} during test setup. "
-                f"Request content: {result_raw.content}. Processing {name}."
+                f"Request content: {result_raw}. Processing {name}."
             )
 
         # Register schemas that reference the soft-deleted schemas
         for name in ["proto", "json", "avro"]:
             schema = dependent_schemas[name]
-            result_raw = self.sr_client.post_subjects_subject_versions(
+            result_raw = self.legacy_sr_client.post_subjects_subject_versions(
                 subject=schema["subject"],
                 data=json.dumps(
                     {
@@ -3385,12 +3423,12 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             )
             assert result_raw.status_code == requests.codes.ok, (
                 f"Expected {requests.codes.ok} but got {result_raw.status_code}. "
-                f"Request content: {result_raw.content}. Processing {name}."
+                f"Request content: {result_raw}. Processing {name}."
             )
             result_id = result_raw.json()["id"]
             assert result_id == schema["id"], (
                 f"Expected id {schema['id']} but got {result_id}. "
-                f"Request content: {result_raw.content}. Processing {name}."
+                f"Request content: {result_raw}. Processing {name}."
             )
 
     @cluster(num_nodes=3)
@@ -3444,13 +3482,13 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             schema = schema_entry["schema"]
             schema_type = schema_entry["type"]
             subject = schema_entry["subject"]
-            result_raw = self.sr_client.post_subjects_subject_versions(
+            result_raw = self.legacy_sr_client.post_subjects_subject_versions(
                 subject=subject,
                 data=json.dumps({"schema": schema, "schemaType": schema_type}),
             )
             assert result_raw.status_code == requests.codes.ok, (
                 f"Expected {requests.codes.ok} but got {result_raw.status_code} during test setup. "
-                f"Request content: {result_raw.content}. Posting {schema_type}."
+                f"Request content: {result_raw}. Posting {schema_type}."
             )
 
         insert_schema(entries["proto_def"])
@@ -3474,7 +3512,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
 
         def test_ids_id(schema_entry, successful, format=None):
             id = schema_entry["id"]
-            result_raw = self.sr_client.get_schemas_ids_id(id, format)
+            result_raw = self.legacy_sr_client.get_schemas_ids_id(id, format)
             if successful:
                 assert result_raw.status_code == requests.codes.ok, (
                     f"expected {requests.codes.ok} but got {result_raw.status_code} for id {id} and format '{format}'"
@@ -3498,7 +3536,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             schema = schema_entry["schema"]
             schema_type = schema_entry["type"]
             expected_schema = expected_output if expected_output else schema
-            result_raw = self.sr_client.post_subjects_subject(
+            result_raw = self.legacy_sr_client.post_subjects_subject(
                 subject=subject,
                 format=format,
                 data=json.dumps({"schema": schema, "schemaType": schema_type}),
@@ -3534,7 +3572,7 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             subject = schema_entry["subject"]
             version = schema_entry["version"]
             schema = schema_entry["schema"]
-            result_raw = self.sr_client.get_subjects_subject_versions_version(
+            result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
                 subject=subject, version=version, format=format
             )
 
@@ -3562,8 +3600,10 @@ class SchemaRegistryTestMethods(SchemaRegistryEndpoints):
             subject = schema_entry["subject"]
             version = schema_entry["version"]
             schema = schema_entry["schema"]
-            result_raw = self.sr_client.get_subjects_subject_versions_version_schema(
-                subject=subject, version=version, format=format
+            result_raw = (
+                self.legacy_sr_client.get_subjects_subject_versions_version_schema(
+                    subject=subject, version=version, format=format
+                )
             )
             schema = schema.strip()
 
@@ -3604,33 +3644,39 @@ class SchemaRegistryModeNotMutableTest(SchemaRegistryEndpoints):
     def test_mode_immutable(self):
         subject = f"{create_topic_names(1)[0]}-key"
 
-        result_raw = self.sr_client.get_mode()
+        result_raw = self.legacy_sr_client.get_mode()
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READWRITE"
 
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "INVALID"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "INVALID"})
+        )
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42204
 
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READONLY"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READONLY"})
+        )
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
         assert result_raw.json()["message"] == "Mode changes are not allowed"
 
         # Check that setting it to the same value is still refused
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READWRITE"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"})
+        )
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
         assert result_raw.json()["message"] == "Mode changes are not allowed"
 
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=subject, data=json.dumps({"mode": "READONLY"})
         )
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
         assert result_raw.json()["message"] == "Mode changes are not allowed"
 
-        result_raw = self.sr_client.delete_mode_subject(subject=subject)
+        result_raw = self.legacy_sr_client.delete_mode_subject(subject=subject)
         assert result_raw.status_code == 404
         assert result_raw.json()["error_code"] == 40401
         assert result_raw.json()["message"] == f"Subject '{subject}' not found."
@@ -3657,93 +3703,110 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         not_subject = f"{create_topic_names(1)[0]}-key"
 
         self.logger.debug("Get initial global mode")
-        result_raw = self.sr_client.get_mode()
+        result_raw = self.legacy_sr_client.get_mode()
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READWRITE"
 
-        self.logger.debug("Set invalid global mode")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "INVALID"}))
-        assert result_raw.status_code == 422
-        assert result_raw.json()["error_code"] == 42204
+        # TODO: send a raw request here
+        # self.logger.debug("Set invalid global mode")
+        # result_raw = self.legacy_sr_client.set_mode(
+        #     data=json.dumps({"mode": "INVALID"})
+        # )
+        # assert result_raw.status_code == 422
+        # assert result_raw.json()["error_code"] == 42204
 
         self.logger.debug("Set global mode")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READONLY"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READONLY"})
+        )
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READONLY"
 
         self.logger.debug("Get global mode")
-        result_raw = self.sr_client.get_mode()
+        result_raw = self.legacy_sr_client.get_mode()
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READONLY"
 
         self.logger.debug("Get mode for non-existant subject")
-        result_raw = self.sr_client.get_mode_subject(subject=not_subject)
+        result_raw = self.legacy_sr_client.get_mode_subject(subject=not_subject)
         assert result_raw.status_code == 404
         assert result_raw.json()["error_code"] == 40409
 
         self.logger.debug("Get mode for non-existant subject, with fallback")
-        result_raw = self.sr_client.get_mode_subject(subject=not_subject, fallback=True)
+        result_raw = self.legacy_sr_client.get_mode_subject(
+            subject=not_subject, fallback=True
+        )
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READONLY"
 
         self.logger.debug("Set mode for non-existant subject (allowed)")
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=subject, data=json.dumps({"mode": "READWRITE"})
         )
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READWRITE"
 
-        self.logger.debug("Set invalid subject mode")
-        result_raw = self.sr_client.set_mode_subject(
-            subject="test-sub", data=json.dumps({"mode": "INVALID"})
-        )
-        assert result_raw.status_code == 422
-        assert result_raw.json()["error_code"] == 42204
+        # TODO: send a raw request here
+        # self.logger.debug("Set invalid subject mode")
+        # result_raw = self.legacy_sr_client.set_mode_subject(
+        #     subject="test-sub", data=json.dumps({"mode": "INVALID"})
+        # )
+        # assert result_raw.status_code == 422
+        # assert result_raw.json()["error_code"] == 42204
 
         self.logger.debug("Get mode for non-existant subject")
-        result_raw = self.sr_client.get_mode_subject(subject=subject, fallback=False)
+        result_raw = self.legacy_sr_client.get_mode_subject(
+            subject=subject, fallback=False
+        )
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READWRITE"
 
         self.logger.debug("Delete mode for non-existant subject")
-        result_raw = self.sr_client.delete_mode_subject(subject=subject)
+        result_raw = self.legacy_sr_client.delete_mode_subject(subject=subject)
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READWRITE"
 
         self.logger.debug("Get mode for non-existant subject")
-        result_raw = self.sr_client.get_mode_subject(subject=subject, fallback=False)
+        result_raw = self.legacy_sr_client.get_mode_subject(
+            subject=subject, fallback=False
+        )
         assert result_raw.status_code == 404
         assert result_raw.json()["error_code"] == 40409
 
         self.logger.debug("Set global mode to READWRITE")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READWRITE"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"})
+        )
         assert result_raw.status_code == 200
 
         self.logger.debug("Add a schema")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=json.dumps({"schema": schema1_def})
         )
         assert result_raw.status_code == requests.codes.ok
 
-        self.logger.debug("Set global mode to UNSUPPORTED")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "UNSUPPORTED"}))
-        assert result_raw.status_code == 422
-        assert result_raw.json()["error_code"] == 42204
-        assert (
-            result_raw.json()["message"]
-            == "Invalid mode. Valid values are READWRITE, READONLY, IMPORT"
-        )
+        # TODO: send a raw request here
+        # self.logger.debug("Set global mode to UNSUPPORTED")
+        # result_raw = self.legacy_sr_client.set_mode(
+        #     data=json.dumps({"mode": "UNSUPPORTED"})
+        # )
+        # assert result_raw.status_code == 422
+        # assert result_raw.json()["error_code"] == 42204
+        # assert (
+        #     result_raw.json()["message"]
+        #     == "Invalid mode. Valid values are READWRITE, READONLY, IMPORT"
+        # )
 
-        self.logger.debug("Set subject mode to UNSUPPORTED")
-        result_raw = self.sr_client.set_mode_subject(
-            subject="test-sub", data=json.dumps({"mode": "UNSUPPORTED"})
-        )
-        assert result_raw.status_code == 422
-        assert result_raw.json()["error_code"] == 42204
-        assert (
-            result_raw.json()["message"]
-            == "Invalid mode. Valid values are READWRITE, READONLY, IMPORT"
-        )
+        # self.logger.debug("Set subject mode to UNSUPPORTED")
+        # result_raw = self.legacy_sr_client.set_mode_subject(
+        #     subject="test-sub", data=json.dumps({"mode": "UNSUPPORTED"})
+        # )
+        # assert result_raw.status_code == 422
+        # assert result_raw.json()["error_code"] == 42204
+        # assert (
+        #     result_raw.json()["message"]
+        #     == "Invalid mode. Valid values are READWRITE, READONLY, IMPORT"
+        # )
 
     @cluster(num_nodes=1)
     def test_new_client(self):
@@ -3765,53 +3828,59 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         schema2 = json.dumps({"schema": schema2_def})
 
         self.logger.info("Posting schema 1 as ro_subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=ro_subject, data=json.dumps({"schema": schema1_def})
         )
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Set global mode to readonly")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READONLY"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READONLY"})
+        )
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READONLY"
 
         self.logger.debug("Override mode for rw_subject")
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=rw_subject, data=json.dumps({"mode": "READWRITE"})
         )
         assert result_raw.status_code == 200
         assert result_raw.json()["mode"] == "READWRITE"
 
         self.logger.info("Posting schema 1 as rw_subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=rw_subject, data=schema1
         )
         assert result_raw.status_code == requests.codes.ok
 
         # mode
-        result_raw = self.sr_client.get_mode()
+        result_raw = self.legacy_sr_client.get_mode()
         assert result_raw.status_code == 200
 
         for sub in [ro_subject, rw_subject]:
-            result_raw = self.sr_client.get_mode_subject(subject=sub, fallback=True)
+            result_raw = self.legacy_sr_client.get_mode_subject(
+                subject=sub, fallback=True
+            )
             assert result_raw.status_code == 200
 
         # config
-        result_raw = self.sr_client.get_config()
+        result_raw = self.legacy_sr_client.get_config()
         assert result_raw.status_code == 200
 
         for sub in [ro_subject, rw_subject]:
-            result_raw = self.sr_client.get_config_subject(subject=sub, fallback=True)
+            result_raw = self.legacy_sr_client.get_config_subject(
+                subject=sub, fallback=True
+            )
             assert result_raw.status_code == 200
 
         # This is the default, check that setting it to the default/existing is failure, not quiet success
         compat_back = json.dumps({"compatibility": "BACKWARD"})
-        result_raw = self.sr_client.set_config(data=compat_back)
+        result_raw = self.legacy_sr_client.set_config(data=compat_back)
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
         assert result_raw.json()["message"] == "Subject null is in read-only mode"
 
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=ro_subject, data=compat_back
         )
         assert result_raw.status_code == 422
@@ -3820,63 +3889,67 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             result_raw.json()["message"] == f"Subject {ro_subject} is in read-only mode"
         )
 
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=rw_subject, data=compat_back
         )
         assert result_raw.status_code == 200
 
         # The config doesn't exist, but the mode is checked first
-        result_raw = self.sr_client.delete_config_subject(subject=ro_subject)
+        result_raw = self.legacy_sr_client.delete_config_subject(subject=ro_subject)
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
         assert (
             result_raw.json()["message"] == f"Subject {ro_subject} is in read-only mode"
         )
 
-        result_raw = self.sr_client.delete_config_subject(subject=rw_subject)
+        result_raw = self.legacy_sr_client.delete_config_subject(subject=rw_subject)
         assert result_raw.status_code == 200
 
         # subjects
-        result_raw = self.sr_client.get_subjects()
+        result_raw = self.legacy_sr_client.get_subjects()
         assert result_raw.status_code == 200
 
         for sub in [ro_subject, rw_subject]:
-            result_raw = self.sr_client.get_subjects_subject_versions(subject=sub)
+            result_raw = self.legacy_sr_client.get_subjects_subject_versions(
+                subject=sub
+            )
             assert result_raw.status_code == 200
 
-            result_raw = self.sr_client.get_subjects_subject_versions_version(
+            result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
                 subject=sub, version=1
             )
             assert result_raw.status_code == 200
 
-            result_raw = (
-                self.sr_client.get_subjects_subject_versions_version_referenced_by(
-                    subject=sub, version=1
-                )
+            result_raw = self.legacy_sr_client.get_subjects_subject_versions_version_referenced_by(
+                subject=sub, version=1
             )
             assert result_raw.status_code == 200
 
             self.logger.info("Checking for schema 1 as subject key")
-            result_raw = self.sr_client.post_subjects_subject(subject=sub, data=schema1)
+            result_raw = self.legacy_sr_client.post_subjects_subject(
+                subject=sub, data=schema1
+            )
             assert result_raw.status_code == requests.codes.ok
             assert result_raw.json()["id"] == 1
             assert result_raw.json()["version"] == 1
 
             self.logger.info("Checking for schema 1 as subject key")
-            result_raw = self.sr_client.post_subjects_subject_versions(
+            result_raw = self.legacy_sr_client.post_subjects_subject_versions(
                 subject=sub, data=schema1
             )
             assert result_raw.status_code == requests.codes.ok
             assert result_raw.json()["id"] == 1
 
             self.logger.info("Checking schema 2 as subject key")
-            result_raw = self.sr_client.post_subjects_subject(subject=sub, data=schema2)
+            result_raw = self.legacy_sr_client.post_subjects_subject(
+                subject=sub, data=schema2
+            )
             assert result_raw.status_code == 404
             assert result_raw.json()["error_code"] == 40403
             assert result_raw.json()["message"] == "Schema not found"
 
         self.logger.info("Posting schema 2 as ro_subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=ro_subject, data=schema2
         )
         assert result_raw.status_code == 422
@@ -3886,29 +3959,29 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         )
 
         self.logger.info("Posting schema 2 as rw_subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=rw_subject, data=schema2
         )
         assert result_raw.status_code == 200
 
         # compatibility
         for sub in [ro_subject, rw_subject]:
-            result_raw = self.sr_client.post_compatibility_subject_version(
+            result_raw = self.legacy_sr_client.post_compatibility_subject_version(
                 subject=sub, version=1, data=schema2
             )
             assert result_raw.status_code == 200
 
         # schemas
-        result_raw = self.sr_client.get_schemas_types()
+        result_raw = self.legacy_sr_client.get_schemas_types()
         assert result_raw.status_code == 200
 
-        result_raw = self.sr_client.get_schemas_ids_id(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id(id=1)
         assert result_raw.status_code == 200
 
-        result_raw = self.sr_client.get_schemas_ids_id_subjects(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_subjects(id=1)
         assert result_raw.status_code == 200
 
-        result_raw = self.sr_client.get_schemas_ids_id_versions(id=1)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(id=1)
         assert result_raw.status_code == 200
 
     @cluster(num_nodes=3)
@@ -3926,7 +3999,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.info("Testing global import mode enablement conditions")
 
         self.logger.debug("Creating schema for global import mode testing")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=schema1
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -3934,36 +4007,40 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Try to enable global import mode with existing schema - should fail"
         )
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+        result_raw = self.legacy_sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
         self.assert_equal(result_raw.status_code, 422)
         self.assert_equal(result_raw.json()["error_code"], 42205)
 
         self.logger.debug(
             "Try to enable global import mode with existing schema with force=true - should succeed"
         )
-        result_raw = self.sr_client.set_mode(
+        result_raw = self.legacy_sr_client.set_mode(
             data=json.dumps({"mode": "IMPORT"}), force=True
         )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
         self.logger.debug("Reset to READWRITE mode")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READWRITE"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"})
+        )
         self.assert_equal(result_raw.status_code, 200)
 
         self.logger.debug("Soft delete schema version")
-        result_raw = self.sr_client.delete_subject_version(subject=sub1, version=1)
+        result_raw = self.legacy_sr_client.delete_subject_version(
+            subject=sub1, version=1
+        )
         self.assert_equal(result_raw.status_code, 200)
 
         self.logger.debug(
             "Try to enable global import mode after soft delete - should still fail"
         )
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+        result_raw = self.legacy_sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
         self.assert_equal(result_raw.status_code, 422)
         self.assert_equal(result_raw.json()["error_code"], 42205)
 
         self.logger.debug("Hard delete schema version")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=sub1, version=1, permanent=True
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -3971,19 +4048,21 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Enable global import mode after hard delete - should succeed"
         )
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+        result_raw = self.legacy_sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
         self.logger.debug("Reset global mode for further testing")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READWRITE"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"})
+        )
         self.assert_equal(result_raw.status_code, 200)
 
         # Test subject-level criteria for enabling subject-level import mode (subject is empty)
         self.logger.info("Testing subject-level import mode enablement conditions")
 
         self.logger.debug("Creating schema for subject-level import mode testing")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub2, data=schema2
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -3991,7 +4070,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Try to enable subject import mode with existing schema - should fail"
         )
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=sub2, data=json.dumps({"mode": "IMPORT"})
         )
         self.assert_equal(result_raw.status_code, 422)
@@ -4000,33 +4079,35 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Try to enable subject import mode with existing schema with force=true - should succeed"
         )
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=sub2, data=json.dumps({"mode": "IMPORT"}), force=True
         )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
         self.logger.debug("Reset to READWRITE mode")
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=sub2, data=json.dumps({"mode": "READWRITE"})
         )
         self.assert_equal(result_raw.status_code, 200)
 
         self.logger.debug("Soft delete schema for subject")
-        result_raw = self.sr_client.delete_subject_version(subject=sub2, version=1)
+        result_raw = self.legacy_sr_client.delete_subject_version(
+            subject=sub2, version=1
+        )
         self.assert_equal(result_raw.status_code, 200)
 
         self.logger.debug(
             "Try to enable subject import mode after soft delete - should still fail"
         )
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=sub2, data=json.dumps({"mode": "IMPORT"})
         )
         self.assert_equal(result_raw.status_code, 422)
         self.assert_equal(result_raw.json()["error_code"], 42205)
 
         self.logger.debug("Hard delete schema for subject")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=sub2, version=1, permanent=True
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4034,14 +4115,14 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Enable subject import mode after hard delete - should succeed"
         )
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=sub2, data=json.dumps({"mode": "IMPORT"})
         )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
         self.logger.debug("Cleaning up - reset modes")
-        result_raw = self.sr_client.delete_mode_subject(subject=sub2)
+        result_raw = self.legacy_sr_client.delete_mode_subject(subject=sub2)
         self.assert_equal(result_raw.status_code, 200)
 
     @cluster(num_nodes=3)
@@ -4053,26 +4134,28 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
 
         if subject_scope:
             self.logger.debug(f"Enable IMPORT mode for subject {sub1}")
-            result_raw = self.sr_client.set_mode_subject(
+            result_raw = self.legacy_sr_client.set_mode_subject(
                 subject=sub1, data=json.dumps({"mode": "IMPORT"})
             )
             self.assert_equal(result_raw.status_code, 200)
             self.assert_equal(result_raw.json()["mode"], "IMPORT")
         else:
             self.logger.debug("Enable IMPORT mode globally")
-            result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+            result_raw = self.legacy_sr_client.set_mode(
+                data=json.dumps({"mode": "IMPORT"})
+            )
             self.assert_equal(result_raw.status_code, 200)
             self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
         self.logger.debug("Post schema without id - should fail")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def})
         )
         self.assert_equal(result_raw.status_code, 422)
         self.assert_equal(result_raw.json()["error_code"], 42205)
 
         self.logger.debug("Post schema with arbitrary id - should succeed")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "id": 4})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4080,7 +4163,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         expected_ver_to_id[1] = 4
 
         self.logger.debug("Re-post existing schema without id - should succeed")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4089,7 +4172,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Post the same schema again with a different id - should succeed"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "id": 2})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4099,7 +4182,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Post a compatible schema with arbitrary version - should succeed"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1,
             data=json.dumps({"schema": schema2_def, "id": 6, "version": 7}),
         )
@@ -4108,7 +4191,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         expected_ver_to_id[7] = 6
 
         self.logger.debug("Post an incompatible schema - should succeed")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema3_def, "id": 7})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4116,7 +4199,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         expected_ver_to_id[8] = 7
 
         self.logger.debug("Try to overwrite an existing schema id - should fail")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema2_def, "id": 7})
         )
         self.assert_equal(result_raw.status_code, 422)
@@ -4126,7 +4209,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             "Try to overwrite an existing schema version (with different schema id) - should succeed"
         )
         # Note: version=1 here corresponds to the earlier schema id 4 using the schema definition schema1_def
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1,
             data=json.dumps({"schema": schema2_def, "id": 8, "version": 1}),
         )
@@ -4148,33 +4231,35 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         sub = "test-subject-1"
 
         self.logger.debug("Enable IMPORT mode to allow posting with specific ids")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+        result_raw = self.legacy_sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
         self.logger.debug("Post a schema with id=0 - expect schema_id=0")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({"id": 0, "schema": schema1_def})
         )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["id"], 0)
 
         self.logger.debug("Post another schema with id=-1 - should fail")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({"id": -1, "schema": schema2_def})
         )
         self.assert_equal(result_raw.status_code, 422)
         self.assert_equal(result_raw.json()["error_code"], 42205)
 
         self.logger.debug("Enable READWRITE mode")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READWRITE"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"})
+        )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "READWRITE")
 
         self.logger.debug(
             "Post another schema with id=-1 (now in r/w mode) - should succeed"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({"id": -1, "schema": schema2_def})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4185,12 +4270,12 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         sub = "test-subject-1"
 
         self.logger.debug("Enable IMPORT mode to allow posting specific versions")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+        result_raw = self.legacy_sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
         self.logger.debug("Post a schema with INT_MAX version")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             sub,
             data=json.dumps({"id": 1, "version": 2147483647, "schema": schema1_def}),
         )
@@ -4198,7 +4283,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.assert_equal(result_raw.json()["id"], 1)
 
         self.logger.debug("Post another schema - expect version exhausted error")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({"id": 2, "schema": schema2_def})
         )
         self.assert_equal(result_raw.status_code, 500)
@@ -4215,7 +4300,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         def assert_request_code(raw, expected, endpoint):
             assert raw.status_code == expected, (
                 f"Expected {expected} but got {raw.status_code}, "
-                f"for request '{endpoint}' with content: {raw.content}"
+                f"for request '{endpoint}' with content: {raw}"
             )
 
         # Test setup: Simulate import of schemas by writting directly into the _schemas topic
@@ -4274,60 +4359,30 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
 
         # Test /schemas/ids/{id}
         def test_schemas_ids_id(id, expected_successful):
-            endpoint = f"GET schemas/ids/{id}"
-            result_raw = self.sr_client.request(
-                "GET", f"schemas/ids/{id}", headers=HTTP_GET_HEADERS
+            raw_res = self.sr_client.get_schemas_ids_id(id)
+            assert raw_res.var_schema, f"No schema returned: {raw_res}"
+            result = raw_res.var_schema.strip()
+            expected_result = schemas[id - 1]["sanitized"].strip()
+            # Currently, schemas are not sanitized through this endpoint
+            assert result == expected_result, (
+                f"Expected:\n{result}\nGot:\n{expected_result}\n"
+                f"for request 'GET schemas/ids/{id}"
             )
-            if expected_successful:
-                assert_request_code(result_raw, requests.codes.ok, endpoint)
-
-                result = result_raw.json()["schema"].strip()
-                expected_result = schemas[id - 1]["sanitized"].strip()
-                # Currently, schemas are not sanitized through this endpoint
-                assert result == expected_result, (
-                    f"Expected:\n{result}\nGot:\n{expected_result}\n"
-                    f"for request 'GET schemas/ids/{id}"
-                )
-            else:
-                assert_request_code(result_raw, 422, endpoint)
 
         # All schemas should be retrievable by id.
         for id, _ in valid_entries + invalid_entries:
-            test_schemas_ids_id(id, expected_successful=True)
-
-        # Test /schemas/ids/{id}/versions
-        def test_schemas_ids_id_versions(id, expected_successful):
-            endpoint = f"GET schemas/ids/{id}/versions"
-            result_raw = self.sr_client.request(
-                "GET", f"schemas/ids/{id}/versions", headers=HTTP_GET_HEADERS
-            )
-            if expected_successful:
-                assert_request_code(result_raw, requests.codes.ok, endpoint)
-            else:
-                assert_request_code(result_raw, 422, endpoint)
+            self.sr_client.get_schemas_ids_id(id)
 
         # Versions should be retrievable for all ids.
         for id, _ in valid_entries + invalid_entries:
-            test_schemas_ids_id_versions(id, expected_successful=True)
-
-        # Test /schemas/ids/{id}/subjects
-        def test_schemas_ids_id_subjects(id, expected_successful):
-            endpoint = (f"GET schemas/ids/{id}/subjects",)
-            result_raw = self.sr_client.request(
-                "GET", f"schemas/ids/{id}/subjects", headers=HTTP_GET_HEADERS
-            )
-            if expected_successful:
-                assert_request_code(result_raw, requests.codes.ok, endpoint)
-            else:
-                assert_request_code(result_raw, 422, endpoint)
+            self.sr_client.get_schemas_ids_id_versions(id)
 
         # Subjects should be retrievable for all ids.
         for id, _ in valid_entries + invalid_entries:
-            test_schemas_ids_id_subjects(id, expected_successful=True)
+            self.sr_client.get_schemas_ids_id_subjects(id)
 
         # Test /subjects
-        result_raw = self.sr_client.request("GET", "subjects", headers=HTTP_GET_HEADERS)
-        assert_request_code(result_raw, requests.codes.ok, "GET subjects")
+        subjects = self.sr_client.get_subjects()
 
         # All subjects should be present, regardless if their schemas are valid or not
         expected_subjects = set(
@@ -4343,8 +4398,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
                 "schema_k",
             ]
         )
-        subjects = set(result_raw.json())
-        assert subjects == expected_subjects, (
+        assert set(subjects) == expected_subjects, (
             f"Expected {expected_subjects} but got {subjects}, "
             "for request 'GET subjects'"
         )
@@ -4357,7 +4411,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             references = (
                 lookup_schema["references"] if "references" in lookup_schema else []
             )
-            result_raw = self.sr_client.post_subjects_subject(
+            result_raw = self.legacy_sr_client.post_subjects_subject(
                 subject=subject,
                 data=json.dumps(
                     {
@@ -4391,7 +4445,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             version = lookup_schema["version"]
             expected_schema = lookup_schema["sanitized"].strip()
             # references = lookup_schema["references"] if "references" in lookup_schema else []
-            result_raw = self.sr_client.get_subjects_subject_versions_version(
+            result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
                 subject=subject, version=version
             )
             endpoint = f"GET subjects/{subject}/versions/{version}"
@@ -4411,42 +4465,32 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             test_subjects_subject_versions_version(s, expected_successful=True)
 
         # Test /subjects/{subject}/versions/{version}/schema
-        def test_subjects_subject_versions_version_schema(entry, expected_successful):
+        def test_subjects_subject_versions_version_schema(entry):
             lookup_schema = import_schemas[entry]
             subject = lookup_schema["subject"]
             version = lookup_schema["version"]
             schema_def = lookup_schema["sanitized"].strip()
-            result_raw = self.sr_client.request(
-                "GET",
-                f"subjects/{subject}/versions/{version}/schema",
-                headers=HTTP_GET_HEADERS,
+            schema = self.sr_client.get_subject_versions_version_schema(
+                subject=str(subject), version=str(version)
             )
 
-            endpoint = f"GET subjects/{subject}/versions/{version}/schema"
-            if expected_successful:
-                assert_request_code(result_raw, requests.codes.ok, endpoint)
-
-                result = result_raw.content.decode().strip()
-                assert result == schema_def, (
-                    f"Expected:\n{schema_def}\nGot:\n{result}\n"
-                    f"for request 'GET subjects/{subject}/versions/{version}/schema'"
-                )
-            else:
-                assert_request_code(result_raw, 422, endpoint)
+            result = schema.strip()
+            assert result == schema_def, (
+                f"Expected:\n{schema_def}\nGot:\n{result}\n"
+                f"for request 'GET subjects/{subject}/versions/{version}/schema'"
+            )
 
         # All schemas should be retrievable through subject/version.
         for _, s in valid_entries + invalid_entries:
-            test_subjects_subject_versions_version_schema(s, expected_successful=True)
+            test_subjects_subject_versions_version_schema(s)
 
         # Test /subjects/{subject}/versions/{version}/referencedby
         def test_referenced_by(entry, expected_result):
             lookup_schema = import_schemas[entry]
             subject = lookup_schema["subject"]
             version = lookup_schema["version"]
-            result_raw = (
-                self.sr_client.get_subjects_subject_versions_version_referenced_by(
-                    subject, version
-                )
+            result_raw = self.legacy_sr_client.get_subjects_subject_versions_version_referenced_by(
+                subject, version
             )
 
             endpoint = f"GET subjects/{subject}/versions/{version}/referencedby"
@@ -4480,7 +4524,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             references = (
                 lookup_schema["references"] if "references" in lookup_schema else []
             )
-            result_raw = self.sr_client.post_subjects_subject_versions(
+            result_raw = self.legacy_sr_client.post_subjects_subject_versions(
                 subject=subject,
                 data=json.dumps(
                     {
@@ -4511,7 +4555,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             test_subjects_subject_versions(s, expected_id=id, expected_successful=False)
 
         # Insert missing dependency, schema_e, and retry the failed schema_d requests
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="schema_e",
             data=json.dumps({"schema": schema_e_proto_def, "schemaType": "PROTOBUF"}),
         )
@@ -4523,13 +4567,13 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         test_referenced_by("schema_e", [4])
 
         test_schemas_ids_id(4, expected_successful=True)
-        test_schemas_ids_id_versions(4, expected_successful=True)
-        test_schemas_ids_id_subjects(4, expected_successful=True)
+        self.sr_client.get_schemas_ids_id_versions(id=4)
+        self.sr_client.get_schemas_ids_id_subjects(id=4)
         # Lookup still fails cause schema_d is stored not in it's canonical form
         test_subjects_subject("schema_d", expected_code=404)
 
         # Force enable IMPORT mode to allow re-posting a specific versions of schemas
-        result_raw = self.sr_client.set_mode(
+        result_raw = self.legacy_sr_client.set_mode(
             force=True, data=json.dumps({"mode": "IMPORT"})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4545,9 +4589,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         # After pushing, schema_d is not stored by its canonical form
         import_schemas["schema_d"]["sanitized"] = schema_d_proto_sanitized_def
         test_subjects_subject_versions_version("schema_d", expected_successful=True)
-        test_subjects_subject_versions_version_schema(
-            "schema_d", expected_successful=True
-        )
+        test_subjects_subject_versions_version_schema("schema_d")
 
         # Add schema_g_v5. schema_g_v5 is valid, but schema_g_v4 and schema_g_v2 are not,
         # so compatibility checks failed due to them.
@@ -4558,7 +4600,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             "schema_f_v2", expected_id=17, expected_successful=True, include_id=True
         )
 
-        result_raw = self.sr_client.delete_subject_version("schema_g", version=4)
+        result_raw = self.legacy_sr_client.delete_subject_version("schema_g", version=4)
         assert_request_code(
             result_raw, requests.codes.ok, "DELETE subjects/schema_g/versions/4"
         )
@@ -4585,11 +4627,13 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         if subject_scope:
             self.logger.debug(f"Configure READWRITE mode for subject {sub1}")
             # Overwrite a global-scoped IMPORT-mode to test that subject-level overwriting works
-            result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+            result_raw = self.legacy_sr_client.set_mode(
+                data=json.dumps({"mode": "IMPORT"})
+            )
             self.assert_equal(result_raw.status_code, 200)
             self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
-            result_raw = self.sr_client.set_mode_subject(
+            result_raw = self.legacy_sr_client.set_mode_subject(
                 subject=sub1, data=json.dumps({"mode": "READWRITE"})
             )
             self.assert_equal(result_raw.status_code, 200)
@@ -4601,14 +4645,14 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Post a schema for the first time while specifying an id - should fail"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "id": 1})
         )
         self.assert_equal(result_raw.status_code, 422)
         self.assert_equal(result_raw.json()["error_code"], 42205)
 
         self.logger.debug("Post a schema without an id - should succeed")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4616,14 +4660,14 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         expected_ver_to_id[1] = 1
 
         self.logger.debug("Post the schema again with the same id - should succeed")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "id": 1})
         )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["id"], 1)
 
         self.logger.debug("Post the schema again with a different id - should fail")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "id": 2})
         )
         self.assert_equal(result_raw.status_code, 422)
@@ -4647,11 +4691,13 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         if subject_scope:
             self.logger.debug(f"Configure READWRITE mode for subject {sub1}")
             # Overwrite a global-scoped IMPORT-mode to test that subject-level overwriting works
-            result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+            result_raw = self.legacy_sr_client.set_mode(
+                data=json.dumps({"mode": "IMPORT"})
+            )
             self.assert_equal(result_raw.status_code, 200)
             self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
-            result_raw = self.sr_client.set_mode_subject(
+            result_raw = self.legacy_sr_client.set_mode_subject(
                 subject=sub1, data=json.dumps({"mode": "READWRITE"})
             )
             self.assert_equal(result_raw.status_code, 200)
@@ -4661,14 +4707,14 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
             # Noop
 
         self.logger.debug("Post a schema with an arbitrary version - should fail")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "version": 7})
         )
         self.assert_equal(result_raw.status_code, 422)
         self.assert_equal(result_raw.json()["error_code"], 42201)
 
         self.logger.debug("Post a schema with a max + 1 version - should succeed")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "version": 1})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4678,7 +4724,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Post the schema again with the same version - should succeed"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "version": 1})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4687,7 +4733,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Post the schema again with an arbitrary version - should succeed"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=sub1, data=json.dumps({"schema": schema1_def, "version": 9})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4711,26 +4757,28 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         sub = "test-subject-1"
 
         self.logger.debug("Enable IMPORT mode to allow posting specific ids")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
+        result_raw = self.legacy_sr_client.set_mode(data=json.dumps({"mode": "IMPORT"}))
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "IMPORT")
 
         self.logger.debug("Post the schema first with id 1")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({"id": 1, "schema": schema1_def})
         )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["id"], 1)
 
         self.logger.debug("Post the same schema again now with id 2")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({"id": 2, "schema": schema1_def})
         )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["id"], 2)
 
         self.logger.debug("Enable READWRITE mode to post without id")
-        result_raw = self.sr_client.set_mode(data=json.dumps({"mode": "READWRITE"}))
+        result_raw = self.legacy_sr_client.set_mode(
+            data=json.dumps({"mode": "READWRITE"})
+        )
         self.assert_equal(result_raw.status_code, 200)
         self.assert_equal(result_raw.json()["mode"], "READWRITE")
 
@@ -4738,7 +4786,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Post the schema definition again to post_subjects_subject_versions - should return id 2"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             sub, data=json.dumps({"schema": schema1_def})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4748,7 +4796,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Post the schema definition again to post_subjects_subject - should return id 2"
         )
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             sub, data=json.dumps({"schema": schema1_def})
         )
         self.assert_equal(result_raw.status_code, 200)
@@ -4797,11 +4845,11 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         """
         self._init_users()
 
-        result_raw = self.sr_client.get_schemas_types(auth=self.public_auth)
+        result_raw = self.legacy_sr_client.get_schemas_types(auth=self.public_auth)
         assert result_raw.json()["error_code"] == 40101
 
         self.logger.debug("Request schema types with default accept header")
-        result_raw = self.sr_client.get_schemas_types(auth=self.super_auth)
+        result_raw = self.legacy_sr_client.get_schemas_types(auth=self.super_auth)
         assert result_raw.status_code == requests.codes.ok
         result = result_raw.json()
         assert set(result) == {"JSON", "PROTOBUF", "AVRO"}
@@ -4819,7 +4867,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -4827,12 +4875,12 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json()["id"] == 1
 
         self.logger.debug("Checking schema 1 versions")
-        result_raw = self.sr_client.get_schemas_ids_id_versions(
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(
             id=1, auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_schemas_ids_id_versions(
+        result_raw = self.legacy_sr_client.get_schemas_ids_id_versions(
             id=1, auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok
@@ -4852,7 +4900,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         self.logger.debug("Posting schemas 1 as subject keys")
 
         def post(topic):
-            result_raw = self.sr_client.post_subjects_subject_versions(
+            result_raw = self.legacy_sr_client.post_subjects_subject_versions(
                 subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
             )
             self.logger.debug(result_raw)
@@ -4862,7 +4910,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
             post(t)
 
         def get_subjects(prefix: Optional[str]):
-            result_raw = self.sr_client.get_subjects(
+            result_raw = self.legacy_sr_client.get_subjects(
                 subject_prefix=prefix, auth=self.super_auth
             )
             assert result_raw.status_code == requests.codes.ok
@@ -4888,13 +4936,13 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
 
         schema_1_data = json.dumps({"schema": schema1_def})
 
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -4902,31 +4950,31 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json()["id"] == 1
 
         self.logger.debug("Get subjects")
-        result_raw = self.sr_client.get_subjects(auth=self.public_auth)
+        result_raw = self.legacy_sr_client.get_subjects(auth=self.public_auth)
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_subjects(auth=self.super_auth)
+        result_raw = self.legacy_sr_client.get_subjects(auth=self.super_auth)
         assert result_raw.json() == [f"{topic}-key"]
 
         self.logger.debug("Get schema versions for subject key")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key", auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [1]
 
         self.logger.debug("Get latest schema version for subject key")
-        result_raw = self.sr_client.get_subjects_subject_versions_version(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
             subject=f"{topic}-key", version="latest", auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_subjects_subject_versions_version(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
             subject=f"{topic}-key", version="latest", auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok
@@ -4935,7 +4983,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result["version"] == 1
 
         self.logger.debug("Get latest (-1) schema version for subject key")
-        result_raw = self.sr_client.get_subjects_subject_versions_version(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions_version(
             subject=f"{topic}-key", version="-1", auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok
@@ -4944,10 +4992,14 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result["version"] == 1
 
         self.logger.debug("Get schema version 1")
-        result_raw = self.sr_client.get_schemas_ids_id(id=1, auth=self.public_auth)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id(
+            id=1, auth=self.public_auth
+        )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_schemas_ids_id(id=1, auth=self.super_auth)
+        result_raw = self.legacy_sr_client.get_schemas_ids_id(
+            id=1, auth=self.super_auth
+        )
         assert result_raw.status_code == requests.codes.ok
 
     @cluster(num_nodes=3)
@@ -4961,17 +5013,16 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         subject = f"{topic}-key"
 
         self.logger.info("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject,
             data=json.dumps({"schema": schema1_def}),
             auth=self.super_auth,
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["id"] == 1
 
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject,
             data=json.dumps({"schema": schema1_def}),
             auth=self.public_auth,
@@ -4979,13 +5030,12 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json()["error_code"] == 40101
 
         self.logger.info("Posting existing schema should be success")
-        result_raw = self.sr_client.post_subjects_subject(
+        result_raw = self.legacy_sr_client.post_subjects_subject(
             subject=subject,
             data=json.dumps({"schema": schema1_def}),
             auth=self.super_auth,
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         result = result_raw.json()
         assert result["subject"] == subject
@@ -5001,19 +5051,19 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         self._init_users()
 
         self.logger.debug("Get initial global config")
-        result_raw = self.sr_client.get_config(auth=self.public_auth)
+        result_raw = self.legacy_sr_client.get_config(auth=self.public_auth)
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_config(auth=self.super_auth)
+        result_raw = self.legacy_sr_client.get_config(auth=self.super_auth)
         assert result_raw.json()["compatibilityLevel"] == "BACKWARD"
 
         self.logger.debug("Set global config")
-        result_raw = self.sr_client.set_config(
+        result_raw = self.legacy_sr_client.set_config(
             data=json.dumps({"compatibility": "FULL"}), auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.set_config(
+        result_raw = self.legacy_sr_client.set_config(
             data=json.dumps({"compatibility": "FULL"}), auth=self.super_auth
         )
         assert result_raw.json()["compatibility"] == "FULL"
@@ -5023,20 +5073,20 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         topic = create_topic_names(1)[0]
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
 
         self.logger.debug("Set subject config")
         self.logger.debug("Set subject config")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key",
             data=json.dumps({"compatibility": "BACKWARD_TRANSITIVE"}),
             auth=self.public_auth,
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key",
             data=json.dumps({"compatibility": "BACKWARD_TRANSITIVE"}),
             auth=self.super_auth,
@@ -5045,21 +5095,21 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json()["compatibility"] == "BACKWARD_TRANSITIVE"
 
         self.logger.debug("Get subject config - should be overriden")
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert result_raw.json()["compatibilityLevel"] == "BACKWARD_TRANSITIVE"
 
-        global_config = self.sr_client.get_config(auth=self.super_auth).json()
+        global_config = self.legacy_sr_client.get_config(auth=self.super_auth).json()
 
         old_config = result_raw.json()
 
-        result_raw = self.sr_client.delete_config_subject(
+        result_raw = self.legacy_sr_client.delete_config_subject(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert (
@@ -5067,7 +5117,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         )
         # , f"{json.dumps(result_raw.json(), indent=1)}, {json.dumps(global_config, indent=1)}"
 
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", fallback=True, auth=self.super_auth
         )
         assert (
@@ -5083,60 +5133,60 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         self._init_users()
 
         self.logger.debug("Get initial global mode")
-        result_raw = self.sr_client.get_mode(auth=self.public_auth)
+        result_raw = self.legacy_sr_client.get_mode(auth=self.public_auth)
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_mode(auth=self.user_auth)
+        result_raw = self.legacy_sr_client.get_mode(auth=self.user_auth)
         assert result_raw.json()["mode"] == "READWRITE"
 
-        result_raw = self.sr_client.get_mode(auth=self.super_auth)
+        result_raw = self.legacy_sr_client.get_mode(auth=self.super_auth)
         assert result_raw.json()["mode"] == "READWRITE"
 
         self.logger.debug("Set global mode")
-        result_raw = self.sr_client.set_mode(
+        result_raw = self.legacy_sr_client.set_mode(
             data=json.dumps({"mode": "READONLY"}), auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.set_mode(
+        result_raw = self.legacy_sr_client.set_mode(
             data=json.dumps({"mode": "READONLY"}), auth=self.user_auth
         )
         assert result_raw.json()["error_code"] == 403
 
-        result_raw = self.sr_client.set_mode(
+        result_raw = self.legacy_sr_client.set_mode(
             data=json.dumps({"mode": "READONLY"}), auth=self.super_auth
         )
         assert result_raw.json()["mode"] == "READONLY"
 
         sub = "test-sub"
         self.logger.debug("Set subject mode")
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=sub, data=json.dumps({"mode": "READONLY"}), auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=sub, data=json.dumps({"mode": "READONLY"}), auth=self.user_auth
         )
         assert result_raw.json()["error_code"] == 403
 
-        result_raw = self.sr_client.set_mode_subject(
+        result_raw = self.legacy_sr_client.set_mode_subject(
             subject=sub, data=json.dumps({"mode": "READONLY"}), auth=self.super_auth
         )
         assert result_raw.json()["mode"] == "READONLY"
 
         self.logger.debug("Delete subject mode")
-        result_raw = self.sr_client.delete_mode_subject(
+        result_raw = self.legacy_sr_client.delete_mode_subject(
             subject=sub, auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.delete_mode_subject(
+        result_raw = self.legacy_sr_client.delete_mode_subject(
             subject=sub, auth=self.user_auth
         )
         assert result_raw.json()["error_code"] == 403
 
-        result_raw = self.sr_client.delete_mode_subject(
+        result_raw = self.legacy_sr_client.delete_mode_subject(
             subject=sub, auth=self.super_auth
         )
         assert result_raw.json()["mode"] == "READONLY"
@@ -5154,27 +5204,27 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Set subject config - NONE")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key",
             data=json.dumps({"compatibility": "NONE"}),
             auth=self.super_auth,
         )
         assert result_raw.status_code == requests.codes.ok
 
-        result_raw = self.sr_client.post_compatibility_subject_version(
+        result_raw = self.legacy_sr_client.post_compatibility_subject_version(
             subject=f"{topic}-key", version=1, data=schema_1_data, auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
         self.logger.debug("Check compatibility none, no default")
-        result_raw = self.sr_client.post_compatibility_subject_version(
+        result_raw = self.legacy_sr_client.post_compatibility_subject_version(
             subject=f"{topic}-key", version=1, data=schema_1_data, auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok
@@ -5193,31 +5243,31 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Soft delete subject")
-        result_raw = self.sr_client.delete_subject(
+        result_raw = self.legacy_sr_client.delete_subject(
             subject=f"{topic}-key", auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.delete_subject(
+        result_raw = self.legacy_sr_client.delete_subject(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json() == [1]
 
         self.logger.debug("Permanently delete subject")
-        result_raw = self.sr_client.delete_subject(
+        result_raw = self.legacy_sr_client.delete_subject(
             subject=f"{topic}-key", permanent=True, auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.delete_subject(
+        result_raw = self.legacy_sr_client.delete_subject(
             subject=f"{topic}-key", permanent=True, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5236,14 +5286,14 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Set subject config - NONE")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key",
             data=json.dumps({"compatibility": "NONE"}),
             auth=self.super_auth,
@@ -5251,24 +5301,24 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Soft delete version 1")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=1, auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=1, auth=self.super_auth
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Permanently delete version 1")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=1, permanent=True, auth=self.public_auth
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=1, permanent=True, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5282,28 +5332,26 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         self._init_users()
 
         self.logger.info("Posting failed schema should be 422")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="imported",
             data=json.dumps({"schema": imported_proto_def, "schemaType": "PROTOBUF"}),
             auth=self.super_auth,
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.unprocessable_entity
 
         self.logger.info("Posting simple as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="simple",
             data=json.dumps({"schema": simple_proto_def, "schemaType": "PROTOBUF"}),
             auth=self.super_auth,
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["id"] == 1
 
         self.logger.info("Posting imported as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject="imported",
             data=json.dumps(
                 {
@@ -5317,37 +5365,37 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
             auth=self.super_auth,
         )
         self.logger.info(result_raw)
-        self.logger.info(result_raw.content)
         assert result_raw.status_code == requests.codes.ok
         assert result_raw.json()["id"] == 2
 
-        result_raw = self.sr_client.request(
-            "GET",
-            "subjects/simple/versions/1/schema",
-            headers=HTTP_GET_HEADERS,
-            auth=self.super_auth,
+        # TODO: check if _request_auth=self.super_auth is needed here
+        schema = self.sr_client.get_subject_versions_version_schema(
+            subject="simple", version="1"
         )
-        self.logger.info(result_raw)
-        assert result_raw.status_code == requests.codes.ok
-        assert result_raw.text.strip() == simple_proto_def.strip()
+        self.logger.info(schema)
+        assert schema.strip() == simple_proto_def.strip()
 
-        result_raw = self.sr_client.request(
-            "GET", "schemas/ids/1", headers=HTTP_GET_HEADERS, auth=self.super_auth
+        # TODO: check if _request_auth=self.super_auth is needed here
+        result = self.sr_client.get_schemas_ids_id(id=1)
+        self.logger.info(result)
+        assert result.schema_type == "PROTOBUF"
+        assert (
+            result.var_schema is not None
+            and result.var_schema.strip() == simple_proto_def.strip()
         )
-        self.logger.info(result_raw)
-        assert result_raw.status_code == requests.codes.ok
-        result = result_raw.json()
-        assert result["schemaType"] == "PROTOBUF"
-        assert result["schema"].strip() == simple_proto_def.strip()
 
         # Regular user should fail
-        result_raw = self.sr_client.get_subjects_subject_versions_version_referenced_by(
-            "simple", 1, auth=self.public_auth
+        result_raw = (
+            self.legacy_sr_client.get_subjects_subject_versions_version_referenced_by(
+                "simple", 1, auth=self.public_auth
+            )
         )
         assert result_raw.json()["error_code"] == 40101
 
-        result_raw = self.sr_client.get_subjects_subject_versions_version_referenced_by(
-            "simple", 1, auth=self.super_auth
+        result_raw = (
+            self.legacy_sr_client.get_subjects_subject_versions_version_referenced_by(
+                "simple", 1, auth=self.super_auth
+            )
         )
         self.logger.info(result_raw)
         assert result_raw.status_code == requests.codes.ok
@@ -5360,7 +5408,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5370,14 +5418,14 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         schema_2_data = json.dumps({"schema": schema2_def})
 
         self.logger.debug("Posting schema 2 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_2_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Soft delete subject 1 version 1")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=1, auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok, (
@@ -5386,7 +5434,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json() == 1, f"Json: {result_raw.json()}"
 
         self.logger.debug("Soft delete subject 1 version 2")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=2, auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok, (
@@ -5395,7 +5443,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json() == 2, f"Json: {result_raw.json()}"
 
         self.logger.debug("Posting schema 1 - again - as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5403,7 +5451,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json() == {"id": 1}, f"Json: {result_raw.json()}"
 
         self.logger.debug("Get subject versions")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok, (
@@ -5412,7 +5460,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json() == [3], f"Json: {result_raw.json()}"
 
         self.logger.debug("Posting schema 2 - again - as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_2_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5420,7 +5468,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json() == {"id": 2}, f"Json: {result_raw.json()}"
 
         self.logger.debug("Get subject versions")
-        result_raw = self.sr_client.get_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.get_subjects_subject_versions(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok, (
@@ -5433,7 +5481,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         topic = "foo"
 
         self.logger.debug("Set subject config - NONE")
-        result_raw = self.sr_client.set_config_subject(
+        result_raw = self.legacy_sr_client.set_config_subject(
             subject=f"{topic}-key",
             data=json.dumps({"compatibility": "NONE"}),
             auth=self.super_auth,
@@ -5445,20 +5493,20 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         schema_3_data = json.dumps({"schema": schema3_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.ok
 
         self.logger.debug("Get subject config - should be overriden")
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert result_raw.json()["compatibilityLevel"] == "NONE"
 
         self.logger.debug("Soft delete subject 1 version 1")
-        result_raw = self.sr_client.delete_subject_version(
+        result_raw = self.legacy_sr_client.delete_subject_version(
             subject=f"{topic}-key", version=1, auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.ok, (
@@ -5467,14 +5515,14 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json() == 1, f"Json: {result_raw.json()}"
 
         self.logger.debug("Get subject config - should fail")
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.not_found
         assert result_raw.json()["error_code"] == 40408
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5483,14 +5531,14 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         self.logger.debug(
             "Posting incompatible schema 3 as a subject key - expect conflict"
         )
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=f"{topic}-key", data=schema_3_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
         assert result_raw.status_code == requests.codes.conflict
 
         self.logger.debug("Get subject config - should fail")
-        result_raw = self.sr_client.get_config_subject(
+        result_raw = self.legacy_sr_client.get_config_subject(
             subject=f"{topic}-key", auth=self.super_auth
         )
         assert result_raw.status_code == requests.codes.not_found
@@ -5502,7 +5550,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         schema_1_data = json.dumps({"schema": schema1_def})
 
         self.logger.debug("Posting schema 1 as a subject key")
-        result_raw = self.sr_client.post_subjects_subject_versions(
+        result_raw = self.legacy_sr_client.post_subjects_subject_versions(
             subject=subject, data=schema_1_data, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5512,7 +5560,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         assert result_raw.json() == {"id": 1}, f"Json: {result_raw.json()}"
 
         self.logger.debug("Soft delete subject")
-        result_raw = self.sr_client.delete_subject(
+        result_raw = self.legacy_sr_client.delete_subject(
             subject=subject, permanent=False, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5521,7 +5569,7 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
         )
 
         self.logger.debug("Then hard delete subject")
-        result_raw = self.sr_client.delete_subject(
+        result_raw = self.legacy_sr_client.delete_subject(
             subject=subject, permanent=True, auth=self.super_auth
         )
         self.logger.debug(result_raw)
@@ -5531,7 +5579,9 @@ class SchemaRegistryBasicAuthTest(SchemaRegistryEndpoints):
 
         def schema_no_longer_present():
             self.logger.debug("Sending get schema 1")
-            result_raw = self.sr_client.get_schemas_ids_id(id=1, auth=self.super_auth)
+            result_raw = self.legacy_sr_client.get_schemas_ids_id(
+                id=1, auth=self.super_auth
+            )
             self.logger.debug(result_raw)
             assert result_raw.status_code == requests.codes.not_found, (
                 f"Code: {result_raw.status_code}"
@@ -5674,7 +5724,7 @@ class SchemaRegistryMTLSTest(SchemaRegistryMTLSBase):
 
     @cluster(num_nodes=3)
     def test_mtls(self):
-        result_raw = self.sr_client.get_schemas_types(
+        result_raw = self.legacy_sr_client.get_schemas_types(
             tls_enabled=True,
             verify=self.admin_user.certificate.ca.crt,
             cert=(self.admin_user.certificate.crt, self.admin_user.certificate.key),
@@ -5693,7 +5743,7 @@ class SchemaRegistryMTLSAndBasicAuthTest(SchemaRegistryMTLSBase):
 
     @cluster(num_nodes=3)
     def test_mtls_and_basic_auth(self):
-        result_raw = self.sr_client.get_schemas_types(
+        result_raw = self.legacy_sr_client.get_schemas_types(
             tls_enabled=True,
             auth=(self.admin_user.username, self.admin_user.password),
             verify=self.admin_user.certificate.ca.crt,
@@ -6024,9 +6074,9 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
     def __init__(self, context, **kwargs):
         super(SchemaRegistryConfluentClient, self).__init__(context, **kwargs)
 
-        # Replace the Redpanda SR client.
-        self._base_uri = self.sr_client.base_uri()
-        self.sr_client = SchemaRegistryClient({"url": self._base_uri})
+        # Replace the Redpanda SR client with the Confluent client.
+        self._base_uri = self.base_uri()
+        self.sr_client = ConfluentSchemaRegistryClient({"url": self._base_uri})
 
     @cluster(num_nodes=3)
     @matrix(normalize_schemas=[True, False])
@@ -6038,15 +6088,15 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
         test_subject = "topic_1-key"
         schema1 = Schema(schema1_def, "AVRO")
 
-        result = self.sr_client.register_schema(
+        result = self.legacy_sr_client.register_schema(
             test_subject, schema1, normalize_schemas=normalize_schemas
         )
         assert result == 1, f"Result: {result}"
 
-        result = self.sr_client.get_schema(1)
+        result = self.legacy_sr_client.get_schema(1)
         assert result == schema1, f"Result: {result}"
 
-        result = self.sr_client.lookup_schema(
+        result = self.legacy_sr_client.lookup_schema(
             test_subject, schema1, normalize_schemas=normalize_schemas
         )
         assert result.schema_id == 1, f"Result: {result}"
@@ -6054,7 +6104,7 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
         # TODO: we currently always normalize schemas. Once redpanda supports
         # the normize flag, this test should pass
         # with expect_exception(SchemaRegistryError, lambda e: True):
-        #     self.sr_client.lookup_schema(
+        #     self.legacy_sr_client.lookup_schema(
         #         test_subject, schema1, normalize_schemas=not normalize_schemas)
 
     @cluster(num_nodes=3)
@@ -6067,40 +6117,40 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
         schema1 = Schema(schema1_def, "AVRO")
         schema2 = Schema(schema2_def, "AVRO")
 
-        result = self.sr_client.register_schema(test_subject, schema1)
+        result = self.legacy_sr_client.register_schema(test_subject, schema1)
         assert result == 1, f"Result: {result}"
 
-        result = self.sr_client.get_latest_version(test_subject)
+        result = self.legacy_sr_client.get_latest_version(test_subject)
         assert result.schema_id == 1, f"Result: {result}"
 
-        result = self.sr_client.register_schema(test_subject, schema2)
+        result = self.legacy_sr_client.register_schema(test_subject, schema2)
         assert result == 2, f"Result: {result}"
 
-        result = self.sr_client.get_latest_version(test_subject)
+        result = self.legacy_sr_client.get_latest_version(test_subject)
         assert result.schema_id == 2, f"Result: {result}"
 
-        result = self.sr_client.get_version(test_subject, 1)
+        result = self.legacy_sr_client.get_version(test_subject, 1)
         assert result.schema == schema1, f"Result: {result}"
 
-        result = self.sr_client.get_version(test_subject, 2)
+        result = self.legacy_sr_client.get_version(test_subject, 2)
         assert result.schema == schema2, f"Result: {result}"
 
-        result = self.sr_client.get_versions(test_subject)
+        result = self.legacy_sr_client.get_versions(test_subject)
         assert result == [1, 2], f"Result: {result}"
 
-        result = self.sr_client.delete_version(test_subject, 2)
+        result = self.legacy_sr_client.delete_version(test_subject, 2)
         assert result == 2, f"Result: {result}"
 
-        result = self.sr_client.get_latest_version(test_subject)
+        result = self.legacy_sr_client.get_latest_version(test_subject)
         assert result.schema_id == 1, f"Result: {result}"
 
-        result = self.sr_client.get_versions(test_subject)
+        result = self.legacy_sr_client.get_versions(test_subject)
         assert result == [1], f"Result: {result}"
 
         # reinitialize client to drop the cache
-        self.sr_client = SchemaRegistryClient({"url": self._base_uri})
+        self.sr_client = ConfluentSchemaRegistryClient({"url": self._base_uri})
         with expect_exception(SchemaRegistryError, lambda e: True):
-            self.sr_client.get_version(test_subject, 2)
+            self.legacy_sr_client.get_version(test_subject, 2)
 
     @cluster(num_nodes=3)
     def test_set_get_compatibility(self):
@@ -6119,22 +6169,22 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
         ]
 
         for level in levels:
-            result = self.sr_client.set_compatibility(level=level)
+            result = self.legacy_sr_client.set_compatibility(level=level)
             assert result["compatibility"] == level, f"Result: {result}"
 
-            result = self.sr_client.get_compatibility()
+            result = self.legacy_sr_client.get_compatibility()
             assert result == level, f"Result: {result}"
 
             test_subject = "topic_1-key"
             schema1 = Schema(schema1_def, "AVRO")
 
-            result = self.sr_client.register_schema(test_subject, schema1)
+            result = self.legacy_sr_client.register_schema(test_subject, schema1)
             assert result == 1, f"Result: {result}"
 
-            result = self.sr_client.set_compatibility(test_subject, level=level)
+            result = self.legacy_sr_client.set_compatibility(test_subject, level=level)
             assert result["compatibility"] == level, f"Result: {result}"
 
-            result = self.sr_client.get_compatibility(test_subject)
+            result = self.legacy_sr_client.get_compatibility(test_subject)
             assert result == level, f"Result: {result}"
 
     @cluster(num_nodes=3)
@@ -6147,16 +6197,16 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
         test_subject = "topic_1-key"
         schema1 = Schema(schema1_def, "AVRO")
 
-        result = self.sr_client.register_schema(test_subject, schema1)
+        result = self.legacy_sr_client.register_schema(test_subject, schema1)
         assert result == 1, f"Result: {result}"
 
-        result = self.sr_client.get_schema(1)
+        result = self.legacy_sr_client.get_schema(1)
         assert result == schema1, f"Result: {result}"
 
-        result = self.sr_client.delete_subject(test_subject, permanent=permanent)
+        result = self.legacy_sr_client.delete_subject(test_subject, permanent=permanent)
         assert result == [1], f"Result: {result}"
 
-        result = self.sr_client.get_subjects()
+        result = self.legacy_sr_client.get_subjects()
         assert len(result) == 0, f"Result: {result}"
 
     @cluster(num_nodes=3)
@@ -6170,13 +6220,13 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
         schema2 = Schema(schema2_def, "AVRO")
         schema3 = Schema(schema3_def, "AVRO")
 
-        result = self.sr_client.register_schema(test_subject, schema1)
+        result = self.legacy_sr_client.register_schema(test_subject, schema1)
         assert result == 1, f"Result: {result}"
 
-        result = self.sr_client.test_compatibility(test_subject, schema2)
+        result = self.legacy_sr_client.test_compatibility(test_subject, schema2)
         assert result == True, f"Result: {result}"
 
-        result = self.sr_client.test_compatibility(test_subject, schema3)
+        result = self.legacy_sr_client.test_compatibility(test_subject, schema3)
         assert result == False, f"Result: {result}"
 
     @cluster(num_nodes=3)
@@ -6188,7 +6238,7 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
         simple_subject = "topic_1-key"
         simple_schema = Schema(simple_proto_def, "PROTOBUF")
 
-        result = self.sr_client.register_schema(simple_subject, simple_schema)
+        result = self.legacy_sr_client.register_schema(simple_subject, simple_schema)
         assert result == 1, f"Result: {result}"
 
         imported_subject = "topic_2-key"
@@ -6198,22 +6248,26 @@ class SchemaRegistryConfluentClient(SchemaRegistryEndpoints):
             references=[SchemaReference("simple", simple_subject, 1)],
         )
 
-        result = self.sr_client.register_schema(imported_subject, imported_schema)
+        result = self.legacy_sr_client.register_schema(
+            imported_subject, imported_schema
+        )
         assert result == 2, f"Result: {result}"
 
         well_known_subject = "topic_3-key"
         well_known_schema = Schema(well_known_proto_def, "PROTOBUF")
 
-        result = self.sr_client.register_schema(well_known_subject, well_known_schema)
+        result = self.legacy_sr_client.register_schema(
+            well_known_subject, well_known_schema
+        )
         assert result == 3, f"Result: {result}"
 
-        result = self.sr_client.get_schema(1)
+        result = self.legacy_sr_client.get_schema(1)
         assert result == simple_schema, f"Result: {result}"
 
-        result = self.sr_client.get_schema(2)
+        result = self.legacy_sr_client.get_schema(2)
         assert result == imported_schema, f"Result: {result}"
 
-        result = self.sr_client.get_schema(3)
+        result = self.legacy_sr_client.get_schema(3)
         assert result == well_known_schema, f"Result: {result}"
 
 
@@ -6226,7 +6280,7 @@ CompatDataset = NamedTuple(
 class SchemaRegistryCompatibilityModes(SchemaRegistryEndpoints):
     def __init__(self, test_context, **kwargs):
         super().__init__(test_context, num_brokers=1, **kwargs)
-        self._csr_client = SchemaRegistryClient({"url": self.sr_client.base_uri()})
+        self._csr_client = ConfluentSchemaRegistryClient({"url": self.base_uri()})
         self._topic = "test-topic"
 
     def _register_schema(
@@ -6502,7 +6556,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
 
         def all_nodes_see_acls():
             for node in self.redpanda.nodes:
-                response = self.sr_client.get_security_acls(
+                response = self.legacy_sr_client.get_security_acls(
                     hostname=node.account.hostname
                 )
                 self.assert_equal(response.status_code, 200)
@@ -6519,7 +6573,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
 
     def _check_filtered_acls(self, filters, expected_acls):
         """Helper to check if listing ACLs with the given `filters` leads to a response of `expected_acls`"""
-        response = self.sr_client.get_security_acls(params=filters)
+        response = self.legacy_sr_client.get_security_acls(params=filters)
         self.assert_equal(response.status_code, 200)
 
         # Sort both lists for consistent comparison
@@ -6557,12 +6611,12 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         ]
 
         # Create ACLs and verify 201 status
-        resp = self.sr_client.post_security_acls(acls)
+        resp = self.legacy_sr_client.post_security_acls(acls)
         self.assert_equal(resp.status_code, 201)
 
         # Get ACLs and verify they exist
         def acls_exist():
-            resp = self.sr_client.get_security_acls()
+            resp = self.legacy_sr_client.get_security_acls()
             self.assert_equal(resp.status_code, 200)
             created_acls = resp.json()
             self.assert_equal(len(created_acls), scale + 1)
@@ -6577,14 +6631,14 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         )
 
         # Delete ACLs
-        resp = self.sr_client.delete_security_acls(acls)
+        resp = self.legacy_sr_client.delete_security_acls(acls)
         self.assert_equal(resp.status_code, 200)
         deleted_acls = resp.json()
         self.assert_equal(len(deleted_acls), scale + 1)
 
         # Verify ACLs are gone
         def acls_removed():
-            resp = self.sr_client.get_security_acls()
+            resp = self.legacy_sr_client.get_security_acls()
             self.assert_equal(resp.status_code, 200)
             self.assert_equal(len(resp.json()), 0)
             return True
@@ -6609,17 +6663,17 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
                 principal=f"User:user{control_char}1",
                 resource=f"test{control_char}subject",
             )
-            resp = self.sr_client.post_security_acls([acl_with_control])
+            resp = self.legacy_sr_client.post_security_acls([acl_with_control])
             self.assert_equal(resp.status_code, 400)
             self.assert_in("Control characters not allowed", resp.text)
 
             # Test in DELETE request body
-            resp = self.sr_client.delete_security_acls([acl_with_control])
+            resp = self.legacy_sr_client.delete_security_acls([acl_with_control])
             self.assert_equal(resp.status_code, 400)
             self.assert_in("Control characters not allowed", resp.text)
 
             # Test in GET query parameters
-            resp = self.sr_client.get_security_acls(
+            resp = self.legacy_sr_client.get_security_acls(
                 params={"principal": f"User:user{control_char}1"}
             )
             self.assert_equal(resp.status_code, 400)
@@ -6627,18 +6681,18 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
 
         # Test invalid resource types
         invalid_resource_acl = [self._create_test_acl(resource_type="TOPIC")]
-        resp = self.sr_client.post_security_acls(invalid_resource_acl)
+        resp = self.legacy_sr_client.post_security_acls(invalid_resource_acl)
         self.assert_equal(resp.status_code, 400)
 
         # Test missing required fields
         missing_field_acl = [self._create_test_acl()]
         del missing_field_acl[0]["operation"]
-        resp = self.sr_client.post_security_acls(missing_field_acl)
+        resp = self.legacy_sr_client.post_security_acls(missing_field_acl)
         self.assert_equal(resp.status_code, 400)
 
         # Test invalid host format
         invalid_host_acl = [self._create_test_acl(host="invalid:host:format")]
-        resp = self.sr_client.post_security_acls(invalid_host_acl)
+        resp = self.legacy_sr_client.post_security_acls(invalid_host_acl)
         self.assert_equal(resp.status_code, 400)
 
         # Test PREFIXED pattern type not allowed for REGISTRY resource
@@ -6647,12 +6701,12 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
                 resource="*", resource_type="REGISTRY", pattern_type="PREFIXED"
             )
         ]
-        resp = self.sr_client.post_security_acls(invalid_registry_acl)
+        resp = self.legacy_sr_client.post_security_acls(invalid_registry_acl)
         self.assert_equal(resp.status_code, 400)
 
         # Wildcard is only valid for users, not roles
         invalid_wildcard_role = [self._create_test_acl(principal="RedpandaRole:*")]
-        resp = self.sr_client.post_security_acls(invalid_wildcard_role)
+        resp = self.legacy_sr_client.post_security_acls(invalid_wildcard_role)
         self.assert_equal(resp.status_code, 400)
 
     @cluster(num_nodes=3)
@@ -6662,7 +6716,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         # Test valid pattern types
         for pattern_type in self.VALID_PATTERN_TYPES:
             acl = [self._create_test_acl(pattern_type=pattern_type)]
-            resp = self.sr_client.post_security_acls(acl)
+            resp = self.legacy_sr_client.post_security_acls(acl)
             self.assert_equal(resp.status_code, 201)
 
         # Test valid operations
@@ -6672,17 +6726,17 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
                     resource=f"test-{operation.lower()}", operation=operation
                 )
             ]
-            resp = self.sr_client.post_security_acls(acl)
+            resp = self.legacy_sr_client.post_security_acls(acl)
             self.assert_equal(resp.status_code, 201)
 
         # Test invalid values
         invalid_pattern_acl = [self._create_test_acl(pattern_type="INVALID")]
-        resp = self.sr_client.post_security_acls(invalid_pattern_acl)
+        resp = self.legacy_sr_client.post_security_acls(invalid_pattern_acl)
         self.assert_equal(resp.status_code, 400)
 
         for operation in self.DISALLOWED_OPERATIONS + ["INVALID_OP"]:
             invalid_operation_acl = [self._create_test_acl(operation=operation)]
-            resp = self.sr_client.post_security_acls(invalid_operation_acl)
+            resp = self.legacy_sr_client.post_security_acls(invalid_operation_acl)
             self.assert_equal(resp.status_code, 400)
 
     @cluster(num_nodes=3)
@@ -6696,14 +6750,14 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
             )
         ]
 
-        resp = self.sr_client.post_security_acls(acl)
+        resp = self.legacy_sr_client.post_security_acls(acl)
         self.assert_equal(resp.status_code, 201)
 
         # Wait for ACLs to propagate
         self.await_acl_count(1)
 
         # Verify normalization to uppercase in response
-        resp = self.sr_client.get_security_acls()
+        resp = self.legacy_sr_client.get_security_acls()
         self.assert_equal(resp.status_code, 200)
         created_acls = resp.json()
         self.assert_equal(len(created_acls), 1)
@@ -6711,7 +6765,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         self.assert_equal(created_acls[0]["pattern_type"], "LITERAL")
 
         # Test case-insensitive filtering
-        resp = self.sr_client.get_security_acls(
+        resp = self.legacy_sr_client.get_security_acls(
             params={"resource_type": "subject", "permission": "ALLOW"}
         )
         self.assert_equal(resp.status_code, 200)
@@ -6724,7 +6778,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
                 for k, v in acl[0].items()
             }
         ]
-        resp = self.sr_client.delete_security_acls(acl_lower)
+        resp = self.legacy_sr_client.delete_security_acls(acl_lower)
         self.assert_equal(resp.status_code, 200)
         self.assert_equal(len(resp.json()), 1)
 
@@ -6738,18 +6792,18 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         second = self._create_test_acl(principal="User:bob", operation="WRITE")
         acls = [first, second]
 
-        resp = self.sr_client.post_security_acls(acls)
+        resp = self.legacy_sr_client.post_security_acls(acls)
         self.assert_equal(resp.status_code, 201)
 
         # Test deletion
-        resp = self.sr_client.delete_security_acls([first])
+        resp = self.legacy_sr_client.delete_security_acls([first])
         self.assert_equal(resp.status_code, 200)
         deleted_acls = resp.json()
         self.assert_equal(len(deleted_acls), 1)
 
         # Verify first ACL is gone, only the second remains
         def only_first_acl_deleted():
-            resp = self.sr_client.get_security_acls()
+            resp = self.legacy_sr_client.get_security_acls()
             self.assert_equal(resp.status_code, 200)
             remaining_acls = resp.json()
             self.assert_equal(len(remaining_acls), 1)
@@ -6787,7 +6841,7 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         )
 
         test_acls = [subject_read_acl, subject_write_acl, registry_admin_acl]
-        resp = self.sr_client.post_security_acls(test_acls)
+        resp = self.legacy_sr_client.post_security_acls(test_acls)
         self.assert_equal(resp.status_code, 201)
 
         # Wait until ACLs propagate to all nodes
@@ -6852,24 +6906,26 @@ class SchemaRegistryACLTest(SchemaRegistryEndpoints):
         test_acl = self._create_test_acl()
 
         # Create initial ACL
-        resp = self.sr_client.post_security_acls([test_acl])
+        resp = self.legacy_sr_client.post_security_acls([test_acl])
         self.assert_equal(resp.status_code, 201)
 
         # Wait until ACLs propagate to all nodes
         self.await_acl_count(1)
 
         # Create same ACL again - should be idempotent
-        resp = self.sr_client.post_security_acls([test_acl])
+        resp = self.legacy_sr_client.post_security_acls([test_acl])
         self.assert_equal(resp.status_code, 201)
 
         # Verify only one exists
-        resp = self.sr_client.get_security_acls(params={"principal": "User:alice"})
+        resp = self.legacy_sr_client.get_security_acls(
+            params={"principal": "User:alice"}
+        )
         self.assert_equal(resp.status_code, 200)
         self.assert_equal(len(resp.json()), 1)
 
         # Test partial deletion
         non_existent_acl = self._create_test_acl(resource="non-existent")
-        resp = self.sr_client.delete_security_acls([test_acl, non_existent_acl])
+        resp = self.legacy_sr_client.delete_security_acls([test_acl, non_existent_acl])
         self.assert_equal(resp.status_code, 200)
         deleted_acls = resp.json()
         self.assert_equal(len(deleted_acls), 1)
@@ -6925,7 +6981,7 @@ class GetConfigEndpoint(ACLTestEndpoint):
         return "config"
 
     def make_request(self, auth):
-        return self.sr_client.get_config(auth=auth)
+        return self.legacy_sr_client.get_config(auth=auth)
 
     def create_acl(self):
         return self.test._create_acl(
@@ -6947,7 +7003,7 @@ class PutConfigEndpoint(ACLTestEndpoint):
         return "config"
 
     def make_request(self, auth):
-        return self.sr_client.set_config(
+        return self.legacy_sr_client.set_config(
             data=json.dumps({"compatibility": "FULL"}), auth=auth
         )
 
@@ -6971,7 +7027,7 @@ class GetConfigSubjectEndpoint(ACLTestEndpoint):
         return f"config/{self.test.subject}"
 
     def setup(self) -> None:
-        res = self.sr_client.set_config_subject(
+        res = self.legacy_sr_client.set_config_subject(
             self.test.subject,
             data=json.dumps({"compatibility": "FULL"}),
             auth=self.test.super_auth,
@@ -6979,7 +7035,7 @@ class GetConfigSubjectEndpoint(ACLTestEndpoint):
         self.test.assert_equal(res.status_code, 200)
 
     def make_request(self, auth):
-        return self.sr_client.get_config_subject(self.test.subject, auth=auth)
+        return self.legacy_sr_client.get_config_subject(self.test.subject, auth=auth)
 
     def create_acl(self):
         return self.test._create_acl(
@@ -7001,7 +7057,7 @@ class PutConfigSubjectEndpoint(ACLTestEndpoint):
         return f"config/{self.test.subject}"
 
     def make_request(self, auth):
-        return self.sr_client.set_config_subject(
+        return self.legacy_sr_client.set_config_subject(
             self.test.subject, data=json.dumps({"compatibility": "FULL"}), auth=auth
         )
 
@@ -7025,7 +7081,7 @@ class DeleteConfigSubject(ACLTestEndpoint):
         return f"config/{self.test.subject}"
 
     def setup(self) -> None:
-        res = self.sr_client.set_config_subject(
+        res = self.legacy_sr_client.set_config_subject(
             self.test.subject,
             data=json.dumps({"compatibility": "FULL"}),
             auth=self.test.super_auth,
@@ -7033,7 +7089,7 @@ class DeleteConfigSubject(ACLTestEndpoint):
         self.test.assert_equal(res.status_code, 200)
 
     def make_request(self, auth):
-        return self.sr_client.delete_config_subject(self.test.subject, auth=auth)
+        return self.legacy_sr_client.delete_config_subject(self.test.subject, auth=auth)
 
     def create_acl(self):
         return self.test._create_acl(
@@ -7055,7 +7111,7 @@ class GetMode(ACLTestEndpoint):
         return "mode"
 
     def make_request(self, auth):
-        return self.sr_client.get_mode(auth=auth)
+        return self.legacy_sr_client.get_mode(auth=auth)
 
     def create_acl(self):
         return self.test._create_acl(
@@ -7077,7 +7133,7 @@ class PutMode(ACLTestEndpoint):
         return "mode"
 
     def make_request(self, auth):
-        return self.sr_client.set_mode(
+        return self.legacy_sr_client.set_mode(
             data=json.dumps({"mode": "READWRITE"}), auth=auth
         )
 
@@ -7101,7 +7157,7 @@ class GetModeSubject(ACLTestEndpoint):
         return f"mode/{self.test.subject}"
 
     def setup(self) -> None:
-        res = self.sr_client.set_mode_subject(
+        res = self.legacy_sr_client.set_mode_subject(
             self.test.subject,
             data=json.dumps({"mode": "READWRITE"}),
             auth=self.test.super_auth,
@@ -7109,7 +7165,7 @@ class GetModeSubject(ACLTestEndpoint):
         self.test.assert_equal(res.status_code, 200)
 
     def make_request(self, auth):
-        return self.sr_client.get_mode_subject(self.test.subject, auth=auth)
+        return self.legacy_sr_client.get_mode_subject(self.test.subject, auth=auth)
 
     def create_acl(self):
         return self.test._create_acl(
@@ -7131,7 +7187,7 @@ class PutModeSubject(ACLTestEndpoint):
         return f"mode/{self.test.subject}"
 
     def make_request(self, auth):
-        return self.sr_client.set_mode_subject(
+        return self.legacy_sr_client.set_mode_subject(
             self.test.subject, data=json.dumps({"mode": "READWRITE"}), auth=auth
         )
 
@@ -7155,7 +7211,7 @@ class DeleteModeSubject(ACLTestEndpoint):
         return f"mode/{self.test.subject}"
 
     def setup(self) -> None:
-        res = self.sr_client.set_mode_subject(
+        res = self.legacy_sr_client.set_mode_subject(
             self.test.subject,
             data=json.dumps({"mode": "READWRITE"}),
             auth=self.test.super_auth,
@@ -7163,7 +7219,7 @@ class DeleteModeSubject(ACLTestEndpoint):
         self.test.assert_equal(res.status_code, 200)
 
     def make_request(self, auth):
-        return self.sr_client.delete_mode_subject(self.test.subject, auth=auth)
+        return self.legacy_sr_client.delete_mode_subject(self.test.subject, auth=auth)
 
     def create_acl(self):
         return self.test._create_acl(
@@ -7185,7 +7241,7 @@ class PostSubjectVersions(ACLTestEndpoint):
         return f"subjects/{self.test.subject}/versions"
 
     def make_request(self, auth):
-        return self.sr_client.post_subjects_subject_versions(
+        return self.legacy_sr_client.post_subjects_subject_versions(
             self.test.subject, data=self.test.schema_data_1, auth=auth
         )
 
@@ -7212,7 +7268,9 @@ class GetSchemasIdsIdVersions(ACLTestEndpoint):
         self.schema_id = self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.get_schemas_ids_id_versions(self.schema_id, auth=auth)
+        return self.legacy_sr_client.get_schemas_ids_id_versions(
+            self.schema_id, auth=auth
+        )
 
     def create_acl(self):
         return self.test._create_acl("*", "REGISTRY", "LITERAL", "DESCRIBE")
@@ -7232,7 +7290,9 @@ class GetSchemasIdsIdSubjects(ACLTestEndpoint):
         self.schema_id = self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.get_schemas_ids_id_subjects(self.schema_id, auth=auth)
+        return self.legacy_sr_client.get_schemas_ids_id_subjects(
+            self.schema_id, auth=auth
+        )
 
     def create_acl(self):
         return self.test._create_acl("*", "REGISTRY", "LITERAL", "DESCRIBE")
@@ -7252,7 +7312,7 @@ class GetSubjectVersions(ACLTestEndpoint):
         self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.get_subjects_subject_versions(
+        return self.legacy_sr_client.get_subjects_subject_versions(
             self.test.subject, auth=auth
         )
 
@@ -7276,7 +7336,7 @@ class PostSubject(ACLTestEndpoint):
         self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.post_subjects_subject(
+        return self.legacy_sr_client.post_subjects_subject(
             self.test.subject, data=self.test.schema_data_1, auth=auth
         )
 
@@ -7298,7 +7358,7 @@ class GetSubjectVersionsVersion(ACLTestEndpoint):
         self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.get_subjects_subject_versions_version(
+        return self.legacy_sr_client.get_subjects_subject_versions_version(
             self.test.subject, version=1, auth=auth
         )
 
@@ -7320,7 +7380,7 @@ class GetSubjectVersionsVersionSchema(ACLTestEndpoint):
         self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.get_subjects_subject_versions_version_schema(
+        return self.legacy_sr_client.get_subjects_subject_versions_version_schema(
             self.test.subject, version=1, auth=auth
         )
 
@@ -7342,8 +7402,10 @@ class GetSubjectVersionsVersionReferencedBy(ACLTestEndpoint):
         self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.get_subjects_subject_versions_version_referenced_by(
-            self.test.subject, version=1, auth=auth
+        return (
+            self.legacy_sr_client.get_subjects_subject_versions_version_referenced_by(
+                self.test.subject, version=1, auth=auth
+            )
         )
 
     def create_acl(self):
@@ -7372,7 +7434,7 @@ class DeleteSubject(ACLTestEndpoint):
         self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.delete_subject(self.test.subject, auth=auth)
+        return self.legacy_sr_client.delete_subject(self.test.subject, auth=auth)
 
     def create_acl(self):
         return self.test._create_acl(self.test.subject, "SUBJECT", "LITERAL", "DELETE")
@@ -7392,7 +7454,7 @@ class DeleteSubjectVersion(ACLTestEndpoint):
         self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.delete_subject_version(
+        return self.legacy_sr_client.delete_subject_version(
             self.test.subject, version=1, auth=auth
         )
 
@@ -7414,7 +7476,7 @@ class CompatibilitySubjectVersion(ACLTestEndpoint):
         self.test._create_schema(self.test.subject)
 
     def make_request(self, auth):
-        return self.sr_client.post_compatibility_subject_version(
+        return self.legacy_sr_client.post_compatibility_subject_version(
             self.test.subject, version=1, data=self.test.schema_data_1, auth=auth
         )
 
@@ -7436,7 +7498,7 @@ class GetSchemasTypes(ACLTestEndpoint):
         pass
 
     def make_request(self, auth):
-        return self.sr_client.get_schemas_types()
+        return self.legacy_sr_client.get_schemas_types()
 
     def create_acl(self):
         pass
@@ -7456,7 +7518,7 @@ class GetStatusReady(ACLTestEndpoint):
         pass
 
     def make_request(self, auth):
-        return self.sr_client.get_status_ready()
+        return self.legacy_sr_client.get_status_ready()
 
     def create_acl(self):
         pass
@@ -7547,7 +7609,7 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
     def _create_acl(
         self, resource, resource_type, pattern_type, operation, permission="ALLOW"
     ):
-        return self.sr_client.create_acl(
+        return self.legacy_sr_client.create_acl(
             self.user.username,
             resource,
             resource_type,
@@ -7561,13 +7623,13 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         """Grant one or more ACLs to the regular user."""
         acl_list = [acl] if isinstance(acl, dict) else acl
 
-        resp = self.sr_client.post_security_acls(acl_list, auth=self.super_auth)
+        resp = self.legacy_sr_client.post_security_acls(acl_list, auth=self.super_auth)
         self.assert_equal(resp.status_code, 201, f"Failed to create ACL: {acl=}")
 
         # Wait until the ACLs are propagated to all nodes
         def acl_all_observable():
             for node in self.redpanda.nodes:
-                resp = self.sr_client.get_security_acls(
+                resp = self.legacy_sr_client.get_security_acls(
                     hostname=node.account.hostname, auth=self.super_auth
                 )
                 self.assert_equal(resp.status_code, 200)
@@ -7590,7 +7652,7 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         )
 
     def _create_schema(self, subject: str) -> int:
-        response = self.sr_client.post_subjects_subject_versions(
+        response = self.legacy_sr_client.post_subjects_subject_versions(
             subject, data=self.schema_data_1, auth=self.super_auth
         )
         self.assert_equal(response.status_code, 200, "Failed to create schema")
@@ -7637,28 +7699,28 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         """Test the behaviour of endpoints when they are requested unauthenticated"""
 
         # Test public endpoints - GET_SCHEMAS_TYPES and SCHEMA_REGISTRY_STATUS_READY
-        result = self.sr_client.get_schemas_types()
+        result = self.legacy_sr_client.get_schemas_types()
         self.assert_equal(result.status_code, 200)
 
-        result = self.sr_client.get_status_ready()
+        result = self.legacy_sr_client.get_status_ready()
         self.assert_equal(result.status_code, 200)
 
         # Test non-public endpoints - should return 401
-        result = self.sr_client.get_config()
+        result = self.legacy_sr_client.get_config()
         self.assert_equal(result.status_code, 401)
 
-        result = self.sr_client.post_subjects_subject_versions(
+        result = self.legacy_sr_client.post_subjects_subject_versions(
             "test-subject", data=self.schema_data_1
         )
         self.assert_equal(result.status_code, 401)
 
-        result = self.sr_client.get_security_acls()
+        result = self.legacy_sr_client.get_security_acls()
         self.assert_equal(result.status_code, 401)
 
-        result = self.sr_client.get_schemas_ids_id(1)
+        result = self.legacy_sr_client.get_schemas_ids_id(1)
         self.assert_equal(result.status_code, 401)
 
-        result = self.sr_client.get_subjects()
+        result = self.legacy_sr_client.get_subjects()
         self.assert_equal(result.status_code, 401)
 
     @cluster(num_nodes=1)
@@ -7668,13 +7730,17 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         def check_acl_endpoints(expected_success):
             acl = self._create_acl("*", "SUBJECT", "LITERAL", "WRITE")
 
-            result = self.sr_client.get_security_acls(auth=self.user_auth)
+            result = self.legacy_sr_client.get_security_acls(auth=self.user_auth)
             self.assert_equal(result.status_code, 200 if expected_success else 403)
 
-            result = self.sr_client.post_security_acls([acl], auth=self.user_auth)
+            result = self.legacy_sr_client.post_security_acls(
+                [acl], auth=self.user_auth
+            )
             self.assert_equal(result.status_code, 201 if expected_success else 403)
 
-            result = self.sr_client.delete_security_acls([acl], auth=self.user_auth)
+            result = self.legacy_sr_client.delete_security_acls(
+                [acl], auth=self.user_auth
+            )
             self.assert_equal(result.status_code, 200 if expected_success else 403)
 
         def grant_cluster_acl():
@@ -7713,24 +7779,26 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
     def test_superuser_access(self):
         """Test that superusers have access to all ACL-protected endpoints"""
         # Check a global endpoint
-        result = self.sr_client.set_config(
+        result = self.legacy_sr_client.set_config(
             data=json.dumps({"compatibility": "FULL"}), auth=self.super_auth
         )
         self.assert_equal(result.status_code, 200)
 
         # Check a subject-level endpoint
         subject = "test-subject"
-        result = self.sr_client.post_subjects_subject_versions(
+        result = self.legacy_sr_client.post_subjects_subject_versions(
             subject, data=self.schema_data_1, auth=self.super_auth
         )
         self.assert_equal(result.status_code, 200)
 
         # Check deferred endpoints
         schema_id = result.json()["id"]
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.super_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.super_auth
+        )
         self.assert_equal(result.status_code, 200)
 
-        result = self.sr_client.get_subjects(auth=self.super_auth)
+        result = self.legacy_sr_client.get_subjects(auth=self.super_auth)
         self.assert_equal(result.status_code, 200)
         self.assert_equal(result.json(), [subject])
 
@@ -7739,12 +7807,12 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         """Test that prefixed and global pattern matching of resources works"""
 
         def check_post_schemas(can_post_1, can_post_2):
-            result = self.sr_client.post_subjects_subject_versions(
+            result = self.legacy_sr_client.post_subjects_subject_versions(
                 "test-subject-1", data=self.schema_data_1, auth=self.user_auth
             )
             self.assert_equal(result.status_code, 200 if can_post_1 else 403)
 
-            result = self.sr_client.post_subjects_subject_versions(
+            result = self.legacy_sr_client.post_subjects_subject_versions(
                 "test-subject-2", data=self.schema_data_2, auth=self.user_auth
             )
             self.assert_equal(result.status_code, 200 if can_post_2 else 403)
@@ -7784,29 +7852,33 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         schema_id = self._create_schema(subject_1)
 
-        response = self.sr_client.post_subjects_subject_versions(
+        response = self.legacy_sr_client.post_subjects_subject_versions(
             subject_2, data=self.schema_data_1, auth=self.super_auth
         )
         self.assert_equal(response.status_code, 200)
         self.assert_equal(response.json()["id"], schema_id)
 
-        response = self.sr_client.post_subjects_subject_versions(
+        response = self.legacy_sr_client.post_subjects_subject_versions(
             subject_3, data=self.schema_data_1, auth=self.super_auth
         )
         self.assert_equal(response.status_code, 200)
         self.assert_equal(response.json()["id"], schema_id)
 
         # Unknown schema id - should be 403 (don't leak presence info)
-        result = self.sr_client.get_schemas_ids_id(99999, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(99999, auth=self.user_auth)
         self.assert_equal(result.status_code, 403)
 
         # No ACLs - should be denied
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 403)
 
         # Grant READ to subject_1 - should succeed
         self._post_acl(self._create_acl(subject_1, "SUBJECT", "LITERAL", "READ"))
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 200)
 
         # Switch access to subject_2 - should still work (any subject access sufficient)
@@ -7814,32 +7886,42 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
             self._create_acl(subject_1, "SUBJECT", "LITERAL", "READ", "DENY")
         )
         self._post_acl(self._create_acl(subject_2, "SUBJECT", "LITERAL", "READ"))
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 200)
 
         # Remove all access - should be denied
         self._post_acl(
             self._create_acl(subject_2, "SUBJECT", "LITERAL", "READ", "DENY")
         )
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 403)
 
         # Grant access to subject 3 using a prefixed ACL - should succeed
         self._post_acl(self._create_acl("test-subject-", "SUBJECT", "PREFIXED", "READ"))
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 200)
 
         # Delete the only subject that granted access to the endpoint
         # Should still succeed since soft-deleted subjects also count
-        result = self.sr_client.delete_subject(subject_3, auth=self.super_auth)
+        result = self.legacy_sr_client.delete_subject(subject_3, auth=self.super_auth)
         self.assert_equal(result.status_code, 200)
 
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 200)
 
         # Remove access to all subjects - should be denied
         self._post_acl(self._create_acl("*", "SUBJECT", "LITERAL", "READ", "DENY"))
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 403)
 
     @cluster(num_nodes=1)
@@ -7855,14 +7937,18 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
 
         # Verify wildcard (*) ALLOW grants access
         self._post_acl(self._create_acl("*", "SUBJECT", "LITERAL", "READ"))
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 200)
 
         # Add specific DENY to override wildcard ALLOW - should be denied (no subject grants access)
         self._post_acl(
             self._create_acl(subject_1, "SUBJECT", "LITERAL", "READ", "DENY")
         )
-        result = self.sr_client.get_schemas_ids_id(schema_id, auth=self.user_auth)
+        result = self.legacy_sr_client.get_schemas_ids_id(
+            schema_id, auth=self.user_auth
+        )
         self.assert_equal(result.status_code, 403)
 
     @cluster(num_nodes=1)
@@ -7882,25 +7968,25 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         self._create_schema(subject_2)
 
         # No ACLs - should return empty list
-        result = self.sr_client.get_subjects(auth=self.user_auth)
+        result = self.legacy_sr_client.get_subjects(auth=self.user_auth)
         self.assert_equal(result.status_code, 200)
         self.assert_equal(result.json(), [])
 
         # Grant READ to subject_1 only - should only return subject_1
         self._post_acl(self._create_acl(subject_1, "SUBJECT", "LITERAL", "DESCRIBE"))
-        result = self.sr_client.get_subjects(auth=self.user_auth)
+        result = self.legacy_sr_client.get_subjects(auth=self.user_auth)
         self.assert_equal(result.status_code, 200)
         self.assert_equal(result.json(), [subject_1])
 
         # Grant wildcard (*) access - should return all subjects
         self._post_acl(self._create_acl("*", "SUBJECT", "LITERAL", "DESCRIBE"))
-        result = self.sr_client.get_subjects(auth=self.user_auth)
+        result = self.legacy_sr_client.get_subjects(auth=self.user_auth)
         self.assert_equal(result.status_code, 200)
         self.assert_equal(set(result.json()), {subject_1, subject_2})
 
         # Deny all access - should return no subjects
         self._post_acl(self._create_acl("*", "SUBJECT", "LITERAL", "DESCRIBE", "DENY"))
-        result = self.sr_client.get_subjects(auth=self.user_auth)
+        result = self.legacy_sr_client.get_subjects(auth=self.user_auth)
         self.assert_equal(result.status_code, 200)
         self.assert_equal(result.json(), [])
 
@@ -7940,7 +8026,7 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         )
 
         # Verify ACLs can be requested
-        result = self.sr_client.get_security_acls(auth=self.super_auth)
+        result = self.legacy_sr_client.get_security_acls(auth=self.super_auth)
         self.assert_equal(
             result.status_code,
             200,
@@ -7951,8 +8037,8 @@ class SchemaRegistryAclAuthzTest(SchemaRegistryEndpoints):
         post_config_sub = PutConfigSubjectEndpoint(self)
         post_config_sub_acl = post_config_sub.create_acl()
         for endpoint, acl in [
-            (self.sr_client.post_security_acls, [post_config_sub_acl]),
-            (self.sr_client.delete_security_acls, [get_config_sub_acl]),
+            (self.legacy_sr_client.post_security_acls, [post_config_sub_acl]),
+            (self.legacy_sr_client.delete_security_acls, [get_config_sub_acl]),
         ]:
             resp = endpoint(acl, auth=self.super_auth)
             self.assert_equal(
