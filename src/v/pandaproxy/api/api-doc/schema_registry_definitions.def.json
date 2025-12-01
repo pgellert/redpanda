@@ -28,7 +28,8 @@
                 "type": "string"
               },
               "subject": {
-                "type": "string"
+                "type": "string",
+                "description": "Subject name, optionally qualified with a context using the syntax ':.context:subject' (e.g., ':.production:user-value'). Unqualified subjects (e.g., 'user-value') use the default context '.'."
               },
               "version": {
                 "type": "integer"
@@ -42,7 +43,8 @@
       "type": "object",
       "properties": {
         "subject": {
-          "type": "string"
+          "type": "string",
+          "description": "Subject name. Returned as qualified syntax ':.context:subject' when in a non-default context, or as an unqualified name when in the default context '.'."
         },
         "version": {
           "type": "integer"
@@ -62,7 +64,8 @@
                 "type": "string"
               },
               "subject": {
-                "type": "string"
+                "type": "string",
+                "description": "Subject name, optionally qualified with a context using the syntax ':.context:subject' (e.g., ':.production:user-value'). Unqualified subjects (e.g., 'user-value') use the default context '.'."
               },
               "version": {
                 "type": "integer"

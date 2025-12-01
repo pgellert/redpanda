@@ -8,7 +8,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "defaultToGlobal",
@@ -50,7 +51,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "config",
@@ -88,7 +90,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           }
         ],
         "produces": [
@@ -264,7 +267,7 @@
         "parameters": [
           {
             "name": "subject",
-            "description": "The subject to get the mode for.",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value').",
             "in": "path",
             "required": true,
             "type": "string"
@@ -314,7 +317,7 @@
         "parameters": [
           {
             "name": "subject",
-            "description": "The subject to set the mode for.",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value').",
             "in": "path",
             "required": true,
             "type": "string"
@@ -372,7 +375,7 @@
         "parameters": [
           {
             "name": "subject",
-            "description": "The subject to delete the mode for.",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value').",
             "in": "path",
             "required": true,
             "type": "string"
@@ -599,7 +602,8 @@
             "name": "subjectPrefix",
             "in": "query",
             "required": false,
-            "type": "string"
+            "type": "string",
+            "description": "Filter subjects by prefix. Can be an unqualified prefix (e.g., 'user-') or a qualified prefix with context (e.g., ':.production:' to list all subjects in the production context, or ':.production:user-' for a specific prefix within that context)."
           }
         ],
         "produces": [
@@ -640,7 +644,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "normalize",
@@ -721,7 +726,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "permanent",
@@ -769,7 +775,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "deleted",
@@ -820,7 +827,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "normalize",
@@ -883,7 +891,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "version",
@@ -952,7 +961,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "version",
@@ -1011,7 +1021,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "version",
@@ -1082,7 +1093,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "version",
@@ -1138,7 +1150,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "version",
@@ -1198,7 +1211,8 @@
             "name": "subject",
             "in": "path",
             "required": true,
-            "type": "string"
+            "type": "string",
+            "description": "Subject name. Can be an unqualified subject (e.g., 'user-value') for the default context, or a qualified subject with explicit context using the syntax ':.context:subject' (e.g., ':.production:user-value')."
           },
           {
             "name": "version",
