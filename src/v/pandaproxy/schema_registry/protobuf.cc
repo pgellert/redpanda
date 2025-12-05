@@ -277,7 +277,7 @@ public:
                 throw as_exception(error_collector.error());
             }
         }
-        const auto& sub = schema.sub()();
+        const auto& sub = schema.sub().to_string();
         _fdp.set_name(std::string_view(sub));
         return _fdp;
     }
@@ -443,10 +443,12 @@ ss::future<pb::FileDescriptorProto> build_file_with_refs(
         try {
             auto dep = co_await store.get_subject_schema(
               ref.sub, ref.version, include_deleted::yes);
+            // TODO: this is a behaviour change here, double check that this is
+            // correct -- subject{ref.name} -> ref.sub
             co_await build_file_with_refs(
               dp,
               store,
-              subject_schema{subject{ref.name}, std::move(dep.schema).def()},
+              subject_schema{ref.sub, std::move(dep.schema).def()},
               normalize::no);
         } catch (const exception& e) {
             if (failed_subject_schema_lookup(e.code())) {
@@ -660,7 +662,7 @@ ss::future<subject_schema> make_canonical_protobuf_schema(
   subject_schema schema,
   normalize norm,
   output_format format) {
-    subject sub = schema.sub();
+    auto sub = schema.sub();
     co_return subject_schema{
       std::move(sub),
       co_await validate_protobuf_schema(
@@ -674,7 +676,7 @@ ss::future<schema_definition> format_protobuf_schema_definition(
         throw as_exception(format_not_supported(format));
     case output_format::serialized: {
         auto serialized = co_await make_canonical_protobuf_schema(
-          store, {{}, std::move(schema)}, normalize::no, format);
+          store, {{{}, {}}, std::move(schema)}, normalize::no, format);
         co_return std::move(serialized).def();
     }
     default:

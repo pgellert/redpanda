@@ -60,7 +60,7 @@ void write_encoded_schema_def(
     w->append(def.refs().size());
     for (const auto& ref : def.refs()) {
         w->append_with_length(ref.name);
-        w->append_with_length(ref.sub());
+        w->append_with_length(ref.sub.to_string());
         w->append(ref.version());
     }
 }
@@ -82,6 +82,7 @@ read_encoded_schema_def(ffi::reader* r) {
         auto name = r->read_sized_string();
         auto sub = r->read_sized_string();
         auto v = int(r->read_varint());
+        // TODO:
         refs.emplace_back(name, subject(sub), schema_version(v));
     }
     return {std::move(def), *type, std::move(refs)};

@@ -144,70 +144,70 @@ server::routes_t get_schema_registry_routes(ss::gate& gate, one_shot& es) {
       ss::httpd::schema_registry_json::get_config,
       auth::level::user,
       acl_operation::describe_configs,
-      registry_resource{},
+      auth::global{},
       get_config));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::put_config,
       auth::level::user,
       acl_operation::alter_configs,
-      registry_resource{},
+      auth::global{},
       put_config));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::get_config_subject,
       auth::level::user,
       acl_operation::describe_configs,
-      subject{},
+      auth::subject{},
       get_config_subject));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::put_config_subject,
       auth::level::user,
       acl_operation::alter_configs,
-      subject{},
+      auth::subject{},
       put_config_subject));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::delete_config_subject,
       auth::level::user,
       acl_operation::alter_configs,
-      subject{},
+      auth::subject{},
       delete_config_subject));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::get_mode,
       auth::level::user,
       acl_operation::describe_configs,
-      registry_resource{},
+      auth::global{},
       get_mode));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::put_mode,
       auth::level::superuser,
       acl_operation::alter_configs,
-      registry_resource{},
+      auth::global{},
       put_mode));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::get_mode_subject,
       auth::level::user,
       acl_operation::describe_configs,
-      subject{},
+      auth::subject{},
       get_mode_subject));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::put_mode_subject,
       auth::level::superuser,
       acl_operation::alter_configs,
-      subject{},
+      auth::subject{},
       put_mode_subject));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::delete_mode_subject,
       auth::level::superuser,
       acl_operation::alter_configs,
-      subject{},
+      auth::subject{},
       delete_mode_subject));
 
     routes.routes.emplace_back(wrap(
@@ -228,14 +228,14 @@ server::routes_t get_schema_registry_routes(ss::gate& gate, one_shot& es) {
       ss::httpd::schema_registry_json::get_schemas_ids_id_versions,
       auth::level::user,
       acl_operation::describe,
-      registry_resource{},
+      auth::global{},
       get_schemas_ids_id_versions));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::get_schemas_ids_id_subjects,
       auth::level::user,
       acl_operation::describe,
-      registry_resource{},
+      auth::global{},
       get_schemas_ids_id_subjects));
 
     routes.routes.emplace_back(wrap(
@@ -249,35 +249,35 @@ server::routes_t get_schema_registry_routes(ss::gate& gate, one_shot& es) {
       ss::httpd::schema_registry_json::get_subject_versions,
       auth::level::user,
       acl_operation::describe,
-      subject{},
+      auth::subject{},
       get_subject_versions));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::post_subject,
       auth::level::user,
       acl_operation::read,
-      subject{},
+      auth::subject{},
       post_subject));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::post_subject_versions,
       auth::level::user,
       acl_operation::write,
-      subject{},
+      auth::subject{},
       post_subject_versions));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::get_subject_versions_version,
       auth::level::user,
       acl_operation::read,
-      subject{},
+      auth::subject{},
       get_subject_versions_version));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::get_subject_versions_version_schema,
       auth::level::user,
       acl_operation::read,
-      subject{},
+      auth::subject{},
       get_subject_versions_version_schema));
 
     routes.routes.emplace_back(wrap(
@@ -285,7 +285,7 @@ server::routes_t get_schema_registry_routes(ss::gate& gate, one_shot& es) {
         get_subject_versions_version_referenced_by,
       auth::level::user,
       acl_operation::describe,
-      registry_resource{},
+      auth::global{},
       get_subject_versions_version_referenced_by));
 
     routes.routes.emplace_back(wrap(
@@ -293,28 +293,28 @@ server::routes_t get_schema_registry_routes(ss::gate& gate, one_shot& es) {
         get_subject_versions_version_referenced_by_deprecated,
       auth::level::user,
       acl_operation::describe,
-      registry_resource{},
+      auth::global{},
       get_subject_versions_version_referenced_by));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::delete_subject,
       auth::level::user,
       acl_operation::remove,
-      subject{},
+      auth::subject{},
       delete_subject));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::delete_subject_version,
       auth::level::user,
       acl_operation::remove,
-      subject{},
+      auth::subject{},
       delete_subject_version));
 
     routes.routes.emplace_back(wrap(
       ss::httpd::schema_registry_json::compatibility_subject_version,
       auth::level::user,
       acl_operation::read,
-      subject{},
+      auth::subject{},
       compatibility_subject_version));
 
     routes.routes.emplace_back(wrap(
@@ -344,6 +344,13 @@ server::routes_t get_schema_registry_routes(ss::gate& gate, one_shot& es) {
       acl_operation::alter,
       security::default_cluster_name,
       delete_security_acls));
+
+    routes.routes.emplace_back(wrap(
+      ss::httpd::schema_registry_json::get_contexts,
+      auth::level::superuser,
+      acl_operation::read,
+      auth::global{},
+      get_contexts));
 
     return routes;
 }

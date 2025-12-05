@@ -104,7 +104,7 @@ const pps::config_value config_value_sub{
   .compat = pps::compatibility_level::forward_transitive,
   .sub{pps::subject{"my-kafka-value"}}};
 
-constexpr std::string_view delete_subject_key_sv{
+constexpr std::string_view delete_context_subject_sv{
   R"({
   "keytype": "DELETE_SUBJECT",
   "subject": "my-kafka-value",
@@ -112,7 +112,7 @@ constexpr std::string_view delete_subject_key_sv{
   "seq": 42,
   "node": 2
 })"};
-const pps::delete_subject_key delete_subject_key{
+const pps::delete_context_subject delete_context_subject{
   .seq{model::offset{42}},
   .node{model::node_id{2}},
   .sub{pps::subject{"my-kafka-value"}}};
@@ -181,11 +181,12 @@ BOOST_AUTO_TEST_CASE(test_storage_serde) {
 
     {
         auto val = ppj::impl::rjson_parse(
-          delete_subject_key_sv.data(), pps::delete_subject_key_handler<>{});
-        BOOST_CHECK_EQUAL(delete_subject_key, val);
+          delete_context_subject_sv.data(),
+          pps::delete_context_subject_handler<>{});
+        BOOST_CHECK_EQUAL(delete_context_subject, val);
 
-        auto str = ppj::rjson_serialize_str(delete_subject_key);
-        BOOST_CHECK_EQUAL(str, ::json::minify(delete_subject_key_sv));
+        auto str = ppj::rjson_serialize_str(delete_context_subject);
+        BOOST_CHECK_EQUAL(str, ::json::minify(delete_context_subject_sv));
     }
 
     {

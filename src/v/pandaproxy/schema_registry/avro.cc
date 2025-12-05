@@ -583,7 +583,7 @@ ss::future<avro_schema_definition>
 make_avro_schema_definition(schema_getter& store, subject_schema schema) {
     std::optional<avro::Exception> ex;
     try {
-        auto name = schema.sub()();
+        auto name = schema.sub().to_string();
         auto schema_refs = schema.def().refs().copy();
         auto refs = co_await collect_schema(store, {}, name, std::move(schema));
         iobuf_istream sis{std::move(refs).flatten()()};

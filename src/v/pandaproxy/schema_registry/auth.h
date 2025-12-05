@@ -36,7 +36,7 @@ public:
     };
 
     using global = registry_resource;
-    using subject = subject;
+    using subject = context_subject;
     using cluster = security::acl_cluster_name;
     // AuthZ not required
     using none = named_type<std::monostate, class none_tag>;

@@ -61,7 +61,7 @@ inline model::record_batch make_delete_subject_batch(pps::subject sub) {
 
     rb.add_raw_kv(
       to_json_iobuf(
-        pps::delete_subject_key{
+        pps::delete_context_subject{
           .seq{model::offset{0}}, .node{model::node_id{0}}, .sub{sub}}),
       to_json_iobuf(pps::delete_subject_value{.sub{sub}}));
     return std::move(rb).build();

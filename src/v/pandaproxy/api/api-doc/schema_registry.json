@@ -1491,4 +1491,27 @@
           }
         }
       }
+    },
+    "/contexts": {
+      "get": {
+        "summary": "List the schema contexts.",
+        "operationId": "get_contexts",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "schema": {
+              "$ref": "#/definitions/error_body"
+            }
+          }
+        }
+      }
     }

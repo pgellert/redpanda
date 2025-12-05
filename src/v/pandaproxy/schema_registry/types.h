@@ -15,16 +15,21 @@
 #include "base/seastarx.h"
 #include "container/chunked_vector.h"
 #include "json/iobuf_writer.h"
+#include "json/writer.h"
 #include "kafka/protocol/errors.h"
 #include "model/metadata.h"
+#include "pandaproxy/schema_registry/error.h"
 #include "strings/string_switch.h"
 #include "utils/named_type.h"
 
 #include <seastar/core/sstring.hh>
 #include <seastar/util/bool_class.hh>
 
+#include <__expected/expected.h>
 #include <avro/ValidSchema.hh>
 
+#include <algorithm>
+#include <cctype>
 #include <iosfwd>
 #include <type_traits>
 
@@ -129,7 +134,134 @@ using registry_resource = named_type<ss::sstring, struct registry_resource_tag>;
 ///
 /// Typically it will be "<topic>-key" or "<topic>-value".
 using subject = named_type<ss::sstring, struct subject_tag>;
-static const subject invalid_subject{};
+
+// An empty subject constant. In schema registry records, a context_subject with
+// an empty subject field indicates a context-level operation (e.g., set the
+// context to IMPORT mode).
+static const subject empty_subject{""};
+
+/// \brief A schema context, used for namespacing schemas and schema ids. Can be
+/// used to implement multi-tenancy, environment (e.g., dev, staging, prod)
+/// separation, and so on. By default, schemas are stored under the "." context.
+using context = named_type<ss::sstring, struct context_tag>;
+static const context default_context{"."};
+
+// A subject that is valid within a context.
+struct context_subject {
+    context ctx;
+    subject sub;
+
+    // TODO: remove this, it is only for easier source code migration
+    context_subject(subject s)
+      : ctx{default_context}
+      , sub{std::move(s)} {}
+
+    constexpr context_subject() = default;
+
+    context_subject(context c, subject s)
+      : ctx{std::move(c)}
+      , sub{std::move(s)} {}
+
+    friend bool operator==(const context_subject&, const context_subject&)
+      = default;
+
+    friend auto
+    operator<=>(const context_subject& lhs, const context_subject& rhs) {
+        if (auto cmp = lhs.ctx() <=> rhs.ctx(); cmp != 0) {
+            return cmp;
+        }
+        return lhs.sub() <=> rhs.sub();
+    }
+
+    template<typename H>
+    friend H AbslHashValue(H h, const context_subject& key) {
+        return H::combine(std::move(h), key.ctx, key.sub);
+    }
+
+    ss::sstring to_string() const {
+        // Format as qualified subject: ":.context:subject" or "subject" if
+        // default context
+        if (ctx == pandaproxy::schema_registry::default_context) {
+            return ss::format("{}", sub);
+        }
+        return ss::format(":{}:{}", ctx(), sub());
+    }
+
+    static std::expected<context_subject, ss::sstring>
+    from_string(std::string_view input) {
+        // Check for qualified syntax: starts with ":."
+        if (input.starts_with(":.")) {
+            // Find the second colon that separates context from subject
+            auto second_colon = input.find(':', 2);
+
+            if (second_colon == std::string_view::npos) {
+                // Malformed: has ":." prefix but no closing ":"
+                return std::unexpected(
+                  ss::format(
+                    "Invalid qualified subject syntax '{}': expected format "
+                    "':.context:subject'",
+                    input));
+            }
+
+            // Extract context (includes the leading ".")
+            auto ctx_str = input.substr(1, second_colon - 1);
+
+            // Validate context name
+            if (ctx_str.empty() || ctx_str[0] != '.') {
+                return std::unexpected(
+                  ss::format(
+                    "Invalid context name '{}': must start with '.'", ctx_str));
+            }
+
+            // Validate context characters (only after the initial ".")
+            auto is_valid_context_char = [](char c) {
+                // TODO: use absl for isalnum
+                return std::isalnum(static_cast<unsigned char>(c)) || c == '.'
+                       || c == '_' || c == '-';
+            };
+
+            if (!std::all_of(
+                  ctx_str.begin() + 1, ctx_str.end(), is_valid_context_char)) {
+                return std::unexpected(
+                  ss::format(
+                    "Invalid context name '{}': may only contain alphanumeric "
+                    "characters, '.', '_', or '-'",
+                    ctx_str));
+            }
+
+            // Extract subject name (everything after second colon)
+            auto sub_str = input.substr(second_colon + 1);
+
+            if (sub_str.empty()) {
+                return std::unexpected(
+                  ss::format(
+                    "Invalid qualified subject '{}': subject name cannot be "
+                    "empty",
+                    input));
+            }
+
+            return context_subject{
+              context{ss::sstring{ctx_str}}, subject{ss::sstring{sub_str}}};
+        }
+
+        // Unqualified subject - use default context
+        if (input.empty()) {
+            return std::unexpected(ss::sstring{"Subject name cannot be empty"});
+        }
+
+        return context_subject{default_context, subject{ss::sstring{input}}};
+    }
+
+    bool starts_with(const ss::sstring& prefix) const {
+        // TODO: consider optimizing the starts_with check
+        return to_string().starts_with(prefix);
+    }
+
+    // For authorizer support
+    ss::sstring operator()() const { return ss::sstring{to_string()}; }
+};
+
+static const context_subject invalid_subject{default_context, subject{""}};
 
 ///\brief The version of the schema registered with a subject.
 ///
@@ -150,7 +282,7 @@ struct schema_reference {
     operator<(const schema_reference& lhs, const schema_reference& rhs);
 
     ss::sstring name;
-    subject sub{invalid_subject};
+    context_subject sub{invalid_subject};
     schema_version version{invalid_schema_version};
 };
 
@@ -390,11 +522,37 @@ private:
 using schema_id = named_type<int32_t, struct schema_id_tag>;
 static constexpr schema_id invalid_schema_id{-1};
 
+// A schema id that is valid within a context.
+struct context_schema_id {
+    context ctx;
+    schema_id id;
+
+    // TODO: remove this, it is only for easier source code migration
+    context_schema_id(schema_id id)
+      : ctx{default_context}
+      , id{id} {}
+
+    context_schema_id(context c, schema_id s)
+      : ctx{std::move(c)}
+      , id{s} {}
+
+    friend bool operator==(const context_schema_id&, const context_schema_id&)
+      = default;
+
+    friend auto
+    operator<=>(const context_schema_id& lhs, const context_schema_id& rhs) {
+        if (auto cmp = lhs.ctx() <=> rhs.ctx(); cmp != 0) {
+            return cmp;
+        }
+        return lhs.id() <=> rhs.id();
+    }
+};
+
 struct subject_version {
-    subject_version(subject s, schema_version v)
+    subject_version(context_subject s, schema_version v)
       : sub{std::move(s)}
       , version{v} {}
-    subject sub;
+    context_subject sub;
     schema_version version;
 };
 
@@ -445,7 +603,7 @@ class subject_schema {
 public:
     subject_schema() = default;
 
-    subject_schema(subject sub, schema_definition def)
+    subject_schema(context_subject sub, schema_definition def)
       : _sub{std::move(sub)}
       , _def{std::move(def)} {}
 
@@ -455,8 +613,8 @@ public:
     friend std::ostream&
     operator<<(std::ostream& os, const subject_schema& schema);
 
-    const subject& sub() const& { return _sub; }
-    subject sub() && { return std::move(_sub); }
+    const context_subject& sub() const& { return _sub; }
+    context_subject sub() && { return std::move(_sub); }
 
     schema_type type() const { return _def.type(); }
 
@@ -467,11 +625,11 @@ public:
     subject_schema copy() const { return {sub(), def().copy()}; }
 
     auto destructure() && {
-        return make_tuple(std::move(_sub), std::move(_def));
+        return std::make_tuple(std::move(_sub), std::move(_def));
     }
 
 private:
-    subject _sub{invalid_subject};
+    context_subject _sub{invalid_subject};
     schema_definition _def{"", schema_type::avro};
 };
 
@@ -608,6 +766,21 @@ struct fmt::formatter<pandaproxy::schema_registry::schema_reference> {
     char presentation{'l'};
 };
 
+template<>
+struct fmt::formatter<pandaproxy::schema_registry::context_subject> {
+    constexpr auto parse(fmt::format_parse_context& ctx)
+      -> decltype(ctx.begin()) {
+        return ctx.begin();
+    }
+
+    template<typename FormatContext>
+    auto format(
+      const pandaproxy::schema_registry::context_subject& key,
+      FormatContext& ctx) const -> decltype(ctx.out()) {
+        return fmt::format_to(ctx.out(), "{}", key.to_string());
+    }
+};
+
 namespace json {
 
 template<typename Buffer>
@@ -615,6 +788,13 @@ void rjson_serialize(
   json::iobuf_writer<Buffer>& w,
   const pandaproxy::schema_registry::schema_definition::raw_string& def) {
     w.String(def());
+}
+
+template<typename Buffer>
+void rjson_serialize(
+  json::Writer<Buffer>& w,
+  const pandaproxy::schema_registry::context_subject& ctx_sub) {
+    w.String(ctx_sub.to_string());
 }
 
 } // namespace json

@@ -68,14 +68,17 @@ public:
     ss::future<ppsr::schema_definition>
     get_schema_definition(ppsr::schema_id id) const override {
         auto [reader, _] = co_await service();
-        co_return co_await reader->get_schema_definition(id);
+        co_return co_await reader->get_schema_definition(
+          ppsr::context_schema_id{ppsr::default_context, id});
     }
     ss::future<ppsr::stored_schema> get_subject_schema(
       ppsr::subject sub,
       std::optional<ppsr::schema_version> version) const override {
         auto [reader, _] = co_await service();
         co_return co_await reader->get_subject_schema(
-          sub, version, ppsr::include_deleted::no);
+          ppsr::context_subject{ppsr::default_context, sub},
+          version,
+          ppsr::include_deleted::no);
     }
     ss::future<ppsr::schema_id>
     create_schema(ppsr::subject_schema schema) override {
@@ -135,32 +138,32 @@ public:
 
 ss::future<std::optional<ppsr::valid_schema>>
 registry::get_valid_schema(ppsr::schema_id schema_id) const {
+    auto sid = ppsr::context_schema_id{ppsr::default_context, schema_id};
     auto reader = co_await getter();
-    auto schema_def_opt = co_await reader->maybe_get_schema_definition(
-      schema_id);
+    auto schema_def_opt = co_await reader->maybe_get_schema_definition(sid);
     if (!schema_def_opt.has_value()) {
         // Assume that we expect to have the schema. If it's not there, one
         // possibility is that the reader needs to catch up, so do that and try
         // again.
         reader = co_await synced_getter();
-        schema_def_opt = co_await reader->maybe_get_schema_definition(
-          schema_id);
+        schema_def_opt = co_await reader->maybe_get_schema_definition(sid);
         if (!schema_def_opt.has_value()) {
             co_return std::nullopt;
         }
     }
+    auto sub = ppsr::context_subject{ppsr::default_context, ppsr::subject{"r"}};
     switch (schema_def_opt->type()) {
     case ppsr::schema_type::json: {
         co_return co_await ppsr::make_json_schema_definition(
-          *reader, {ppsr::subject("r"), std::move(*schema_def_opt)});
+          *reader, {std::move(sub), std::move(*schema_def_opt)});
     }
     case ppsr::schema_type::avro: {
         co_return co_await ppsr::make_avro_schema_definition(
-          *reader, {ppsr::subject("r"), std::move(*schema_def_opt)});
+          *reader, {std::move(sub), std::move(*schema_def_opt)});
     }
     case ppsr::schema_type::protobuf: {
         co_return co_await ppsr::make_protobuf_schema_definition(
-          *reader, {ppsr::subject("r"), std::move(*schema_def_opt)});
+          *reader, {std::move(sub), std::move(*schema_def_opt)});
     }
     }
 }
