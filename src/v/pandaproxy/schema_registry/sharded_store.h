@@ -212,7 +212,7 @@ public:
     void check_mode_mutability(force f) const;
 
     ///\brief Look up the id of a schema by definition
-    ss::future<std::optional<context_schema_id>>
+    ss::future<std::optional<schema_id>>
     get_schema_id(context ctx, schema_definition def) const;
 
     /// \brief List all contexts in the store

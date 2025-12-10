@@ -95,15 +95,14 @@ public:
     }
 
     ///\brief Return the id of the schema, if it already exists.
-    std::optional<context_schema_id>
+    std::optional<schema_id>
     get_schema_id(const context& ctx, const schema_definition& def) const {
         // Iterate in decreasing order to return the maximal matching id
         auto rev = std::views::reverse(_schemas);
         const auto s_it = std::ranges::find_if(rev, [&](const auto& s) {
             return ctx == s.first.ctx && def == s.second.definition;
         });
-        return s_it == rev.end() ? std::optional<context_schema_id>{}
-                                 : s_it->first;
+        return s_it == rev.end() ? std::optional<schema_id>{} : s_it->first.id;
     }
 
     ///\brief Return a list of subject-versions for the shema id.
@@ -135,7 +134,7 @@ public:
                   s.second.versions, [id, inc_del](const auto& vs) {
                       return vs.id == id.id && (inc_del || !vs.deleted);
                   })) {
-                subs.emplace_back(s.first.sub);
+                subs.emplace_back(s.first);
             }
         }
         return subs;

@@ -83,7 +83,10 @@ read_encoded_schema_def(ffi::reader* r) {
         auto sub = r->read_sized_string();
         auto v = int(r->read_varint());
         // TODO:
-        refs.emplace_back(name, subject(sub), schema_version(v));
+        refs.emplace_back(
+          name,
+          context_subject(default_context, subject(sub)),
+          schema_version(v));
     }
     return {std::move(def), *type, std::move(refs)};
 }
@@ -199,8 +202,8 @@ ss::future<int32_t> schema_registry_module::create_subject_schema(
     ffi::reader r(buf);
     using namespace pandaproxy::schema_registry;
     try {
-        *out_schema_id = co_await _sr->create_schema(
-          subject_schema(sub, read_encoded_schema_def(&r)));
+        *out_schema_id = co_await _sr->create_schema(subject_schema(
+          context_subject{default_context, sub}, read_encoded_schema_def(&r)));
     } catch (const std::exception& ex) {
         vlog(wasm_log.warn, "error registering subject schema: {}", ex);
         co_return SCHEMA_REGISTRY_ERROR;

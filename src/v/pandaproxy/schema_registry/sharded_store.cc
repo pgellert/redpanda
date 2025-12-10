@@ -901,21 +901,14 @@ ss::future<bool> sharded_store::has_version(
     co_return has_id.has_value() && has_id.assume_value();
 }
 
-ss::future<std::optional<context_schema_id>>
+ss::future<std::optional<schema_id>>
 sharded_store::get_schema_id(context ctx, schema_definition def) const {
     auto map = [&ctx, &def](const store& s) {
         return s.get_schema_id(ctx, def);
     };
-    auto reduce = [](auto acc, auto s_id) {
-        return std::max(acc, s_id, [](const auto& a, const auto& b) {
-            auto get_id = [](const auto& opt) {
-                return opt ? opt->id : invalid_schema_id;
-            };
-            return get_id(a) < get_id(b);
-        });
-    };
+    auto reduce = [](auto acc, auto s_id) { return std::max(acc, s_id); };
     co_return co_await _store.map_reduce0(
-      map, std::optional<context_schema_id>{}, reduce);
+      map, std::optional<schema_id>{}, reduce);
 }
 
 ss::future<chunked_vector<context>> sharded_store::get_contexts() const {

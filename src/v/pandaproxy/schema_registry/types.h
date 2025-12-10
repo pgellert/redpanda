@@ -152,9 +152,9 @@ struct context_subject {
     subject sub;
 
     // TODO: remove this, it is only for easier source code migration
-    context_subject(subject s)
-      : ctx{default_context}
-      , sub{std::move(s)} {}
+    // context_subject(subject s)
+    //   : ctx{default_context}
+    //   , sub{std::move(s)} {}
 
     constexpr context_subject() = default;
 
@@ -528,9 +528,9 @@ struct context_schema_id {
     schema_id id;
 
     // TODO: remove this, it is only for easier source code migration
-    context_schema_id(schema_id id)
-      : ctx{default_context}
-      , id{id} {}
+    // context_schema_id(schema_id id)
+    //   : ctx{default_context}
+    //   , id{id} {}
 
     context_schema_id(context c, schema_id s)
       : ctx{std::move(c)}
