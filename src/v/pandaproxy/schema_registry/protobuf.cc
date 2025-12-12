@@ -258,8 +258,9 @@ public:
       : _parser{}
       , _fdp{} {}
 
-    const pb::FileDescriptorProto& parse(const subject_schema& schema) {
-        schema_def_input_stream is{schema.def()};
+    const pb::FileDescriptorProto&
+    parse(std::string_view ref_name, const schema_definition& schema) {
+        schema_def_input_stream is{schema};
         io_error_collector error_collector;
         pb::io::Tokenizer t{&is, &error_collector};
         _parser.RecordErrorsTo(&error_collector);
@@ -268,7 +269,7 @@ public:
         if (!_parser.Parse(&t, &_fdp)) {
             try {
                 // base64 decode the schema
-                iobuf_istream is{base64_to_iobuf(schema.def().raw()())};
+                iobuf_istream is{base64_to_iobuf(schema.raw()())};
                 // Attempt parse as an encoded FileDescriptorProto.pb
                 if (!_fdp.ParseFromIstream(&is.istream())) {
                     throw as_exception(error_collector.error());
@@ -277,8 +278,7 @@ public:
                 throw as_exception(error_collector.error());
             }
         }
-        const auto& sub = schema.sub().to_string();
-        _fdp.set_name(std::string_view(sub));
+        _fdp.set_name(ref_name);
         return _fdp;
     }
 
@@ -434,26 +434,24 @@ build_file(pb::DescriptorPool& dp, const pb::FileDescriptorProto& fdp) {
 ss::future<pb::FileDescriptorProto> build_file_with_refs(
   pb::DescriptorPool& dp,
   schema_getter& store,
-  subject_schema schema,
+  ss::sstring name,
+  schema_definition schema,
   normalize norm) {
-    for (const auto& ref : schema.def().refs()) {
+    for (const auto& ref : schema.refs()) {
         if (dp.FindFileByName(ref.name)) {
             continue;
         }
         try {
             auto dep = co_await store.get_subject_schema(
               ref.sub, ref.version, include_deleted::yes);
-            // TODO: this is a behaviour change here, double check that this is
-            // correct -- subject{ref.name} -> ref.sub
             co_await build_file_with_refs(
-              dp,
-              store,
-              subject_schema{ref.sub, std::move(dep.schema).def()},
-              normalize::no);
+              dp, store, ref.name, std::move(dep.schema).def(), normalize::no);
         } catch (const exception& e) {
             if (failed_subject_schema_lookup(e.code())) {
-                throw as_exception(
-                  no_reference_found_for(schema, ref.sub, ref.version));
+                throw as_exception(no_reference_found_for(
+                  subject_schema{{ref.sub.ctx, subject{name}}, schema.share()},
+                  ref.sub,
+                  ref.version));
             }
             throw;
         }
@@ -461,7 +459,7 @@ ss::future<pb::FileDescriptorProto> build_file_with_refs(
 
     ss::memory::scoped_system_alloc_fallback fb;
     parser p;
-    auto new_fdp = p.parse(schema);
+    auto new_fdp = p.parse(name, schema);
     normalize_imports(new_fdp, norm);
     if (norm) {
         normalize_proto_file(new_fdp);
@@ -479,7 +477,7 @@ ss::future<pb::FileDescriptorProto> import_schema(
   normalize norm) {
     try {
         co_return co_await build_file_with_refs(
-          dp, store, schema.share(), norm);
+          dp, store, schema.sub().sub(), schema.def().share(), norm);
     } catch (const exception& e) {
         // Rethrow if the schema is missing references
         if (e.code() == error_code::schema_missing_reference) {
@@ -676,7 +674,7 @@ ss::future<schema_definition> format_protobuf_schema_definition(
         throw as_exception(format_not_supported(format));
     case output_format::serialized: {
         auto serialized = co_await make_canonical_protobuf_schema(
-          store, {{{}, {}}, std::move(schema)}, normalize::no, format);
+          store, {invalid_subject, std::move(schema)}, normalize::no, format);
         co_return std::move(serialized).def();
     }
     default:

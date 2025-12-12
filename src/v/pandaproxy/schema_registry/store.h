@@ -990,6 +990,10 @@ private:
     //  - mode: replicated across all shards
     // _mutable: replicated across all shards
 
+    // Alternative: Keep the store as is, but key the existing state under a
+    // context. Yet shard state by (context, subject), (context, schema_id)
+    // still.
+
     schema_map _schemas;
     subject_map _subjects;
     chunked_vector<context_schema_id> _marked_schemas;

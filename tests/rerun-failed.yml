@@ -1,0 +1,9 @@
+2025-12-11--001:
+    included:
+        - tests/schema_registry_test.py::SchemaRegistryAutoAuthTest.test_format_keyword
+        - tests/schema_registry_test.py::SchemaRegistryAutoAuthTest.test_soft_deleted_references
+        - tests/schema_registry_test.py::SchemaRegistryConfluentClient.test_references
+        - tests/schema_registry_test.py::SchemaRegistryModeMutableTest.test_mode_readonly
+        - tests/schema_registry_test.py::SchemaRegistryModeMutableTest.test_imported_schemas_with_dependencies_issues
+        - tests/schema_registry_test.py::SchemaRegistryTest.test_format_keyword
+        - tests/schema_registry_test.py::SchemaRegistryTest.test_soft_deleted_references

@@ -151,10 +151,15 @@ struct context_subject {
     context ctx;
     subject sub;
 
-    // TODO: remove this, it is only for easier source code migration
-    // context_subject(subject s)
-    //   : ctx{default_context}
-    //   , sub{std::move(s)} {}
+    explicit context_subject(subject s)
+      : ctx{default_context}
+      , sub{std::move(s)} {
+        // TODO: use from_string here?
+    }
+
+    explicit context_subject(ss::sstring s)
+      : ctx{default_context}
+      , sub{std::move(s)} {}
 
     constexpr context_subject() = default;
 
@@ -187,6 +192,7 @@ struct context_subject {
         return ss::format(":{}:{}", ctx(), sub());
     }
 
+    // TODO: remove the expected from here, because we never return an error
     static std::expected<context_subject, ss::sstring>
     from_string(std::string_view input) {
         // Check for qualified syntax: starts with ":."
@@ -194,61 +200,19 @@ struct context_subject {
             // Find the second colon that separates context from subject
             auto second_colon = input.find(':', 2);
 
-            if (second_colon == std::string_view::npos) {
-                // Malformed: has ":." prefix but no closing ":"
-                return std::unexpected(
-                  ss::format(
-                    "Invalid qualified subject syntax '{}': expected format "
-                    "':.context:subject'",
-                    input));
+            if (second_colon != std::string_view::npos) {
+                auto ctx_str = input.substr(1, second_colon - 1);
+                auto sub_str = input.substr(second_colon + 1);
+
+                if (!sub_str.empty()) {
+                    return context_subject{
+                      context{ss::sstring{ctx_str}},
+                      subject{ss::sstring{sub_str}}};
+                }
             }
-
-            // Extract context (includes the leading ".")
-            auto ctx_str = input.substr(1, second_colon - 1);
-
-            // Validate context name
-            if (ctx_str.empty() || ctx_str[0] != '.') {
-                return std::unexpected(
-                  ss::format(
-                    "Invalid context name '{}': must start with '.'", ctx_str));
-            }
-
-            // Validate context characters (only after the initial ".")
-            auto is_valid_context_char = [](char c) {
-                // TODO: use absl for isalnum
-                return std::isalnum(static_cast<unsigned char>(c)) || c == '.'
-                       || c == '_' || c == '-';
-            };
-
-            if (!std::all_of(
-                  ctx_str.begin() + 1, ctx_str.end(), is_valid_context_char)) {
-                return std::unexpected(
-                  ss::format(
-                    "Invalid context name '{}': may only contain alphanumeric "
-                    "characters, '.', '_', or '-'",
-                    ctx_str));
-            }
-
-            // Extract subject name (everything after second colon)
-            auto sub_str = input.substr(second_colon + 1);
-
-            if (sub_str.empty()) {
-                return std::unexpected(
-                  ss::format(
-                    "Invalid qualified subject '{}': subject name cannot be "
-                    "empty",
-                    input));
-            }
-
-            return context_subject{
-              context{ss::sstring{ctx_str}}, subject{ss::sstring{sub_str}}};
         }
 
-        // Unqualified subject - use default context
-        if (input.empty()) {
-            return std::unexpected(ss::sstring{"Subject name cannot be empty"});
-        }
-
+        // Default case: unqualified subject or invalid qualified syntax
         return context_subject{default_context, subject{ss::sstring{input}}};
     }
 
