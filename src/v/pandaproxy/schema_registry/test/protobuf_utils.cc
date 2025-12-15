@@ -32,7 +32,7 @@ std::string sanitize(
     iobuf buf = pps::make_canonical_protobuf_schema(
                   s.store,
                   pps::subject_schema{
-                    pps::subject{"foo"},
+                    {default_context, pps::subject{"foo"}},
                     pps::schema_definition{
                       raw_proto, pps::schema_type::protobuf, {}}},
                   norm,

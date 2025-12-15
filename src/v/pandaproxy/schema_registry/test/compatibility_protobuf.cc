@@ -38,17 +38,17 @@ bool check_compatible(
   std::string_view reader,
   std::string_view writer) {
     ppstu::simple_sharded_store store;
-    store.store.set_compatibility(lvl).get();
+    store.store.set_compatibility(pps::default_context, lvl).get();
     store.insert(
       pandaproxy::schema_registry::subject_schema{
-        pps::subject{"sub"},
+        {pps::default_context, pps::subject{"sub"}},
         pps::schema_definition{writer, pps::schema_type::protobuf}},
       pps::schema_version{1});
     return store.store
       .is_compatible(
         pps::schema_version{1},
         pps::subject_schema{
-          pps::subject{"sub"},
+          {pps::default_context, pps::subject{"sub"}},
           pps::schema_definition{reader, pps::schema_type::protobuf}})
       .get();
 }
@@ -58,10 +58,14 @@ pps::compatibility_result check_compatible_verbose(
     pps::sharded_store s;
     return check_compatible(
       pps::make_protobuf_schema_definition(
-        s, {pps::subject("r"), {r.shared_raw(), pps::schema_type::protobuf}})
+        s,
+        {{pps::default_context, pps::subject("r")},
+         {r.shared_raw(), pps::schema_type::protobuf}})
         .get(),
       pps::make_protobuf_schema_definition(
-        s, {pps::subject("w"), {w.shared_raw(), pps::schema_type::protobuf}})
+        s,
+        {{pps::default_context, pps::subject("w")},
+         {w.shared_raw(), pps::schema_type::protobuf}})
         .get(),
       pps::verbose::yes);
 }
@@ -71,7 +75,9 @@ pps::compatibility_result check_compatible_verbose(
 SEASTAR_THREAD_TEST_CASE(test_protobuf_simple) {
     ppstu::simple_sharded_store store;
 
-    auto schema1 = pps::subject_schema{pps::subject{"simple"}, simple.share()};
+    auto schema1 = pps::subject_schema{
+      pps::context_subject{pps::default_context, pps::subject{"simple"}},
+      simple.share()};
     store.insert(schema1.share(), pps::schema_version{1});
     auto valid_simple = pps::make_protobuf_schema_definition(
                           store.store, schema1.share())
@@ -82,7 +88,8 @@ SEASTAR_THREAD_TEST_CASE(test_protobuf_simple) {
 SEASTAR_THREAD_TEST_CASE(test_protobuf_nested) {
     ppstu::simple_sharded_store store;
 
-    auto schema1 = pps::subject_schema{pps::subject{"nested"}, nested.share()};
+    auto schema1 = pps::subject_schema{
+      pps::context_subject{"nested"}, nested.share()};
     store.insert(schema1.share(), pps::schema_version{1});
     auto valid_nested = pps::make_protobuf_schema_definition(
                           store.store, schema1.share())
@@ -97,7 +104,7 @@ SEASTAR_THREAD_TEST_CASE(test_protobuf_imported_failure) {
 
     // imported depends on simple, which han't been inserted
     auto schema1 = pps::subject_schema{
-      pps::subject{"imported"}, imported.share()};
+      pps::context_subject{"imported"}, imported.share()};
     store.insert(schema1.share(), pps::schema_version{1});
     BOOST_REQUIRE_EXCEPTION(
       pps::make_protobuf_schema_definition(store.store, schema1.share()).get(),
@@ -112,9 +119,10 @@ SEASTAR_THREAD_TEST_CASE(test_protobuf_imported_failure) {
 SEASTAR_THREAD_TEST_CASE(test_protobuf_imported_not_referenced) {
     ppstu::simple_sharded_store store;
 
-    auto schema1 = pps::subject_schema{pps::subject{"simple"}, simple.share()};
+    auto schema1 = pps::subject_schema{
+      pps::context_subject{"simple"}, simple.share()};
     auto schema2 = pps::subject_schema{
-      pps::subject{"imported"}, imported_no_ref.share()};
+      pps::context_subject{"imported"}, imported_no_ref.share()};
 
     store.insert(schema1.share(), pps::schema_version{1});
 
@@ -133,11 +141,11 @@ SEASTAR_THREAD_TEST_CASE(test_protobuf_referenced) {
     ppstu::simple_sharded_store store;
 
     auto schema1 = pps::subject_schema{
-      pps::subject{"simple.proto"}, simple.share()};
+      pps::context_subject{"simple.proto"}, simple.share()};
     auto schema2 = pps::subject_schema{
-      pps::subject{"imported.proto"}, imported.share()};
+      pps::context_subject{"imported.proto"}, imported.share()};
     auto schema3 = pps::subject_schema{
-      pps::subject{"imported-again.proto"}, imported_again.share()};
+      pps::context_subject{"imported-again.proto"}, imported_again.share()};
 
     store.insert(schema1.share(), pps::schema_version{1});
     store.insert(schema2.share(), pps::schema_version{1});
@@ -158,11 +166,11 @@ SEASTAR_THREAD_TEST_CASE(test_protobuf_recursive_reference) {
     ppstu::simple_sharded_store store;
 
     auto schema1 = pps::subject_schema{
-      pps::subject{"simple.proto"}, simple.share()};
+      pps::context_subject{"simple.proto"}, simple.share()};
     auto schema2 = pps::subject_schema{
-      pps::subject{"imported.proto"}, imported.share()};
+      pps::context_subject{"imported.proto"}, imported.share()};
     auto schema3 = pps::subject_schema{
-      pps::subject{"imported-twice.proto"}, imported_twice.share()};
+      pps::context_subject{"imported-twice.proto"}, imported_twice.share()};
 
     store.insert(schema1.share(), pps::schema_version{1});
     store.insert(schema2.share(), pps::schema_version{1});
@@ -186,7 +194,7 @@ SEASTAR_THREAD_TEST_CASE(test_binary_protobuf) {
       store.store
         .make_valid_schema(
           pps::subject_schema{
-            pps::subject{"com.redpanda.Payload.proto"},
+            pps::context_subject{"com.redpanda.Payload.proto"},
             pps::schema_definition{
               base64_raw_proto, pps::schema_type::protobuf}})
         .get());
@@ -198,7 +206,7 @@ SEASTAR_THREAD_TEST_CASE(test_invalid_binary_protobuf) {
     auto broken_base64_raw_proto = base64_raw_proto.substr(1);
 
     auto schema = pps::subject_schema{
-      pps::subject{"com.redpanda.Payload.proto"},
+      pps::context_subject{"com.redpanda.Payload.proto"},
       pps::schema_definition{
         broken_base64_raw_proto, pps::schema_type::protobuf}};
 
@@ -206,7 +214,7 @@ SEASTAR_THREAD_TEST_CASE(test_invalid_binary_protobuf) {
       store.store
         .make_valid_schema(
           pps::subject_schema{
-            pps::subject{"com.redpanda.Payload.proto"},
+            pps::context_subject{"com.redpanda.Payload.proto"},
             pps::schema_definition{
               broken_base64_raw_proto, pps::schema_type::protobuf}})
         .get(),
@@ -221,7 +229,7 @@ SEASTAR_THREAD_TEST_CASE(test_protobuf_well_known) {
     ppstu::simple_sharded_store store;
 
     auto schema = pps::subject_schema{
-      pps::subject{"test_auto_well_known"},
+      pps::context_subject{"test_auto_well_known"},
       pps::schema_definition{
         R"(
 syntax =  "proto3";

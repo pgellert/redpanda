@@ -31,11 +31,11 @@ void handle_authz(
 void handle_get_schemas_ids_id_authz(
   const server::request_t& rq,
   std::optional<request_auth_result>& auth_result,
-  const chunked_vector<subject>& subjects);
+  const chunked_vector<context_subject>& subjects);
 
 void handle_get_subjects_authz(
   const server::request_t& rq,
   std::optional<request_auth_result>& auth_result,
-  chunked_vector<subject>& subjects);
+  chunked_vector<context_subject>& subjects);
 
 } // namespace pandaproxy::schema_registry::enterprise

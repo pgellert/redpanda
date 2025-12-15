@@ -83,12 +83,16 @@ void schema::fake_registry::maybe_throw_injected_failure() const {
 ss::future<ppsr::schema_definition>
 schema::fake_registry::get_schema_definition(ppsr::schema_id id) const {
     maybe_throw_injected_failure();
-    return _store.get_schema_definition(id);
+    return _store.get_schema_definition(
+      ppsr::context_schema_id{ppsr::default_context, id});
 }
 ss::future<ppsr::stored_schema> schema::fake_registry::get_subject_schema(
   ppsr::subject sub, std::optional<ppsr::schema_version> version) const {
     maybe_throw_injected_failure();
-    return _store.get_subject_schema(sub, version, ppsr::include_deleted::no);
+    return _store.get_subject_schema(
+      ppsr::context_subject{ppsr::default_context, sub},
+      version,
+      ppsr::include_deleted::no);
 }
 ss::future<ppsr::schema_getter*> schema::fake_registry::getter() const {
     maybe_throw_injected_failure();

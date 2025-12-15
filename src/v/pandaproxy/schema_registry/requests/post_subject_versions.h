@@ -15,6 +15,7 @@
 #include "json/types.h"
 #include "pandaproxy/json/rjson_parse.h"
 #include "pandaproxy/json/rjson_util.h"
+#include "pandaproxy/schema_registry/exceptions.h"
 #include "pandaproxy/schema_registry/types.h"
 #include "pandaproxy/schema_registry/util.h"
 #include "strings/string_switch.h"
@@ -48,7 +49,7 @@ class post_subject_versions_request_handler
     state _state = state::empty;
 
     struct mutable_schema {
-        subject sub{invalid_subject};
+        context_subject sub{invalid_subject};
         schema_definition::raw_string def;
         schema_type type{schema_type::avro};
         schema_definition::references refs;
@@ -64,7 +65,7 @@ public:
     };
     rjson_parse_result result;
 
-    explicit post_subject_versions_request_handler(subject sub)
+    explicit post_subject_versions_request_handler(context_subject sub)
       : json::base_handler<Encoding>{json::serialization_format::none}
       , _schema{std::move(sub)} {}
 
@@ -168,7 +169,12 @@ public:
             return true;
         }
         case state::reference_subject: {
-            _schema.refs.back().sub = subject{ss::sstring{sv}};
+            auto sub = context_subject::from_string(sv);
+            if (!sub.has_value()) {
+                throw exception{
+                  error_code::subject_schema_invalid, sub.error()};
+            }
+            _schema.refs.back().sub = std::move(sub).value();
             _state = state::reference;
             return true;
         }

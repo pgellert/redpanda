@@ -103,10 +103,11 @@ ss::future<std::optional<ss::sstring>> get_record_name(
     }
 
     auto schema_type = schema.type();
+    auto sub = context_subject{default_context, subject("r")};
     switch (schema_type) {
     case schema_type::avro: {
         auto s = co_await make_avro_schema_definition(
-          store, {subject("r"), {std::move(schema).raw(), schema_type}});
+          store, {std::move(sub), {std::move(schema).raw(), schema_type}});
         co_return s().root()->name().fullname();
     } break;
     case schema_type::protobuf: {
@@ -114,7 +115,7 @@ ss::future<std::optional<ss::sstring>> get_record_name(
             co_return std::nullopt;
         }
         auto s = co_await make_protobuf_schema_definition(
-          store, {subject("r"), {std::move(schema).raw(), schema_type}});
+          store, {std::move(sub), {std::move(schema).raw(), schema_type}});
         auto r = s.name(*offsets);
         if (!r) {
             co_return std::nullopt;
@@ -123,7 +124,7 @@ ss::future<std::optional<ss::sstring>> get_record_name(
     } break;
     case schema_type::json: {
         auto s = co_await make_json_schema_definition(
-          store, {subject("r"), {std::move(schema).raw(), schema_type}});
+          store, {std::move(sub), {std::move(schema).raw(), schema_type}});
         co_return s.title();
     } break;
     }
@@ -204,12 +205,13 @@ public:
             co_return false;
         }
 
-        auto id = schema_id{parser.consume_be_type<int32_t>()};
+        auto id = context_schema_id{
+          default_context, schema_id{parser.consume_be_type<int32_t>()}};
 
         // Optimistically check the cache in case just the id matches
         // This is true for Avro with TopicNameStrategy
         if (_api->_schema_id_cache.local().has(
-              topic, field, sns, id, std::nullopt)) {
+              topic, field, sns, id.id, std::nullopt)) {
             vlog(
               srlog.debug,
               "validating: topic: {}, field: {}, cache hit",
@@ -246,7 +248,7 @@ public:
             }
 
             if (_api->_schema_id_cache.local().has(
-                  topic, field, sns, id, offsets)) {
+                  topic, field, sns, id.id, offsets)) {
                 vlog(
                   srlog.debug,
                   "validating: topic: {}, field: {}, cache hit",
@@ -270,22 +272,23 @@ public:
             co_return false;
         }
 
-        auto sub = make_subject(sns, topic, field, *record_name);
+        auto sub = context_subject{
+          default_context, make_subject(sns, topic, field, *record_name)};
 
         auto has_id = co_await _api->_store->has_version(
-          sub, id, include_deleted::yes);
+          sub, id.id, include_deleted::yes);
         if (!has_id) {
             vlog(
               srlog.debug,
               "validating: sub: {}, id: {}, has_id: {}",
               sub,
-              id,
+              id.id,
               has_id);
             co_return false;
         }
 
         _api->_schema_id_cache.local().put(
-          topic, field, sns, id, std::move(proto_offsets));
+          topic, field, sns, id.id, std::move(proto_offsets));
         _api->_schema_id_validation_probe.local().miss();
         co_return true;
     };

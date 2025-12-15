@@ -33,10 +33,74 @@
 
 #include <seastar/core/coroutine.hh>
 
+#include <string_view>
+
 namespace pandaproxy::schema_registry {
 
 using topic_key_magic = named_type<int32_t, struct topic_key_magic_tag>;
 enum class topic_key_type { noop = 0, schema, config, mode, delete_subject };
+
+// Type to encapsulate a logic of how to read/write the subject field from
+// storage
+// struct storage_subject_field {
+//     context ctx;
+//     subject sub;
+
+//     constexpr storage_subject_field() = default;
+
+//     constexpr explicit storage_subject_field(std::string_view sv) {
+//         auto ctx_sub = context_subject::from_string(sv);
+//         if (!ctx_sub) {
+//             // TODO: is it correct to throw this error here?
+//             throw exception(
+//               error_code::subject_schema_invalid, ctx_sub.error());
+//         }
+//         ctx = ctx_sub->ctx;
+//         sub = ctx_sub->sub;
+//     }
+
+//     constexpr storage_subject_field(context c, subject s)
+//       : ctx{std::move(c)}
+//       , sub{std::move(s)} {}
+
+//     static std::optional<storage_subject_field> from_optional_subject(
+//       const context& ctx, const std::optional<subject>& sub_opt) {
+//         if (sub_opt.has_value()) {
+//             return storage_subject_field{ctx, sub_opt.value()};
+//         } else if (ctx != default_context) {
+//             return storage_subject_field{ctx, empty_subject};
+//         } else {
+//             return std::nullopt;
+//         }
+//     }
+
+//     friend bool
+//     operator==(const storage_subject_field&, const storage_subject_field&)
+//       = default;
+
+//     context_subject operator()() const { return context_subject{ctx, sub}; }
+// };
+
+inline std::optional<context_subject> to_storage_subject_field(
+  const context& ctx, const std::optional<subject>& sub_opt) {
+    if (sub_opt.has_value()) {
+        return context_subject{ctx, sub_opt.value()};
+    } else if (ctx != default_context) {
+        return context_subject{ctx, empty_subject};
+    } else {
+        return std::nullopt;
+    }
+}
+
+// Throws if the string cannot be parsed
+inline context_subject from_storage_subject_field(std::string_view sv) {
+    auto sub = context_subject::from_string(sv);
+    if (!sub) {
+        // TODO: check if we should surface this error here
+        throw exception(error_code::subject_schema_invalid, sub.error());
+    }
+    return *sub;
+}
 
 constexpr std::string_view to_string_view(topic_key_type kt) {
     switch (kt) {
@@ -130,7 +194,7 @@ struct schema_key {
     // preceding valid writes.
     std::optional<model::node_id> node;
 
-    subject sub;
+    context_subject sub;
     schema_version version;
     topic_key_magic magic{1};
 
@@ -168,7 +232,7 @@ void rjson_serialize(
     w.Key("keytype");
     ::json::rjson_serialize(w, to_string_view(key.keytype));
     w.Key("subject");
-    ::json::rjson_serialize(w, key.sub());
+    ::json::rjson_serialize(w, key.sub);
     w.Key("version");
     ::json::rjson_serialize(w, key.version);
     w.Key("magic");
@@ -275,7 +339,7 @@ public:
             return kt == result.keytype;
         }
         case state::subject: {
-            result.sub = subject{ss::sstring{sv}};
+            result.sub = from_storage_subject_field(sv);
             _state = state::object;
             return true;
         }
@@ -376,7 +440,7 @@ class schema_value_handler final : public json::base_handler<Encoding> {
     state _state = state::empty;
 
     struct mutable_schema {
-        subject sub{invalid_subject};
+        context_subject sub{invalid_subject};
         typename schema_definition::raw_string def;
         schema_type type{schema_type::avro};
         typename schema_definition::references refs;
@@ -496,7 +560,7 @@ public:
         auto sv = std::string_view{str, len};
         switch (_state) {
         case state::subject: {
-            _schema.sub = subject{ss::sstring{sv}};
+            _schema.sub = from_storage_subject_field(sv);
             _state = state::object;
             return true;
         }
@@ -519,7 +583,7 @@ public:
             return true;
         }
         case state::reference_subject: {
-            _schema.refs.back().sub = subject{ss::sstring{sv}};
+            _schema.refs.back().sub = from_storage_subject_field(sv);
             _state = state::reference;
             return true;
         }
@@ -605,7 +669,7 @@ struct config_key {
     static constexpr topic_key_type keytype{topic_key_type::config};
     std::optional<model::offset> seq;
     std::optional<model::node_id> node;
-    std::optional<subject> sub;
+    std::optional<context_subject> sub; // NOTE: could contain an empty_subject
     topic_key_magic magic{0};
 
     friend bool operator==(const config_key&, const config_key&) = default;
@@ -725,7 +789,7 @@ public:
             return kt == result.keytype;
         }
         case state::subject: {
-            result.sub = subject{ss::sstring{sv}};
+            result.sub = from_storage_subject_field(sv);
             _state = state::object;
             return true;
         }
@@ -841,7 +905,7 @@ struct mode_key {
     static constexpr topic_key_type keytype{topic_key_type::mode};
     std::optional<model::offset> seq;
     std::optional<model::node_id> node;
-    std::optional<subject> sub;
+    std::optional<context_subject> sub;
     topic_key_magic magic{0};
 
     friend bool operator==(const mode_key&, const mode_key&) = default;
@@ -961,7 +1025,7 @@ public:
             return kt == result.keytype;
         }
         case state::subject: {
-            result.sub = subject{ss::sstring{sv}};
+            result.sub = from_storage_subject_field(sv);
             _state = state::object;
             return true;
         }
@@ -1072,18 +1136,19 @@ public:
     }
 };
 
-struct delete_subject_key {
+struct delete_context_subject {
     static constexpr topic_key_type keytype{topic_key_type::delete_subject};
     std::optional<model::offset> seq;
     std::optional<model::node_id> node;
-    subject sub;
+    context_subject sub;
     topic_key_magic magic{0};
 
-    friend bool operator==(const delete_subject_key&, const delete_subject_key&)
+    friend bool
+    operator==(const delete_context_subject&, const delete_context_subject&)
       = default;
 
     friend std::ostream&
-    operator<<(std::ostream& os, const delete_subject_key& v) {
+    operator<<(std::ostream& os, const delete_context_subject& v) {
         if (v.seq.has_value() && v.node.has_value()) {
             fmt::print(
               os,
@@ -1106,12 +1171,13 @@ struct delete_subject_key {
 };
 
 template<typename Buffer>
-void rjson_serialize(::json::Writer<Buffer>& w, const delete_subject_key& key) {
+void rjson_serialize(
+  ::json::Writer<Buffer>& w, const delete_context_subject& key) {
     w.StartObject();
     w.Key("keytype");
     ::json::rjson_serialize(w, to_string_view(key.keytype));
     w.Key("subject");
-    ::json::rjson_serialize(w, key.sub());
+    ::json::rjson_serialize(w, key.sub);
     w.Key("magic");
     ::json::rjson_serialize(w, key.magic);
     if (key.seq.has_value()) {
@@ -1126,7 +1192,7 @@ void rjson_serialize(::json::Writer<Buffer>& w, const delete_subject_key& key) {
 }
 
 template<typename Encoding = ::json::UTF8<>>
-class delete_subject_key_handler : public json::base_handler<Encoding> {
+class delete_context_subject_handler : public json::base_handler<Encoding> {
     enum class state {
         empty = 0,
         seq,
@@ -1140,10 +1206,10 @@ class delete_subject_key_handler : public json::base_handler<Encoding> {
 
 public:
     using Ch = typename json::base_handler<Encoding>::Ch;
-    using rjson_parse_result = delete_subject_key;
+    using rjson_parse_result = delete_context_subject;
     rjson_parse_result result;
 
-    delete_subject_key_handler()
+    delete_context_subject_handler()
       : json::base_handler<Encoding>{json::serialization_format::none} {}
 
     bool Key(const Ch* str, ::json::SizeType len, bool) {
@@ -1208,7 +1274,7 @@ public:
             return kt == result.keytype;
         }
         case state::subject: {
-            result.sub = subject{ss::sstring{sv}};
+            result.sub = from_storage_subject_field(sv);
             _state = state::object;
             return true;
         }
@@ -1233,7 +1299,7 @@ public:
 };
 
 struct delete_subject_value {
-    subject sub;
+    context_subject sub;
 
     friend bool
     operator==(const delete_subject_value&, const delete_subject_value&)
@@ -1298,7 +1364,7 @@ public:
         auto sv = std::string_view{str, len};
         switch (_state) {
         case state::subject: {
-            result.sub = subject{ss::sstring{sv}};
+            result.sub = from_storage_subject_field(sv);
             _state = state::object;
             return true;
         }
@@ -1435,7 +1501,7 @@ struct consume_to_store {
 
             co_await apply(
               offset,
-              from_json_iobuf<delete_subject_key_handler<>>(std::move(key)),
+              from_json_iobuf<delete_context_subject_handler<>>(std::move(key)),
               std::move(val));
             break;
         }
@@ -1534,7 +1600,7 @@ struct consume_to_store {
         }
         try {
             vlog(srlog.debug, "Applying: {}", key);
-            if (key.sub.has_value()) {
+            if (key.sub.has_value() && key.sub->sub != empty_subject) {
                 if (!val.has_value()) {
                     co_await _store.clear_compatibility(
                       seq_marker{
@@ -1554,8 +1620,10 @@ struct consume_to_store {
                       val->compat);
                 }
             } else if (val.has_value()) {
-                co_await _store.set_compatibility(val->compat);
+                auto ctx = key.sub ? key.sub->ctx : default_context;
+                co_await _store.set_compatibility(ctx, val->compat);
             } else {
+                // TODO: is a context-specific compatibility delete allowed?
                 vlog(
                   srlog.warn,
                   "Tried to apply config with neither subject nor value");
@@ -1587,7 +1655,7 @@ struct consume_to_store {
         }
         try {
             vlog(srlog.debug, "Applying: {}", key);
-            if (key.sub.has_value()) {
+            if (key.sub.has_value() && key.sub->sub != empty_subject) {
                 if (!val.has_value()) {
                     co_await _store.clear_mode(
                       seq_marker{
@@ -1609,8 +1677,10 @@ struct consume_to_store {
                       force::yes);
                 }
             } else if (val.has_value()) {
-                co_await _store.set_mode(val->mode, force::yes);
+                auto ctx = key.sub ? key.sub->ctx : default_context;
+                co_await _store.set_mode(ctx, val->mode, force::yes);
             } else {
+                // TODO: is a context-specific mode delete allowed?
                 vlog(
                   srlog.warn,
                   "Tried to apply mode with neither subject nor value");
@@ -1622,7 +1692,7 @@ struct consume_to_store {
 
     ss::future<> apply(
       model::offset offset,
-      delete_subject_key key,
+      delete_context_subject key,
       std::optional<delete_subject_value> val) {
         // Out-of-place events happen when two writers collide.  First
         // writer wins: disregard subsequent events whose seq field

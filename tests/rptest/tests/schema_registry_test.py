@@ -3801,7 +3801,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         result_raw = self.sr_client.set_config(data=compat_back)
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
-        assert result_raw.json()["message"] == "Subject null is in read-only mode"
+        assert result_raw.json()["message"] == "Subject null in context . is in read-only mode"
 
         result_raw = self.sr_client.set_config_subject(
             subject=ro_subject, data=compat_back
@@ -3809,7 +3809,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
         assert (
-            result_raw.json()["message"] == f"Subject {ro_subject} is in read-only mode"
+            result_raw.json()["message"] == f"Subject {ro_subject} in context . is in read-only mode"
         )
 
         result_raw = self.sr_client.set_config_subject(
@@ -3822,7 +3822,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
         assert (
-            result_raw.json()["message"] == f"Subject {ro_subject} is in read-only mode"
+            result_raw.json()["message"] == f"Subject {ro_subject} in context . is in read-only mode"
         )
 
         result_raw = self.sr_client.delete_config_subject(subject=rw_subject)
@@ -3874,7 +3874,7 @@ class SchemaRegistryModeMutableTest(SchemaRegistryEndpoints):
         assert result_raw.status_code == 422
         assert result_raw.json()["error_code"] == 42205
         assert (
-            result_raw.json()["message"] == f"Subject {ro_subject} is in read-only mode"
+            result_raw.json()["message"] == f"Subject {ro_subject} in context . is in read-only mode"
         )
 
         self.logger.info("Posting schema 2 as rw_subject key")

@@ -12,6 +12,7 @@
 #include "bytes/iobuf_parser.h"
 #include "cluster/controller.h"
 #include "cluster/security_frontend.h"
+#include "container/chunked_vector.h"
 #include "container/json.h"
 #include "pandaproxy/json/rjson_util.h"
 #include "pandaproxy/json/types.h"
@@ -91,6 +92,33 @@ output_format parse_output_format(const ss::http::request& req) {
       .value_or(output_format::none);
 }
 
+namespace {
+
+/// Helper to extract and parse a subject path parameter into a context_subject.
+/// Handles both qualified (":.context:subject") and unqualified ("subject")
+/// forms.
+///
+/// IMPORTANT: This extracts the raw string parameter (NOT as `subject` type)
+/// because the input may contain qualified syntax like ":.context:subject",
+/// which is not a subject name but a qualified subject string. The `subject`
+/// type should only be used for actual subject names after parsing.
+///
+/// This helper centralizes qualified subject parsing across all handlers,
+/// ensuring consistent behavior and error handling.
+context_subject
+parse_subject_param(const ss::http::request& req, const char* param_name) {
+    // Extract as raw string, NOT as subject type, since it may contain
+    // qualified syntax which is not a pure subject name
+    auto raw_input = parse::request_param<ss::sstring>(req, param_name);
+    auto result = context_subject::from_string(raw_input);
+    if (!result) {
+        throw exception(error_code::subject_schema_invalid, result.error());
+    }
+    return std::move(result).value();
+}
+
+} // namespace
+
 template<ppj::impl::RjsonParseHandler Handler>
 typename ss::future<typename Handler::rjson_parse_result>
 rjson_parse(ss::http::request& req, Handler handler) {
@@ -119,7 +147,8 @@ get_config(server::request_t rq, server::reply_t rp) {
     // Ensure we see latest writes
     co_await rq.service().writer().read_sync();
 
-    auto res = co_await rq.service().schema_store().get_compatibility();
+    auto res = co_await rq.service().schema_store().get_compatibility(
+      default_context);
 
     auto resp = ppj::rjson_serialize_iobuf(get_config_req_rep{.compat = res});
     log_response(*rq.req, resp);
@@ -133,7 +162,8 @@ put_config(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
     auto config = co_await rjson_parse(*rq.req, put_config_handler<>{});
 
-    co_await rq.service().writer().write_config(std::nullopt, config.compat);
+    co_await rq.service().writer().write_config(
+      default_context, std::nullopt, config.compat);
 
     auto resp = ppj::rjson_serialize_iobuf(config);
     log_response(*rq.req, resp);
@@ -144,7 +174,7 @@ put_config(server::request_t rq, server::reply_t rp) {
 ss::future<server::reply_t>
 get_config_subject(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto fallback = parse::query_param<std::optional<default_to_global>>(
                       *rq.req, "defaultToGlobal")
                       .value_or(default_to_global::no);
@@ -196,12 +226,13 @@ ss::future<server::reply_t>
 put_config_subject(server::request_t rq, server::reply_t rp) {
     parse_content_type_header(rq);
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto config = co_await rjson_parse(*rq.req, put_config_handler<>{});
 
     // Ensure we see latest writes
     co_await rq.service().writer().read_sync();
-    co_await rq.service().writer().write_config(sub, config.compat);
+    co_await rq.service().writer().write_config(
+      std::move(sub.ctx), std::move(sub.sub), config.compat);
 
     auto resp = ppj::rjson_serialize_iobuf(std::move(config));
     log_response(*rq.req, resp);
@@ -212,11 +243,11 @@ put_config_subject(server::request_t rq, server::reply_t rp) {
 ss::future<server::reply_t>
 delete_config_subject(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
 
     // ensure we see latest writes
     co_await rq.service().writer().read_sync();
-    co_await rq.service().writer().check_mutable(sub);
+    co_await rq.service().writer().check_mutable(sub.ctx, sub.sub);
 
     compatibility_level lvl{};
     try {
@@ -244,7 +275,7 @@ ss::future<server::reply_t> get_mode(server::request_t rq, server::reply_t rp) {
     // Ensure we see latest writes
     co_await rq.service().writer().read_sync();
 
-    auto res = co_await rq.service().schema_store().get_mode();
+    auto res = co_await rq.service().schema_store().get_mode(default_context);
 
     auto resp = ppj::rjson_serialize_iobuf(mode_req_rep{.mode = res});
     log_response(*rq.req, resp);
@@ -261,7 +292,8 @@ ss::future<server::reply_t> put_mode(server::request_t rq, server::reply_t rp) {
 
     // Ensure we are up to date (eg. see all existing subjects for import mode)
     co_await rq.service().writer().read_sync();
-    co_await rq.service().writer().write_mode(std::nullopt, res.mode, frc);
+    co_await rq.service().writer().write_mode(
+      default_context, std::nullopt, res.mode, frc);
 
     auto resp = ppj::rjson_serialize_iobuf(res);
     log_response(*rq.req, resp);
@@ -272,7 +304,7 @@ ss::future<server::reply_t> put_mode(server::request_t rq, server::reply_t rp) {
 ss::future<server::reply_t>
 get_mode_subject(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto fallback = parse::query_param<std::optional<default_to_global>>(
                       *rq.req, "defaultToGlobal")
                       .value_or(default_to_global::no);
@@ -294,12 +326,13 @@ put_mode_subject(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
     auto frc = parse::query_param<std::optional<force>>(*rq.req, "force")
                  .value_or(force::no);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto res = co_await rjson_parse(*rq.req, mode_handler<>{});
 
     // Ensure we see latest writes
     co_await rq.service().writer().read_sync();
-    co_await rq.service().writer().write_mode(sub, res.mode, frc);
+    co_await rq.service().writer().write_mode(
+      std::move(sub.ctx), std::move(sub.sub), res.mode, frc);
 
     auto resp = ppj::rjson_serialize_iobuf(res);
     log_response(*rq.req, resp);
@@ -310,7 +343,7 @@ put_mode_subject(server::request_t rq, server::reply_t rp) {
 ss::future<server::reply_t>
 delete_mode_subject(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
 
     // ensure we see latest writes
     co_await rq.service().writer().read_sync();
@@ -353,10 +386,11 @@ ss::future<server::reply_t> get_schemas_ids_id(
     parse_accept_header(rq, rp);
     auto id = parse::request_param<schema_id>(*rq.req, "id");
     const auto format = parse_output_format(*rq.req);
+    // TODO: add support for the "subject" query parameter
 
     co_await rq.service().writer().read_sync();
     auto subjects = co_await rq.service().schema_store().get_schema_subjects(
-      id, include_deleted::yes);
+      context_schema_id{default_context, id}, include_deleted::yes);
 
     enterprise::handle_get_schemas_ids_id_authz(rq, auth_result, subjects);
 
@@ -366,7 +400,8 @@ ss::future<server::reply_t> get_schemas_ids_id(
     co_await rq.service().writer().read_sync();
 
     auto def = co_await get_or_load(rq, [&rq, id, format]() {
-        return rq.service().schema_store().get_schema_definition(id, format);
+        return rq.service().schema_store().get_schema_definition(
+          {default_context, id}, format);
     });
 
     auto resp = ppj::rjson_serialize_iobuf(
@@ -380,15 +415,17 @@ ss::future<server::reply_t>
 get_schemas_ids_id_versions(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
     auto id = parse::request_param<schema_id>(*rq.req, "id");
+    // TODO: add support for the "subject" query parameter
 
     // List-type request: must ensure we see latest writes
     co_await rq.service().writer().read_sync();
 
     // Force early 40403 if the schema id isn't found
-    co_await rq.service().schema_store().get_schema_definition(id);
+    co_await rq.service().schema_store().get_schema_definition(
+      {default_context, id});
 
     auto svs = co_await rq.service().schema_store().get_schema_subject_versions(
-      id);
+      context_schema_id{default_context, id});
 
     auto resp = ppj::rjson_serialize_iobuf(
       get_schemas_ids_id_versions_response{.subject_versions{std::move(svs)}});
@@ -404,15 +441,19 @@ ss::future<ctx_server<service>::reply_t> get_schemas_ids_id_subjects(
     auto incl_del{
       parse::query_param<std::optional<include_deleted>>(*rq.req, "deleted")
         .value_or(include_deleted::no)};
+    // TODO: add support for the "subject" query parameter
+
+    auto ctx_id = context_schema_id{default_context, id};
 
     // List-type request: must ensure we see latest writes
     co_await rq.service().writer().read_sync();
 
     // Force early 40403 if the schema id isn't found
-    co_await rq.service().schema_store().get_schema_definition(id);
+    co_await rq.service().schema_store().get_schema_definition(ctx_id);
 
     auto resp = ppj::rjson_serialize_iobuf(
-      co_await rq.service().schema_store().get_schema_subjects(id, incl_del));
+      co_await rq.service().schema_store().get_schema_subjects(
+        ctx_id, incl_del));
     log_response(*rq.req, resp);
     rp.rep->write_body("json", ppj::as_body_writer(std::move(resp)));
     co_return rp;
@@ -447,7 +488,7 @@ ss::future<server::reply_t> get_subjects(
 ss::future<server::reply_t>
 get_subject_versions(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto inc_del{
       parse::query_param<std::optional<include_deleted>>(*rq.req, "deleted")
         .value_or(include_deleted::no)};
@@ -467,7 +508,7 @@ ss::future<server::reply_t>
 post_subject(server::request_t rq, server::reply_t rp) {
     parse_content_type_header(rq);
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto inc_del{
       parse::query_param<std::optional<include_deleted>>(*rq.req, "deleted")
         .value_or(include_deleted::no)};
@@ -523,7 +564,7 @@ ss::future<server::reply_t>
 post_subject_versions(server::request_t rq, server::reply_t rp) {
     parse_content_type_header(rq);
     parse_accept_header(rq, rp);
-    const auto sub = parse::request_param<subject>(*rq.req, "subject");
+    const auto sub = parse_subject_param(*rq.req, "subject");
     const auto norm{
       parse::query_param<std::optional<normalize>>(*rq.req, "normalize")
         .value_or(normalize::no)};
@@ -562,7 +603,7 @@ post_subject_versions(server::request_t rq, server::reply_t rp) {
     co_await st.validate_schema(schema.schema.share());
 
     // Determine if the definition already exists
-    auto s_id = co_await st.get_schema_id(schema.schema.def().share());
+    auto s_id = co_await st.get_schema_id(sub.ctx, schema.schema.def().share());
 
     vlog(
       srlog.debug, "post_subject_versions: ID for schema definition: {}", s_id);
@@ -601,7 +642,7 @@ post_subject_versions(server::request_t rq, server::reply_t rp) {
             throw as_exception(mode_is_readonly(sub));
         }
         if (schema.id >= 0 && mode != mode::import) {
-            throw as_exception(mode_not_import(schema.schema.sub()));
+            throw as_exception(mode_not_import(sub));
         }
         if (schema.id < 0 && mode != mode::read_write) {
             throw as_exception(mode_not_readwrite(sub));
@@ -610,7 +651,7 @@ post_subject_versions(server::request_t rq, server::reply_t rp) {
         // Determine if a provided schema id is appropriate
         if (
           schema.id != invalid_schema_id && s_id != schema.id
-          && co_await st.has_schema(schema.id)) {
+          && co_await st.has_schema(context_schema_id{sub.ctx, schema.id})) {
             // The supplied id already exists, but the schema is different
             co_return ss::coroutine::return_exception(
               as_exception(overwrite_schema_with_id_not_permitted(schema.id)));
@@ -650,7 +691,7 @@ post_subject_versions(server::request_t rq, server::reply_t rp) {
 ss::future<ctx_server<service>::reply_t> get_subject_versions_version(
   ctx_server<service>::request_t rq, ctx_server<service>::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto ver = parse::request_param<ss::sstring>(*rq.req, "version");
     auto inc_del{
       parse::query_param<std::optional<include_deleted>>(*rq.req, "deleted")
@@ -683,7 +724,7 @@ ss::future<ctx_server<service>::reply_t> get_subject_versions_version(
 ss::future<ctx_server<service>::reply_t> get_subject_versions_version_schema(
   ctx_server<service>::request_t rq, ctx_server<service>::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto ver = parse::request_param<ss::sstring>(*rq.req, "version");
     auto inc_del{
       parse::query_param<std::optional<include_deleted>>(*rq.req, "deleted")
@@ -711,25 +752,32 @@ ss::future<ctx_server<service>::reply_t>
 get_subject_versions_version_referenced_by(
   ctx_server<service>::request_t rq, ctx_server<service>::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto ver = parse::request_param<ss::sstring>(*rq.req, "version");
 
     co_await rq.service().writer().read_sync();
 
     auto version = parse_schema_version(ver).value();
 
-    auto references = ppj::rjson_serialize_iobuf(
-      co_await rq.service().schema_store().referenced_by(sub, version));
+    auto references = co_await rq.service().schema_store().referenced_by(
+      sub, version);
+    auto filtered_references = ppj::rjson_serialize_iobuf(
+      references | std::ranges::views::filter([&sub](const auto& sid) {
+          return sid.ctx == sub.ctx;
+      })
+      | std::ranges::views::transform([](const auto& sid) { return sid.id; })
+      | std::ranges::to<chunked_vector<schema_id>>());
 
-    log_response(*rq.req, references);
-    rp.rep->write_body("json", ppj::as_body_writer(std::move(references)));
+    log_response(*rq.req, filtered_references);
+    rp.rep->write_body(
+      "json", ppj::as_body_writer(std::move(filtered_references)));
     co_return rp;
 }
 
 ss::future<server::reply_t>
 delete_subject(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub{parse::request_param<subject>(*rq.req, "subject")};
+    auto sub{parse_subject_param(*rq.req, "subject")};
     auto permanent{
       parse::query_param<std::optional<permanent_delete>>(*rq.req, "permanent")
         .value_or(permanent_delete::no)};
@@ -753,7 +801,7 @@ delete_subject(server::request_t rq, server::reply_t rp) {
 ss::future<server::reply_t>
 delete_subject_version(server::request_t rq, server::reply_t rp) {
     parse_accept_header(rq, rp);
-    auto sub{parse::request_param<subject>(*rq.req, "subject")};
+    auto sub{parse_subject_param(*rq.req, "subject")};
     auto ver = parse::request_param<ss::sstring>(*rq.req, "version");
     auto permanent{
       parse::query_param<std::optional<permanent_delete>>(*rq.req, "permanent")
@@ -803,7 +851,7 @@ compatibility_subject_version(server::request_t rq, server::reply_t rp) {
     parse_content_type_header(rq);
     parse_accept_header(rq, rp);
     auto ver = parse::request_param<ss::sstring>(*rq.req, "version");
-    auto sub = parse::request_param<subject>(*rq.req, "subject");
+    auto sub = parse_subject_param(*rq.req, "subject");
     auto is_verbose{
       parse::query_param<std::optional<verbose>>(*rq.req, "verbose")
         .value_or(verbose::no)};
@@ -1048,6 +1096,24 @@ delete_security_acls(server::request_t rq, server::reply_t rp) {
 
     auto resp = ppj::rjson_serialize_iobuf(std::move(res));
 
+    rp.rep->write_body("json", json::as_body_writer(std::move(resp)));
+    co_return rp;
+}
+
+ss::future<server::reply_t>
+get_contexts(server::request_t rq, server::reply_t rp) {
+    parse_accept_header(rq, rp);
+
+    // TODO: implement context-prefix-based filtering
+
+    co_await rq.service().writer().read_sync();
+
+    // TODO: ensure that the default_context is always present in the returned
+    // list
+
+    auto res = co_await rq.service().schema_store().get_contexts();
+    auto resp = ppj::rjson_serialize_iobuf(std::move(res));
+    log_response(*rq.req, resp);
     rp.rep->write_body("json", json::as_body_writer(std::move(resp)));
     co_return rp;
 }
