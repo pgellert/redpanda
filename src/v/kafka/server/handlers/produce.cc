@@ -146,7 +146,13 @@ partition_produce_stages partition_append(
   int16_t acks,
   int32_t num_records,
   int64_t num_bytes,
-  std::chrono::milliseconds timeout_ms) {
+  std::chrono::milliseconds timeout_ms,
+  model::timestamp_type ts_type) {
+    // Capture the timestamp from the batch header BEFORE moving it.
+    // For APPEND_TIME topics, validate_batch already set max_timestamp to the
+    // broker time. This is the timestamp that will be stored in the log.
+    auto log_append_time = batch->header().max_timestamp;
+
     auto stages = partition.replicate(
       bid, std::move(*batch), acks_to_replicate_options(acks, timeout_ms));
     return partition_produce_stages{
@@ -155,7 +161,10 @@ partition_produce_stages partition_append(
         [partition = std::move(partition),
          id,
          num_records = num_records,
-         num_bytes](ss::future<result<raft::replicate_result>> f) mutable {
+         num_bytes,
+         ts_type,
+         log_append_time](
+          ss::future<result<raft::replicate_result>> f) mutable {
             produce_response::partition p{.partition_index = id};
             try {
                 auto r = f.get();
@@ -165,6 +174,9 @@ partition_produce_stages partition_append(
                     p.base_offset = model::offset(
                       r.value().last_offset - (num_records - 1));
                     p.error_code = error_code::none;
+                    if (ts_type == model::timestamp_type::append_time) {
+                        p.log_append_time_ms = log_append_time;
+                    }
                     partition.probe().add_records_produced(num_records);
                     partition.probe().add_bytes_produced(num_bytes);
                     partition.probe().add_batches_produced(1);
@@ -301,6 +313,7 @@ ss::future<produce_response::partition> do_produce_topic_partition(
        dispatch = std::move(dispatched),
        acks = octx.request.data.acks,
        timeout,
+       ts_type = req.timestamp_type,
        source_shard = ss::this_shard_id()](
         cluster::partition_manager& mgr) mutable {
           auto partition = kafka::make_partition_proxy(ntp, mgr);
@@ -323,7 +336,8 @@ ss::future<produce_response::partition> do_produce_topic_partition(
             acks,
             num_records,
             batch_size,
-            timeout);
+            timeout,
+            ts_type);
           return stages.dispatched
             .then_wrapped([source_shard, dispatch = std::move(dispatch)](
                             ss::future<> f) mutable {
