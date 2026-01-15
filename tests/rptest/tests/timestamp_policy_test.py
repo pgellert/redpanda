@@ -130,3 +130,52 @@ class TimestampPolicyTest(RedpandaTest):
                 callback=test_case.callback,
             )
             producer.flush()
+
+    @cluster(num_nodes=1)
+    def test_log_append_time_in_produce_response(self):
+        """
+        Test that LogAppendTimeMs is correctly returned in ProduceResponse when
+        topic is configured with message.timestamp.type=LogAppendTime.
+
+        This verifies the fix for https://github.com/redpanda-data/redpanda/issues/29189
+        """
+        from confluent_kafka import TIMESTAMP_LOG_APPEND_TIME
+
+        # Configure topic for LogAppendTime
+        self.client().alter_topic_config(
+            self.topic, "message.timestamp.type", "LogAppendTime"
+        )
+
+        producer = Producer({"bootstrap.servers": self.redpanda.brokers()})
+
+        delivery_results = []
+
+        def delivery_callback(err, msg):
+            assert err is None, f"Delivery failed: {err}"
+            ts_type, ts_value = msg.timestamp()
+            delivery_results.append((ts_type, ts_value))
+
+        # Produce a message
+        now_ms = int(time.time() * 1000)
+        producer.produce(
+            topic=self.topic,
+            key=b"test-key",
+            value=b"test-value",
+            callback=delivery_callback,
+        )
+        producer.flush()
+
+        assert len(delivery_results) == 1, "Expected one delivery result"
+        ts_type, ts_value = delivery_results[0]
+
+        # Verify timestamp type is LogAppendTime (1)
+        assert ts_type == TIMESTAMP_LOG_APPEND_TIME, (
+            f"Expected timestamp type {TIMESTAMP_LOG_APPEND_TIME} (LogAppendTime), "
+            f"got {ts_type}"
+        )
+
+        # Verify timestamp is a reasonable value (within 1 minute of now)
+        assert ts_value > 0, f"Expected positive timestamp, got {ts_value}"
+        assert abs(ts_value - now_ms) < 60000, (
+            f"Timestamp {ts_value} is not within 1 minute of current time {now_ms}"
+        )
