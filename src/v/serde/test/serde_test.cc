@@ -1157,3 +1157,80 @@ SEASTAR_THREAD_TEST_CASE(variant) {
       serde::from_iobuf<decltype(v1)>(serde::to_iobuf(v0)),
       serde::serde_exception);
 }
+
+SEASTAR_THREAD_TEST_CASE(compat_variant) {
+    // Basic roundtrip test
+    using my_variant
+      = serde::compat_variant<ss::sstring, int, bool, my_enum, test_msg1>;
+    my_variant a = "foo";
+    my_variant b = my_variant(std::in_place_index_t<1>(), 42);
+    my_variant c = false;
+    my_variant d = my_enum::y;
+    my_variant e = test_msg1{
+      ._a = 55, ._m = {._i = 'i', ._j = 'j'}, ._b = 33, ._c = 44};
+    for (const my_variant& v : {a, b, c, d, e}) {
+        auto roundtripped = serde::from_iobuf<my_variant>(serde::to_iobuf(v));
+        BOOST_REQUIRE(v == roundtripped);
+    }
+
+    // Static checks for serde compatibility
+    static_assert(
+      IsSerdeReadable<serde::compat_variant<int>>,
+      "serde::compat_variant **should** be compatible with serde reads");
+    static_assert(
+      IsSerdeWritable<serde::compat_variant<int>>,
+      "serde::compat_variant **should** be compatible with serde writes");
+
+    // Noexcept checks (same as serde::variant)
+    static_assert(std::is_nothrow_constructible_v<my_variant>);
+    static_assert(std::is_nothrow_default_constructible_v<my_variant>);
+    static_assert(std::is_nothrow_destructible_v<my_variant>);
+    static_assert(std::is_nothrow_move_constructible_v<my_variant>);
+
+    // Backwards compatibility: larger compat_variant can read smaller
+    using small_var = serde::compat_variant<int, bool>;
+    using large_var = serde::compat_variant<int, bool, ss::sstring>;
+    small_var small_v = 42;
+    // Serialize with small variant, read with large - should work
+    auto small_buf = serde::to_iobuf(small_v);
+    auto read_with_large = serde::from_iobuf<large_var>(std::move(small_buf));
+    BOOST_REQUIRE(std::holds_alternative<int>(read_with_large));
+    BOOST_REQUIRE(std::get<int>(read_with_large) == 42);
+
+    // Forwards compatibility (valid index): large -> small works when index is
+    // valid
+    large_var large_v2 = true;
+    auto large_buf = serde::to_iobuf(large_v2);
+    auto read_with_small = serde::from_iobuf<small_var>(std::move(large_buf));
+    BOOST_REQUIRE(std::holds_alternative<bool>(read_with_small));
+    BOOST_REQUIRE(std::get<bool>(read_with_small) == true);
+
+    // Forwards compatibility (unknown index): large -> small throws when index
+    // is out of range
+    large_var large_v3 = ss::sstring{"test"};
+    // Use decltype to avoid comma in template argument confusing the macro
+    small_var small_reader_type;
+    auto unknown_idx_buf = serde::to_iobuf(large_v3);
+    BOOST_CHECK_THROW(
+      serde::from_iobuf<decltype(small_reader_type)>(
+        std::move(unknown_idx_buf)),
+      serde::serde_exception);
+
+    // Cross-compatibility with serde::variant: compat_variant can read
+    // serde::variant data (same wire format)
+    serde::variant<int, bool> strict_v = 99;
+    auto strict_buf = serde::to_iobuf(strict_v);
+    auto read_as_compat = serde::from_iobuf<serde::compat_variant<int, bool>>(
+      std::move(strict_buf));
+    BOOST_REQUIRE(std::holds_alternative<int>(read_as_compat));
+    BOOST_REQUIRE(std::get<int>(read_as_compat) == 99);
+
+    // And vice versa: serde::variant can read compat_variant data (if sizes
+    // match)
+    serde::compat_variant<int, bool> compat_v = true;
+    auto compat_buf = serde::to_iobuf(compat_v);
+    auto read_as_strict = serde::from_iobuf<serde::variant<int, bool>>(
+      std::move(compat_buf));
+    BOOST_REQUIRE(std::holds_alternative<bool>(read_as_strict));
+    BOOST_REQUIRE(std::get<bool>(read_as_strict) == true);
+}
