@@ -162,9 +162,9 @@ message DeleteShadowLinkRequest {
             type: "redpanda.core.admin.ShadowLinkService/ShadowLink"
         }
     ];
-    // By default, DeleteShadowLink will fail if there are any active Shadow
-    // Topics.  Set this flag to 'true' if you wish to delete the link while
-    // there are active shadow topics.
+    // By default, DeleteShadowLink fails when active shadow topics exist. Set
+    // this flag to 'true' to delete the link even when shadow topics are
+    // active.
     bool force = 2;
 }
 // Response to deleting a shadow link
