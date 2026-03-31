@@ -149,7 +149,8 @@ BOOST_AUTO_TEST_CASE(quota_store_range) {
       [](const std::pair<entity_key, entity_value>& kv) -> bool {
           return store::entity_part_filter(
             kv,
-            entity_key::part_t{entity_key::part::client_id_default_match{}});
+            entity_key::part{
+              .part = entity_key::part::client_id_default_match{}});
       });
     BOOST_CHECK_EQUAL(default_client_quotas.size(), 1);
     BOOST_CHECK_EQUAL(default_client_quotas[0].first, key0);

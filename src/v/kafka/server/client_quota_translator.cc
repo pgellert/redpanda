@@ -27,7 +27,7 @@ using cluster::client_quota::entity_value;
 namespace {
 template<typename Match>
 std::optional<Match>
-get_part(const absl::flat_hash_set<entity_key::part_t>& parts) {
+get_part(const absl::flat_hash_set<entity_key::part>& parts) {
     const auto it = std::ranges::find_if(parts, [](const auto& part) {
         return std::holds_alternative<Match>(part.part);
     });

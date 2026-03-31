@@ -43,7 +43,7 @@ using cluster::client_quota::entity_value;
 using cluster::client_quota::entity_value_diff;
 
 describe_client_quotas_response_entity_data
-get_entity_data(const entity_key::part_t& p) {
+get_entity_data(const entity_key::part& p) {
     using entity_data = describe_client_quotas_response_entity_data;
     return ss::visit(
       p.part,
@@ -107,19 +107,20 @@ values_data get_value_data(const entity_value& val) {
 
 using kerror = std::pair<kafka::error_code, ss::sstring>;
 
-result<entity_key::part_t, kerror>
+result<entity_key::part, kerror>
 exact_match_key(const component_data& component) {
-    return string_switch<result<entity_key::part_t, kerror>>(
+    return string_switch<result<entity_key::part, kerror>>(
              component.entity_type)
       .match(
-        "user", entity_key::part_t{entity_key::user_match{*component.match}})
+        "user",
+        entity_key::part{.part = entity_key::user_match{*component.match}})
       .match(
         "client-id",
-        entity_key::part_t{entity_key::client_id_match{*component.match}})
+        entity_key::part{.part = entity_key::client_id_match{*component.match}})
       .match(
         "client-id-prefix",
-        entity_key::part_t{
-          entity_key::client_id_prefix_match{*component.match}})
+        entity_key::part{
+          .part = entity_key::client_id_prefix_match{*component.match}})
       .match(
         "ip",
         {
@@ -134,13 +135,14 @@ exact_match_key(const component_data& component) {
       });
 }
 
-result<entity_key::part_t, kerror>
+result<entity_key::part, kerror>
 default_match_key(const component_data& component) {
-    return string_switch<result<entity_key::part_t, kerror>>(
+    return string_switch<result<entity_key::part, kerror>>(
              component.entity_type)
-      .match("user", entity_key::part_t{entity_key::user_default_match{}})
+      .match("user", entity_key::part{.part = entity_key::user_default_match{}})
       .match(
-        "client-id", entity_key::part_t{entity_key::client_id_default_match{}})
+        "client-id",
+        entity_key::part{.part = entity_key::client_id_default_match{}})
       .match(
         "client-id-prefix",
         {kafka::error_code::invalid_request,
@@ -160,11 +162,11 @@ default_match_key(const component_data& component) {
       });
 }
 
-using key_part_predicate = std::function<bool(const entity_key::part_t&)>;
+using key_part_predicate = std::function<bool(const entity_key::part&)>;
 
 template<typename... Args>
 key_part_predicate make_any_filter() {
-    return [](const entity_key::part_t& p) {
+    return [](const entity_key::part& p) {
         return (std::holds_alternative<Args>(p.part) || ...);
     };
 }
@@ -217,7 +219,7 @@ make_filter(const component_data& component) {
         }
 
         return [key = std::move(key_or_err).assume_value()](
-                 const entity_key::part_t& p) { return p == key; };
+                 const entity_key::part& p) { return p == key; };
     }
     case describe_client_quotas_match_type::default_name: {
         auto key_or_err = default_match_key(component);
@@ -225,7 +227,7 @@ make_filter(const component_data& component) {
             return std::move(key_or_err).assume_error();
         }
         return [key = std::move(key_or_err).assume_value()](
-                 const entity_key::part_t& p) { return p == key; };
+                 const entity_key::part& p) { return p == key; };
     }
     case describe_client_quotas_match_type::any_specified_name: {
         return any_match_filter(component);
@@ -237,8 +239,8 @@ bool is_null_or_empty(const std::optional<ss::sstring>& opt_str) {
     return opt_str.value_or("") == "";
 }
 
-result<entity_key::part_t, kerror> make_part(const auto& entity) {
-    entity_key::part_t part;
+result<entity_key::part, kerror> make_part(const auto& entity) {
+    entity_key::part part;
     if (entity.entity_type == "client-id") {
         if (is_null_or_empty(entity.entity_name)) {
             part.part.emplace<entity_key::part::client_id_default_match>();
@@ -425,7 +427,7 @@ ss::future<response_ptr> describe_client_quotas_handler::handle(
         // In strict mode, also require that each key part has a matching
         // predicate
         auto reverse_predicate =
-          [&client_predicate, &user_predicate](const entity_key::part_t& part) {
+          [&client_predicate, &user_predicate](const entity_key::part& part) {
               return (client_predicate && (*client_predicate)(part))
                      || (user_predicate && (*user_predicate)(part));
               //  || (ip_predicate && (*ip_predicate)(part));
