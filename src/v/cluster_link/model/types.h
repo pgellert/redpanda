@@ -918,6 +918,28 @@ struct update_mirror_topic_status_cmd
     auto serde_fields() { return std::tie(topic, status, force_update); }
 };
 
+struct batch_update_mirror_topic_status_cmd
+  : serde::envelope<
+      batch_update_mirror_topic_status_cmd,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    /// New state for the topics
+    mirror_topic_status status{mirror_topic_status::active};
+    using force_update_t = ss::bool_class<struct force_update_tag>;
+    /// Whether or not to force the status update even if the transition is
+    /// invalid
+    force_update_t force_update{force_update_t::no};
+    /// Topics to update
+    chunked_vector<::model::topic> topics;
+
+    friend bool operator==(
+      const batch_update_mirror_topic_status_cmd&,
+      const batch_update_mirror_topic_status_cmd&)
+      = default;
+
+    auto serde_fields() { return std::tie(status, force_update, topics); }
+};
+
 /// \brief Command used to update the properties of a mirror topic
 ///
 /// Will be used by the cluster linking metadata sync test to update
