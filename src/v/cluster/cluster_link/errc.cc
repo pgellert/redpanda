@@ -66,6 +66,8 @@ std::string errc_category::message(int c) const {
         return "SCRAM configuration invalid";
     case errc::link_has_active_shadow_topics:
         return "Link has active shadow topics";
+    case errc::invalid_status_transition:
+        return "Invalid mirror topic status transition";
     case errc::license_required:
         return "A valid license is required to create a shadow link";
     }
@@ -164,6 +166,9 @@ auto fmt::formatter<cluster::cluster_link::errc>::format(
         return fmt::format_to(
           ctx.out(),
           "cluster::cluster_link::errc::link_has_active_shadow_topics");
+    case cluster::cluster_link::errc::invalid_status_transition:
+        return fmt::format_to(
+          ctx.out(), "cluster::cluster_link::errc::invalid_status_transition");
     case cluster::cluster_link::errc::license_required:
         return fmt::format_to(
           ctx.out(), "cluster::cluster_link::errc::license_required");
