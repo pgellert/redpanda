@@ -27,6 +27,7 @@
 namespace cluster::cluster_link {
 
 using ::cluster_link::model::add_mirror_topic_cmd;
+using ::cluster_link::model::batch_update_mirror_topic_status_cmd;
 using ::cluster_link::model::delete_mirror_topic_cmd;
 using ::cluster_link::model::id_t;
 using ::cluster_link::model::metadata;
@@ -158,6 +159,89 @@ ss::future<errc> frontend::update_mirror_topic_status(
     cluster_link_cmd c{
       cluster::cluster_link_update_mirror_topic_status_cmd(id, std::move(cmd))};
     co_return co_await do_mutation(std::move(c), timeout);
+}
+
+ss::future<chunked_vector<topic_result>>
+frontend::batch_update_mirror_topic_status(
+  id_t id,
+  batch_update_mirror_topic_status_cmd cmd,
+  model::timeout_clock::time_point timeout) {
+    if (!cluster_linking_enabled()) {
+        chunked_vector<topic_result> results;
+        for (const auto& t : cmd.topics) {
+            results.emplace_back(t, errc::feature_disabled);
+        }
+        co_return results;
+    }
+
+    auto cluster_leader = _leaders->get_leader(model::controller_ntp);
+    if (!cluster_leader) {
+        chunked_vector<topic_result> results;
+        for (const auto& t : cmd.topics) {
+            results.emplace_back(t, errc::not_leader_controller);
+        }
+        co_return results;
+    }
+
+    if (*cluster_leader != _self) {
+        co_return co_await dispatch_batch_to_remote(
+          *cluster_leader,
+          id,
+          std::move(cmd),
+          timeout - model::timeout_clock::now());
+    }
+
+    chunked_vector<topic_result> results;
+    results.reserve(cmd.topics.size());
+    co_await ss::max_concurrent_for_each(
+      cmd.topics,
+      32,
+      [this, &results, id, &cmd, timeout](const model::topic& t) {
+          return update_mirror_topic_status(
+                   id,
+                   update_mirror_topic_status_cmd{
+                     .topic = t,
+                     .status = cmd.status,
+                     .force_update = cmd.force_update},
+                   timeout)
+            .then([&results, &t](errc ec) { results.emplace_back(t, ec); });
+      });
+    co_return results;
+}
+
+ss::future<chunked_vector<topic_result>> frontend::dispatch_batch_to_remote(
+  model::node_id leader,
+  id_t id,
+  batch_update_mirror_topic_status_cmd cmd,
+  model::timeout_clock::duration timeout) {
+    auto topics_copy = cmd.topics.copy();
+    auto result
+      = co_await _connections
+          ->with_node_client<cluster::controller_client_protocol>(
+            _self,
+            ss::this_shard_id(),
+            leader,
+            timeout,
+            [id, cmd = std::move(cmd), timeout](
+              cluster::controller_client_protocol client) mutable {
+                return client.batch_update_mirror_topic_status(
+                  cluster::batch_update_mirror_topic_status_request{
+                    .link_id = id, .cmd = std::move(cmd), .timeout = timeout},
+                  rpc::client_opts(model::timeout_clock::now() + timeout));
+            });
+    if (result.has_error()) {
+        vlog(
+          cluster::clusterlog.warn,
+          "Error dispatching batch mirror topic status to leader {}: {}",
+          leader,
+          result.error());
+        chunked_vector<topic_result> error_results;
+        for (const auto& t : topics_copy) {
+            error_results.emplace_back(t, errc::rpc_error);
+        }
+        co_return error_results;
+    }
+    co_return std::move(result.value().data.results);
 }
 
 ss::future<errc> frontend::update_mirror_topic_properties(
@@ -832,7 +916,7 @@ errc frontend::validator::validate_mutation(const cluster_link_cmd& cmd) const {
                 cmd.value.topic,
                 *status,
                 cmd.value.status);
-              return errc::invalid_update;
+              return errc::invalid_status_transition;
           }
           return errc::success;
       },
@@ -1121,6 +1205,27 @@ ss::future<errc> frontend::failover_link_topics(
             topics_to_failover.push_back(t);
         }
     }
+    if (_features->is_active(features::feature::batch_mirror_topic_status)) {
+        auto results = co_await failover_link_topics_batched(
+          id, std::move(topics_to_failover), timeout);
+        chunked_vector<errc> errors;
+        for (const auto& r : results) {
+            if (r.ec != errc::success) {
+                errors.push_back(r.ec);
+            }
+        }
+        if (!errors.empty()) {
+            vlog(
+              cluster::clusterlog.warn,
+              "Encountered {} topic errors while batch failing over link id {}",
+              errors.size(),
+              id);
+            co_return map_errc(errors.front());
+        }
+        co_return errc::success;
+    }
+
+    // Fallback: per-topic path for mixed-version clusters
     chunked_vector<errc> errors;
     errors.reserve(topics_to_failover.size());
     co_await ss::max_concurrent_for_each(
@@ -1150,4 +1255,40 @@ ss::future<errc> frontend::failover_link_topics(
     }
     co_return errc::success;
 }
+
+ss::future<chunked_vector<topic_result>> frontend::failover_link_topics_batched(
+  ::cluster_link::model::id_t id,
+  chunked_vector<model::topic> topics_to_failover,
+  model::timeout_clock::duration timeout) {
+    auto batch_size
+      = config::shard_local_cfg().shadow_link_failover_batch_size();
+
+    chunked_vector<batch_update_mirror_topic_status_cmd> batches;
+    for (size_t i = 0; i < topics_to_failover.size(); i += batch_size) {
+        auto end = std::min(i + batch_size, topics_to_failover.size());
+        auto batch_cmd = batch_update_mirror_topic_status_cmd{
+          .status = ::cluster_link::model::mirror_topic_status::failing_over};
+        for (size_t j = i; j < end; ++j) {
+            batch_cmd.topics.push_back(std::move(topics_to_failover[j]));
+        }
+        batches.push_back(std::move(batch_cmd));
+    }
+
+    chunked_vector<topic_result> all_results;
+    co_await ss::max_concurrent_for_each(
+      batches,
+      4,
+      [this, &all_results, id, timeout](
+        batch_update_mirror_topic_status_cmd& cmd) {
+          return batch_update_mirror_topic_status(
+                   id, std::move(cmd), model::timeout_clock::now() + timeout)
+            .then([&all_results](chunked_vector<topic_result> results) {
+                for (auto& r : results) {
+                    all_results.push_back(std::move(r));
+                }
+            });
+      });
+    co_return all_results;
+}
+
 } // namespace cluster::cluster_link

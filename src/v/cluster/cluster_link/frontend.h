@@ -68,6 +68,10 @@ public:
       ::cluster_link::model::id_t,
       ::cluster_link::model::update_mirror_topic_status_cmd,
       model::timeout_clock::time_point);
+    ss::future<chunked_vector<topic_result>> batch_update_mirror_topic_status(
+      ::cluster_link::model::id_t,
+      ::cluster_link::model::batch_update_mirror_topic_status_cmd,
+      model::timeout_clock::time_point);
     ss::future<errc> update_mirror_topic_properties(
       ::cluster_link::model::id_t,
       ::cluster_link::model::update_mirror_topic_properties_cmd,
@@ -153,6 +157,17 @@ private:
 
     cluster::cluster_link::errc
     validate_mutation(const cluster_link_cmd&) const;
+
+    ss::future<chunked_vector<topic_result>> dispatch_batch_to_remote(
+      model::node_id,
+      ::cluster_link::model::id_t,
+      ::cluster_link::model::batch_update_mirror_topic_status_cmd,
+      model::timeout_clock::duration);
+
+    ss::future<chunked_vector<topic_result>> failover_link_topics_batched(
+      ::cluster_link::model::id_t,
+      chunked_vector<model::topic>,
+      model::timeout_clock::duration);
 
     bool is_sanctioned();
 
