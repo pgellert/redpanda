@@ -461,7 +461,16 @@ try_validate_json_schema(const jsoncons::ojson& schema) {
 result<id_to_schema_pointer> collect_bundled_schema_and_fix_refs(
   jsoncons::ojson& doc, json_schema_dialect dialect);
 
-result<document_context> parse_json(iobuf buf) {
+// Intermediate result from parsing and validating a JSON schema with jsoncons,
+// before bundled schema collection and rapidjson serialization.
+struct parsed_json_doc {
+    jsoncons::ojson doc;
+    json_schema_dialect dialect;
+};
+
+// Phase 1: Parse the JSON schema, detect dialect, and validate against the
+// metaschema. Returns the jsoncons document and detected dialect.
+result<parsed_json_doc> parse_json_doc(iobuf buf) {
     // parse string in json document, check it's a valid json
     iobuf_istream is{buf.share(0, buf.size_bytes())};
 
@@ -513,9 +522,16 @@ result<document_context> parse_json(iobuf buf) {
     if (validation_res.has_error()) {
         return validation_res.as_failure();
     }
-    auto dialect = validation_res.assume_value();
 
-    // this function will resolve al local ref against their respective baseuri.
+    return parsed_json_doc{std::move(schema), validation_res.assume_value()};
+}
+
+// Phase 2: Collect bundled schemas, fix up $ref URIs, and serialize to
+// rapidjson. This runs after any external references have been injected.
+result<document_context>
+finalize_json_doc(jsoncons::ojson& schema, json_schema_dialect dialect) {
+    // this function will resolve all local ref against their respective
+    // baseuri.
     auto bundled_schemas_map = collect_bundled_schema_and_fix_refs(
       schema, dialect);
     if (bundled_schemas_map.has_error()) {
@@ -544,6 +560,16 @@ result<document_context> parse_json(iobuf buf) {
       std::move(rapidjson_schema),
       dialect,
       std::move(bundled_schemas_map).assume_value()};
+}
+
+// Convenience: parse_json_doc + finalize_json_doc in one step.
+// Used when no external reference injection is needed.
+result<document_context> parse_json(iobuf buf) {
+    auto parsed = parse_json_doc(std::move(buf));
+    if (parsed.has_error()) {
+        return parsed.as_failure();
+    }
+    return finalize_json_doc(parsed.value().doc, parsed.value().dialect);
 }
 
 /// is_superset section
@@ -2439,14 +2465,108 @@ result<id_to_schema_pointer> collect_bundled_schema_and_fix_refs(
 
 } // namespace
 
+// Fetch external referenced schemas from the store and inject them into the
+// jsoncons document as bundled schemas (under $defs with $id = ref.name).
+// The subsequent collect_bundled_schema_and_fix_refs call will discover these
+// injected schemas via their $id, register them in the bundled_schemas map,
+// and resolve $ref URIs accordingly.
+//
+// Note: cross-dialect references (e.g., a draft7 schema referencing a
+// draft2020-12 schema) are not supported. The id keyword ($id vs id) is set
+// using the parent schema's dialect, and resolve_reference enforces dialect
+// consistency at lines 835-838.
+static constexpr int max_reference_depth = 50;
+
+static ss::future<> inject_external_references(
+  jsoncons::ojson& doc,
+  json_schema_dialect dialect,
+  schema_getter& store,
+  const context& parent_ctx,
+  const schema_definition::references& refs,
+  int depth = 0) {
+    if (!doc.is_object() || refs.empty()) {
+        co_return;
+    }
+
+    if (depth >= max_reference_depth) {
+        throw as_exception(invalid_schema(
+          fmt::format(
+            "maximum reference depth ({}) exceeded, possible reference cycle",
+            max_reference_depth)));
+    }
+
+    // Ensure $defs exists in the document. The collection function scans all
+    // nested objects, so the key name doesn't matter for discovery. We use
+    // $defs as it's the standard for modern drafts and harmless for older ones.
+    if (doc.find("$defs") == doc.object_range().end()) {
+        doc.insert_or_assign("$defs", jsoncons::ojson::object());
+    }
+    auto& defs = doc.at("$defs");
+
+    for (size_t i = 0; i < refs.size(); ++i) {
+        const auto& ref = refs[i];
+
+        auto resolved_sub = ref.sub.resolve(parent_ctx);
+        auto stored = co_await store.get_subject_schema(
+          resolved_sub, ref.version, include_deleted::yes);
+
+        // Parse the referenced schema
+        auto ref_result = parse_json_doc(stored.schema.def().shared_raw()());
+        if (ref_result.has_error()) {
+            throw as_exception(invalid_schema(
+              fmt::format(
+                "failed to parse referenced schema '{}': {}",
+                ref.name,
+                ref_result.assume_error().message())));
+        }
+        auto ref_parsed = std::move(ref_result).assume_value();
+
+        // Recursively inject transitive references
+        const auto& ref_refs = stored.schema.def().refs();
+        if (!ref_refs.empty()) {
+            co_await inject_external_references(
+              ref_parsed.doc,
+              ref_parsed.dialect,
+              store,
+              stored.schema.sub().ctx,
+              ref_refs,
+              depth + 1);
+        }
+
+        // Set $id (or "id" for draft4) to the reference name so bundled
+        // schema collection discovers it with the right URI key.
+        ref_parsed.doc.insert_or_assign(
+          id_keyword(dialect), jsoncons::ojson{std::string_view{ref.name}});
+
+        // Add under $defs with a key derived from the reference name to avoid
+        // collisions with user-defined $defs entries.
+        defs.insert_or_assign(
+          fmt::format("__bundled_ref_{}", ref.name), std::move(ref_parsed.doc));
+    }
+}
+
 ss::future<json_schema_definition>
-make_json_schema_definition(schema_getter&, subject_schema schema) {
+make_json_schema_definition(schema_getter& store, subject_schema schema) {
     auto [sub, unparsed] = std::move(schema).destructure();
     auto [def, type, refs, meta] = std::move(unparsed).destructure();
-    auto doc = parse_json(std::move(def)).value(); // throws on error
+
+    auto parsed = parse_json_doc(std::move(def)).value(); // throws on error
+
+    // Resolve external references by fetching them from the store and injecting
+    // them as bundled schemas into the jsoncons document.
+    if (!refs.empty()) {
+        co_await inject_external_references(
+          parsed.doc, parsed.dialect, store, sub.ctx, refs);
+    }
+
+    // Finalize: collect bundled schemas (including injected ones), fix up $ref
+    // URIs, and serialize to rapidjson for compatibility checking.
+    auto doc_ctx
+      = finalize_json_doc(parsed.doc, parsed.dialect).value(); // throws
+
     co_return json_schema_definition{
       ss::make_shared<json_schema_definition::impl>(
-        std::move(doc), std::move(refs), std::move(meta))};
+        std::move(doc_ctx), std::move(refs), std::move(meta))};
 }
 
 ss::future<subject_schema> make_canonical_json_schema(
