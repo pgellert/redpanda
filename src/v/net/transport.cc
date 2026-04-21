@@ -231,35 +231,47 @@ ss::future<> base_transport::do_connect(clock_type::time_point timeout) {
 
         // If the proxy URL scheme was https://, wrap the TCP socket in
         // TLS with SNI = proxy hostname before any HTTP bytes flow.
+        // Applies the caller's timeout so a stalled proxy TLS handshake
+        // fails fast rather than wedging the auth control-plane.
         if (_proxy.has_value() && _proxy->credentials) {
             // CORE-14958
             REDPANDA_BEGIN_IGNORE_DEPRECATIONS
-            fd = co_await ss::tls::wrap_client(
-              _proxy->credentials,
-              std::move(fd),
-              ss::tls::tls_options{
-                .server_name = _proxy->tls_sni_hostname.value_or("")});
+            fd = co_await ss::with_timeout(
+              timeout,
+              ss::tls::wrap_client(
+                _proxy->credentials,
+                std::move(fd),
+                ss::tls::tls_options{
+                  .server_name = _proxy->tls_sni_hostname.value_or("")}));
             REDPANDA_END_IGNORE_DEPRECATIONS
         }
 
         // Issue the CONNECT handshake. On success, fd is a tunnel to the
-        // origin; on failure, throws proxy_connect_error.
+        // origin; on failure, throws proxy_connect_error. The timeout
+        // guards against proxies that accept TCP and then stall.
         if (_proxy.has_value()) {
-            co_await send_connect_and_read_response(
-              fd, server_address(), _proxy->address, _log);
+            co_await ss::with_timeout(
+              timeout,
+              send_connect_and_read_response(
+                fd, server_address(), _proxy->address, _log));
         }
 
         // TLS to the origin (unchanged from pre-proxy behaviour). This
         // handshake runs inside the CONNECT tunnel when a proxy is in use.
+        // The same deadline bounds the origin TLS handshake so a stalled
+        // origin (or proxy that opened the tunnel but then wedges the
+        // inner handshake) still surfaces a timeout rather than hanging.
         if (_creds) {
             // CORE-14958
             REDPANDA_BEGIN_IGNORE_DEPRECATIONS
-            fd = co_await ss::tls::wrap_client(
-              _creds,
-              std::move(fd),
-              ss::tls::tls_options{
-                .wait_for_eof_on_shutdown = _wait_for_tls_server_eof,
-                .server_name = _tls_sni_hostname.value_or("")});
+            fd = co_await ss::with_timeout(
+              timeout,
+              ss::tls::wrap_client(
+                _creds,
+                std::move(fd),
+                ss::tls::tls_options{
+                  .wait_for_eof_on_shutdown = _wait_for_tls_server_eof,
+                  .server_name = _tls_sni_hostname.value_or("")}));
             REDPANDA_END_IGNORE_DEPRECATIONS
         }
         _fd = std::make_unique<ss::connected_socket>(std::move(fd));
