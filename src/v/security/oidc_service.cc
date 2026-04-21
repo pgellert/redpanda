@@ -470,11 +470,25 @@ struct service::impl {
         std::optional<net::base_transport::configuration::proxy_config>
           proxy_cfg;
         if (!proxy_url_str.empty()) {
-            // Ensure TLS-capable system-trust credentials exist for https://
-            // proxies. ensure_creds is a no-op if _creds is already built.
-            co_await ensure_creds();
+            // Parse the proxy URL first so we only pay the system-trust
+            // credential cost when the proxy scheme is https. A plaintext
+            // http:// proxy in front of a plaintext http:// origin must
+            // work on images without a CA bundle.
+            auto proxy_scheme_res = parse_url(proxy_url_str);
+            if (proxy_scheme_res.has_error()) {
+                co_await return_exception(
+                  errc::metadata_invalid,
+                  "invalid oidc_http_proxy: {}",
+                  proxy_url_str);
+            }
+            const bool proxy_is_https = proxy_scheme_res.assume_value().scheme
+                                        == "https";
+            if (proxy_is_https) {
+                co_await ensure_creds();
+            }
 
-            auto parsed = parse_proxy_url(proxy_url_str, _creds);
+            auto parsed = parse_proxy_url(
+              proxy_url_str, proxy_is_https ? _creds : nullptr);
             if (parsed.has_error()) {
                 co_await return_exception(
                   parsed.assume_error(),
