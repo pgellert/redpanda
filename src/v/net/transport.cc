@@ -215,21 +215,14 @@ ss::future<> send_connect_and_read_response(
           /*retriable=*/true);
     }
 
-    if (parser.had_post_terminator_bytes) {
-        // See class-level comment: this would silently corrupt the inner
-        // handshake because the bytes are buffered in `in` and lost when
-        // `in` is destroyed. Fail explicitly so operators see the real
-        // cause instead of an opaque TLS error.
-        throw net::proxy_connect_error(
-          proxy,
-          origin,
-          "proxy sent data past CONNECT response terminator; tunneled "
-          "protocol would be corrupted (helper assumes client-speaks-first "
-          "origin)");
-    }
-
-    // Parse "HTTP/1.x NNN <reason>". Accept only status 200 (matches Go's
-    // strict behaviour; real proxies universally return 200).
+    // Parse "HTTP/1.x NNN <reason>" BEFORE checking for post-terminator
+    // bytes. Rationale: non-2xx responses are allowed to carry an error
+    // body (and commonly do — a 503 may include "Retry-After" guidance,
+    // a 407 may include challenge details). Treating those body bytes as
+    // protocol corruption would reclassify legitimate 5xx/4xx failures as
+    // non-retriable parsing errors and hide actionable information. Only
+    // a successful (200) CONNECT must have no body per RFC 9110 §9.3.6,
+    // so the corruption check below applies only there.
     std::string_view sl(parser.status_line);
     if (!sl.starts_with("HTTP/1.")) {
         throw net::proxy_connect_error(
@@ -260,6 +253,8 @@ ss::future<> send_connect_and_read_response(
         // 4xx (incl. 407 auth required, 403 forbidden): permanent; an
         // operator must change configuration to recover. Immediate
         // surfacing with actionable context is the correct response.
+        // Any bytes past the header block are error body and can be
+        // safely ignored: we are about to tear down the socket.
         const bool retriable = status_code >= 500 && status_code < 600;
         throw net::proxy_connect_error(
           proxy,
@@ -271,6 +266,19 @@ ss::future<> send_connect_and_read_response(
                 parser.status_line,
                 parser.headers_context),
           retriable);
+    }
+
+    // Successful CONNECT: the tunnel is open. Post-terminator bytes are
+    // a real corruption risk here because the next layer (TLS to origin)
+    // would lose them when the input_stream is destroyed. See
+    // connect_response_parser class comment.
+    if (parser.had_post_terminator_bytes) {
+        throw net::proxy_connect_error(
+          proxy,
+          origin,
+          "proxy sent data past successful CONNECT response terminator; "
+          "tunneled protocol would be corrupted (helper assumes "
+          "client-speaks-first origin)");
     }
 
     vlog(log->trace, "CONNECT to {} via proxy {} succeeded", origin, proxy);
