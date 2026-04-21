@@ -213,6 +213,16 @@ struct service::impl {
             ssx::spawn_with_gate(_gate, [this] { return update(); });
         });
         _http_proxy.watch([this]() {
+            if (_http_proxy().empty()) {
+                vlog(
+                  seclog.info, "OIDC: HTTP proxy cleared; direct connections");
+            } else {
+                vlog(
+                  seclog.info,
+                  "OIDC: HTTP proxy set to {}; discovery and JWKS will route "
+                  "through it",
+                  _http_proxy());
+            }
             ssx::spawn_with_gate(_gate, [this] { return update(); });
         });
         _mapping.watch([this]() { update_rule(); });
@@ -404,65 +414,65 @@ struct service::impl {
         }
     }
 
-    ss::future<ss::sstring> make_request(parsed_url url) {
-        if (!_http_proxy().empty()) {
+    /// Lazily build system-trust TLS credentials. Invoked from make_request
+    /// on the first HTTPS origin or the first https:// proxy. Idempotent.
+    ss::future<> ensure_creds() {
+        if (_creds) {
+            co_return;
+        }
+        const auto& cfg = config::shard_local_cfg();
+        ss::tls::credentials_builder builder;
+        builder.set_client_auth(ss::tls::client_auth::NONE);
+        builder.set_minimum_tls_version(
+          config::from_config(cfg.tls_min_version()));
+        builder.set_cipher_string(cfg.tls_v1_2_cipher_suites);
+        builder.set_ciphersuites(cfg.tls_v1_3_cipher_suites);
+        co_await builder.set_system_trust();
+        _creds = co_await net::build_reloadable_credentials_with_probe<
+          ss::tls::certificate_credentials>(
+          std::move(builder), "oidc_provider", "httpclient");
+        _creds->set_dn_verification_callback([](
+                                               ss::tls::session_type type,
+                                               ss::sstring subject,
+                                               ss::sstring issuer) {
             vlog(
-              seclog.info,
+              seclog.trace,
+              "type: ?, subject: {}, issuer: {}",
+              (uint8_t)type,
+              subject,
+              issuer);
+        });
+    }
+
+    ss::future<ss::sstring> make_request(parsed_url url) {
+        // Copy the proxy URL once up-front: binding reads return a reference
+        // to the binding's internal storage, which may be mutated by the
+        // watcher on the same shard across coroutine suspension points.
+        // Working off a local copy keeps the log line, the scheme check, and
+        // the error detail consistent even if the config changes mid-request.
+        auto proxy_url_str = ss::sstring{_http_proxy()};
+        auto is_https = url.scheme == "https";
+
+        if (!proxy_url_str.empty()) {
+            vlog(
+              seclog.debug,
               "OIDC: routing request to {} via HTTP proxy {}",
               url,
-              _http_proxy());
+              proxy_url_str);
         }
-        auto is_https = url.scheme == "https";
+
         std::optional<ss::sstring> tls_host;
         if (is_https) {
             tls_host.emplace(url.host);
-            if (!_creds) {
-                const auto& cfg = config::shard_local_cfg();
-                ss::tls::credentials_builder builder;
-                builder.set_client_auth(ss::tls::client_auth::NONE);
-                builder.set_minimum_tls_version(
-                  config::from_config(cfg.tls_min_version()));
-                builder.set_cipher_string(cfg.tls_v1_2_cipher_suites);
-                builder.set_ciphersuites(cfg.tls_v1_3_cipher_suites);
-                co_await builder.set_system_trust();
-                _creds = co_await net::build_reloadable_credentials_with_probe<
-                  ss::tls::certificate_credentials>(
-                  std::move(builder), "oidc_provider", "httpclient");
-                _creds->set_dn_verification_callback(
-                  [](
-                    ss::tls::session_type type,
-                    ss::sstring subject,
-                    ss::sstring issuer) {
-                      vlog(
-                        seclog.trace,
-                        "type: ?, subject: {}, issuer: {}",
-                        (uint8_t)type,
-                        subject,
-                        issuer);
-                  });
-            }
+            co_await ensure_creds();
         }
 
         std::optional<net::base_transport::configuration::proxy_config>
           proxy_cfg;
-        if (const auto& proxy_url_str = _http_proxy(); !proxy_url_str.empty()) {
-            // TLS-capable system-trust credentials for https:// proxies. We
-            // reuse _creds if already built (origin is https, which is always
-            // true for OIDC discovery); otherwise build a minimal system-trust
-            // credential set.
-            if (!_creds) {
-                ss::tls::credentials_builder builder;
-                builder.set_client_auth(ss::tls::client_auth::NONE);
-                const auto& cfg = config::shard_local_cfg();
-                builder.set_minimum_tls_version(
-                  config::from_config(cfg.tls_min_version()));
-                builder.set_cipher_string(cfg.tls_v1_2_cipher_suites);
-                builder.set_ciphersuites(cfg.tls_v1_3_cipher_suites);
-                co_await builder.set_system_trust();
-                _creds = co_await net::build_reloadable_credentials_with_probe<
-                  ss::tls::certificate_credentials>(
-                  std::move(builder), "oidc_provider", "httpclient");
-            }
+        if (!proxy_url_str.empty()) {
+            // Ensure TLS-capable system-trust credentials exist for https://
+            // proxies. ensure_creds is a no-op if _creds is already built.
+            co_await ensure_creds();
 
             auto parsed = parse_proxy_url(proxy_url_str, _creds);
             if (parsed.has_error()) {
