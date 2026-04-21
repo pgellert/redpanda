@@ -247,6 +247,9 @@ ss::future<reconnect_result_t> client::get_connected(
     // of running out of budget after 1s and retrying against itself.
     const auto interval = has_proxy() ? timeout
                                       : ss::lowres_clock::duration{1s};
+    // Preserve the last retriable proxy error across the loop so we can
+    // surface it (instead of a generic timeout) if the budget expires.
+    std::optional<net::proxy_connect_error> last_proxy_error;
     while (!_connect_gate.is_closed() && current < deadline) {
         if (_as != nullptr) {
             _as->check();
@@ -283,6 +286,7 @@ ss::future<reconnect_result_t> client::get_connected(
                 throw;
             }
             vlog(ctxlog.trace, "transient proxy error: {}", err.what());
+            last_proxy_error = err;
         }
         // on the off chance that shutdown_now flag got set outside this loop,
         // we allow for one successful connect attempt. the alternative to this
@@ -304,6 +308,17 @@ ss::future<reconnect_result_t> client::get_connected(
         // transient. It won't help to try once again.
     }
     vlog(ctxlog.debug, "connected, {}", is_valid());
+    // If the budget expired after repeated retriable proxy failures,
+    // surface the last one instead of the generic timed_out so operators
+    // see the actual proxy state (e.g. "status 503 Service Unavailable")
+    // rather than an undifferentiated timeout.
+    if (!is_valid() && last_proxy_error.has_value()) {
+        vlog(
+          ctxlog.warn,
+          "proxy connect attempts exhausted; last error: {}",
+          last_proxy_error->what());
+        throw *last_proxy_error;
+    }
     co_return is_valid() ? reconnect_result_t::connected
                          : reconnect_result_t::timed_out;
 }
