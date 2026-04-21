@@ -43,8 +43,13 @@ class MitmproxyService(Service):
         return f"http://{self.node.account.hostname}:{MITMPROXY_PORT}"
 
     def start_node(self, node, **kwargs):
+        # PYTHONUNBUFFERED + stdbuf -oL: mitmdump writes progress to
+        # stdout, and Python's default block-buffering means the file
+        # stays empty for the whole test until the process exits.
+        # Forcing line-buffered output means assert_proxied_host can
+        # read the log mid-test.
         cmd = (
-            f"nohup mitmdump "
+            f"nohup env PYTHONUNBUFFERED=1 stdbuf -oL -eL mitmdump "
             f"--mode regular "
             f"--listen-port {MITMPROXY_PORT} "
             f"--ignore-hosts '.*' "
@@ -71,17 +76,29 @@ class MitmproxyService(Service):
         return bool(out and out.strip())
 
     def assert_proxied_host(self, expected_host: str) -> None:
-        """Assert that mitmproxy's log shows a CONNECT to the given
-        host. Call this after the test workload has run. Parses the
-        mitmproxy access log for a line matching 'CONNECT <host>:<port>'.
+        """Assert that mitmproxy's access log shows a tunneled CONNECT
+        to the given host. Call this after the test workload has run.
+
+        mitmproxy 11's regular-mode log records CONNECT tunnels as
+        `server connect <host>:<port>` rather than the raw HTTP verb,
+        so we accept either that form or the classic `CONNECT <host>`.
+        Reads the log with sudo fallback in case mitmdump ran as root.
         """
-        log_contents = self.node.account.ssh_output(f"cat {LOG_PATH}", allow_fail=True)
-        if not log_contents:
-            raise AssertionError("mitmproxy log is empty")
+        cmd = f"sudo cat {LOG_PATH} 2>/dev/null || cat {LOG_PATH}"
+        log_contents = self.node.account.ssh_output(cmd, allow_fail=True)
         text = (
-            log_contents.decode() if isinstance(log_contents, bytes) else log_contents
+            log_contents.decode()
+            if isinstance(log_contents, (bytes, bytearray))
+            else (log_contents or "")
         )
-        if f"CONNECT {expected_host}" not in text:
+        if not text.strip():
+            raise AssertionError(f"mitmproxy log at {LOG_PATH} is empty or unreadable")
+        if (
+            f"CONNECT {expected_host}" not in text
+            and f"server connect {expected_host}" not in text
+        ):
+            excerpt = "\n".join(text.splitlines()[-30:])
             raise AssertionError(
-                f"no CONNECT to {expected_host} found in mitmproxy log:\n{text}"
+                f"no CONNECT tunnel to {expected_host} found in mitmproxy "
+                f"log; last 30 lines:\n{excerpt}"
             )

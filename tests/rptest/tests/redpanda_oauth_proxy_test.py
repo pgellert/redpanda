@@ -125,6 +125,7 @@ class OIDCViaProxyTest(RedpandaOIDCTestBase):
             self.redpanda,
             algorithm="OAUTHBEARER",
             oauth_config=cfg,
+            tls_cert=self.client_cert,
         )
         producer = k_client.get_producer()
 
