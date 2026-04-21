@@ -54,10 +54,87 @@ ss::future<ss::connected_socket> connect_with_timeout(
       });
 }
 
+/// input_stream consumer that parses an HTTP CONNECT response in a single
+/// pass. Stops as soon as the terminating blank line is seen and reports
+/// whether any bytes arrived past it.
+///
+/// The "no post-terminator bytes" invariant is load-bearing: because the
+/// CONNECT response parser uses a temporary input_stream and the socket is
+/// then moved into ss::tls::wrap_client for the origin TLS handshake, any
+/// bytes that land in the input_stream's internal buffer past \r\n\r\n are
+/// lost when the stream is destroyed. For our OIDC use case the origin
+/// protocol (TLS ClientHello) is client-speaks-first, so the proxy cannot
+/// have forwarded any origin bytes by the time we read the CONNECT reply
+/// and this never fires in practice. If a future caller reuses this helper
+/// for a server-speaks-first protocol, had_post_terminator_bytes will flag
+/// the corruption risk rather than silently break the inner handshake.
+struct connect_response_parser {
+    enum class phase { in_status, in_headers, done };
+    phase state = phase::in_status;
+    ss::sstring current_line;
+    ss::sstring status_line;
+    /// Concatenated header lines, bounded, captured for non-2xx diagnostics.
+    ss::sstring headers_context;
+    static constexpr size_t max_headers_bytes = 512;
+    /// true once we've seen the blank line that terminates the header block.
+    bool saw_terminator = false;
+    /// true if `consume()` handed us bytes beyond the blank line — see the
+    /// class comment.
+    bool had_post_terminator_bytes = false;
+
+    using result_t = ss::consumption_result<char>;
+
+    ss::future<result_t> operator()(ss::temporary_buffer<char> buf) {
+        if (buf.empty()) {
+            // EOF. Stop; caller inspects saw_terminator.
+            return ss::make_ready_future<result_t>(
+              ss::stop_consuming<char>({}));
+        }
+        size_t i = 0;
+        while (i < buf.size() && state != phase::done) {
+            char c = buf.get()[i++];
+            current_line.append(&c, 1);
+            if (
+              current_line.size() >= 2
+              && current_line[current_line.size() - 2] == '\r'
+              && current_line[current_line.size() - 1] == '\n') {
+                current_line.resize(current_line.size() - 2);
+                if (state == phase::in_status) {
+                    status_line = std::move(current_line);
+                    current_line.resize(0);
+                    state = phase::in_headers;
+                } else {
+                    if (current_line.empty()) {
+                        state = phase::done;
+                        saw_terminator = true;
+                    } else if (headers_context.size() < max_headers_bytes) {
+                        if (!headers_context.empty()) {
+                            headers_context.append("; ", 2);
+                        }
+                        auto remaining = max_headers_bytes
+                                         - headers_context.size();
+                        auto to_copy = std::min(current_line.size(), remaining);
+                        headers_context.append(current_line.data(), to_copy);
+                    }
+                    current_line.resize(0);
+                }
+            }
+        }
+        if (state == phase::done) {
+            had_post_terminator_bytes = (i < buf.size());
+            return ss::make_ready_future<result_t>(
+              ss::stop_consuming<char>(buf.share(i, buf.size() - i)));
+        }
+        return ss::make_ready_future<result_t>(ss::continue_consuming{});
+    }
+};
+
 /// Sends an HTTP CONNECT request over fd and reads the response.
 /// Throws proxy_connect_error on non-200 status, malformed response,
-/// or transport error. Does not close fd; the caller is expected to
-/// continue using it (typically by TLS-wrapping it).
+/// transport error, or if the proxy sent data past the CONNECT response
+/// terminator (which would corrupt the subsequent tunneled protocol).
+/// Does not close fd; the caller is expected to continue using it
+/// (typically by TLS-wrapping it).
 ss::future<> send_connect_and_read_response(
   ss::connected_socket& fd,
   const net::unresolved_address& origin,
@@ -75,71 +152,66 @@ ss::future<> send_connect_and_read_response(
     vlog(
       log->trace, "Sending CONNECT to proxy {} for origin {}", proxy, origin);
 
-    // Use the high-level stream API for the CONNECT handshake. Note that
-    // connected_socket::output() enables batch_flushes: in that mode flush()
-    // returns a ready future immediately and the actual send is deferred to
-    // the reactor's flush poller, leaving _in_batch non-empty. The
-    // output_stream destructor asserts !_in_batch, and calling close() would
-    // shut down the socket's write side (SHUT_WR), which we cannot do — the
-    // subsequent TLS-to-origin handshake still needs to write. We therefore
-    // flush, then co_await ss::yield() so the flush poller gets a tick to
-    // drain the batch before the stream falls out of scope. The subsequent
-    // read on `in` almost always also suspends (waiting for the proxy's
-    // response), which gives the poller additional opportunities to run.
+    // Note on stream lifecycle: connected_socket::output() enables
+    // batch_flushes, so flush() returns a ready future immediately and the
+    // actual send is deferred to the reactor's flush poller, leaving
+    // _in_batch non-empty. The output_stream destructor asserts !_in_batch,
+    // and calling close() would shut down the socket's write side
+    // (SHUT_WR), which we cannot do — the subsequent TLS-to-origin
+    // handshake still needs to write. We therefore flush, then
+    // co_await ss::yield() so the flush poller gets a tick to drain the
+    // batch before the stream falls out of scope.
     auto out = fd.output();
     co_await out.write(request);
     co_await out.flush();
     co_await ss::yield();
 
+    // Parse the CONNECT response via consume(). A single pass over the
+    // bytes that arrive on the socket, stopping exactly at the blank-line
+    // terminator, with explicit detection of any bytes past it. See the
+    // connect_response_parser class comment for why post-terminator bytes
+    // are treated as a fatal error for this helper.
     auto in = fd.input();
+    connect_response_parser parser;
+    co_await in.consume(parser);
 
-    // Read the response line-by-line. Seastar's input_stream has no
-    // read_until() — we scan one byte at a time, which is cheap because
-    // the CONNECT response is tiny (a status line plus a few headers).
-    // Returns nullopt on EOF so callers can distinguish "blank terminator"
-    // from "proxy hung up mid-headers".
-    auto read_line = [&in]() -> ss::future<std::optional<ss::sstring>> {
-        ss::sstring line;
-        while (true) {
-            auto buf = co_await in.read_exactly(1);
-            if (buf.empty()) {
-                // EOF: if we have already accumulated bytes, treat as
-                // malformed/truncated line; if not, signal EOF cleanly.
-                if (line.empty()) {
-                    co_return std::nullopt;
-                }
-                co_return line;
-            }
-            line.append(buf.get(), 1);
-            if (
-              line.size() >= 2 && line[line.size() - 2] == '\r'
-              && line[line.size() - 1] == '\n') {
-                line.resize(line.size() - 2);
-                co_return line;
-            }
-        }
-    };
-
-    auto status_line_opt = co_await read_line();
-    if (!status_line_opt.has_value() || status_line_opt->empty()) {
+    if (!parser.saw_terminator) {
         throw net::proxy_connect_error(
-          proxy, origin, "proxy closed connection before sending status line");
+          proxy,
+          origin,
+          parser.status_line.empty()
+            ? "proxy closed connection before sending status line"
+            : "proxy closed connection mid-headers");
     }
-    auto status_line = std::move(*status_line_opt);
+
+    if (parser.had_post_terminator_bytes) {
+        // See class-level comment: this would silently corrupt the inner
+        // handshake because the bytes are buffered in `in` and lost when
+        // `in` is destroyed. Fail explicitly so operators see the real
+        // cause instead of an opaque TLS error.
+        throw net::proxy_connect_error(
+          proxy,
+          origin,
+          "proxy sent data past CONNECT response terminator; tunneled "
+          "protocol would be corrupted (helper assumes client-speaks-first "
+          "origin)");
+    }
 
     // Parse "HTTP/1.x NNN <reason>". Accept only status 200 (matches Go's
     // strict behaviour; real proxies universally return 200).
-    std::string_view sl(status_line);
+    std::string_view sl(parser.status_line);
     if (!sl.starts_with("HTTP/1.")) {
         throw net::proxy_connect_error(
           proxy,
           origin,
-          fmt::format("unexpected status line: {}", status_line));
+          fmt::format("unexpected status line: {}", parser.status_line));
     }
     auto sp1 = sl.find(' ');
     if (sp1 == std::string_view::npos) {
         throw net::proxy_connect_error(
-          proxy, origin, fmt::format("malformed status line: {}", status_line));
+          proxy,
+          origin,
+          fmt::format("malformed status line: {}", parser.status_line));
     }
     auto code_view = sl.substr(sp1 + 1);
     int status_code = 0;
@@ -149,57 +221,18 @@ ss::future<> send_connect_and_read_response(
         throw net::proxy_connect_error(
           proxy,
           origin,
-          fmt::format("non-numeric status code in: {}", status_line));
+          fmt::format("non-numeric status code in: {}", parser.status_line));
     }
     if (status_code != 200) {
-        // On non-200, drain the response headers line-by-line (same framing
-        // as the success path) and accumulate them as diagnostic context.
-        // We deliberately do NOT attempt to read any response body: a 4xx
-        // proxy response typically has no body (and never has one for
-        // CONNECT per RFC 9110 §9.3.6), and using read_up_to() here would
-        // block until more bytes arrive or the caller's timeout fires —
-        // turning a clean "407 Proxy Authentication Required" into an
-        // opaque timeout. read_line terminates on blank-line OR EOF, so
-        // this loop always exits promptly.
-        constexpr size_t max_context_bytes = 512;
-        ss::sstring context;
-        while (context.size() < max_context_bytes) {
-            auto line_opt = co_await read_line();
-            if (!line_opt.has_value() || line_opt->empty()) {
-                break; // EOF or end of headers
-            }
-            if (!context.empty()) {
-                context.append("; ", 2);
-            }
-            auto remaining = max_context_bytes - context.size();
-            auto line_view = std::string_view(*line_opt);
-            if (line_view.size() > remaining) {
-                line_view = line_view.substr(0, remaining);
-            }
-            context.append(line_view.data(), line_view.size());
-        }
         throw net::proxy_connect_error(
           proxy,
           origin,
-          context.empty()
-            ? fmt::format("status {}", status_line)
-            : fmt::format("status {}; headers: {}", status_line, context));
-    }
-
-    // Discard remaining response headers until the terminating blank line.
-    // An EOF here means the proxy closed the connection before the empty
-    // terminator — surface that as an explicit error rather than silently
-    // declaring success and letting the downstream TLS handshake fail with
-    // an opaque error.
-    while (true) {
-        auto line_opt = co_await read_line();
-        if (!line_opt.has_value()) {
-            throw net::proxy_connect_error(
-              proxy, origin, "proxy closed connection mid-headers");
-        }
-        if (line_opt->empty()) {
-            break;
-        }
+          parser.headers_context.empty()
+            ? fmt::format("status {}", parser.status_line)
+            : fmt::format(
+                "status {}; headers: {}",
+                parser.status_line,
+                parser.headers_context));
     }
 
     vlog(log->trace, "CONNECT to {} via proxy {} succeeded", origin, proxy);
