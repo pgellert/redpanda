@@ -75,12 +75,24 @@ struct connect_response_parser {
     ss::sstring status_line;
     /// Concatenated header lines, bounded, captured for non-2xx diagnostics.
     ss::sstring headers_context;
-    static constexpr size_t max_headers_bytes = 512;
+    /// Running total of bytes consumed in the response header block
+    /// (status line + headers + CRLFs). Bounded to prevent a
+    /// misbehaving proxy from forcing unbounded allocation on this
+    /// control-plane path before the caller's timeout fires.
+    size_t total_header_bytes = 0;
+    /// Per-line and total byte limits. The per-line limit stops a proxy
+    /// from streaming an arbitrarily long single header without CRLF;
+    /// the total limit bounds aggregate memory use across many lines.
+    static constexpr size_t max_line_bytes = 8 * 1024;
+    static constexpr size_t max_total_header_bytes = 64 * 1024;
+    static constexpr size_t max_headers_context_bytes = 512;
     /// true once we've seen the blank line that terminates the header block.
     bool saw_terminator = false;
     /// true if `consume()` handed us bytes beyond the blank line — see the
     /// class comment.
     bool had_post_terminator_bytes = false;
+    /// Set when a byte limit is exceeded. The caller throws on this.
+    bool limit_exceeded = false;
 
     using result_t = ss::consumption_result<char>;
 
@@ -93,6 +105,14 @@ struct connect_response_parser {
         size_t i = 0;
         while (i < buf.size() && state != phase::done) {
             char c = buf.get()[i++];
+            ++total_header_bytes;
+            if (
+              current_line.size() >= max_line_bytes
+              || total_header_bytes > max_total_header_bytes) {
+                limit_exceeded = true;
+                state = phase::done;
+                break;
+            }
             current_line.append(&c, 1);
             if (
               current_line.size() >= 2
@@ -107,11 +127,12 @@ struct connect_response_parser {
                     if (current_line.empty()) {
                         state = phase::done;
                         saw_terminator = true;
-                    } else if (headers_context.size() < max_headers_bytes) {
+                    } else if (
+                      headers_context.size() < max_headers_context_bytes) {
                         if (!headers_context.empty()) {
                             headers_context.append("; ", 2);
                         }
-                        auto remaining = max_headers_bytes
+                        auto remaining = max_headers_context_bytes
                                          - headers_context.size();
                         auto to_copy = std::min(current_line.size(), remaining);
                         headers_context.append(current_line.data(), to_copy);
@@ -121,7 +142,7 @@ struct connect_response_parser {
             }
         }
         if (state == phase::done) {
-            had_post_terminator_bytes = (i < buf.size());
+            had_post_terminator_bytes = !limit_exceeded && (i < buf.size());
             return ss::make_ready_future<result_t>(
               ss::stop_consuming<char>(buf.share(i, buf.size() - i)));
         }
@@ -174,6 +195,14 @@ ss::future<> send_connect_and_read_response(
     auto in = fd.input();
     connect_response_parser parser;
     co_await in.consume(parser);
+
+    if (parser.limit_exceeded) {
+        // A misbehaving or malicious proxy can force unbounded allocation
+        // by streaming one arbitrarily-long line (no CRLF) or by sending
+        // many too-large headers. The parser caps both and we fail fast.
+        throw net::proxy_connect_error(
+          proxy, origin, "proxy response headers exceeded size limits");
+    }
 
     if (!parser.saw_terminator) {
         throw net::proxy_connect_error(
