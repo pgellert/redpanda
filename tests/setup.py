@@ -41,6 +41,7 @@ setup(
         "proto-plus==1.26.1",
         "rsa==4.9",
         "python-keycloak==5.8.1",
+        "mitmproxy==11.0.2",
         "z3-solver==4.12.6",
         "hypothesis==6.82",
         "jsonschema==4.10.0",
