@@ -502,6 +502,22 @@ struct service::impl {
         auto proxy_url_str = ss::sstring{_http_proxy()};
         auto is_https = url.scheme == "https";
 
+        // We only support proxied access via CONNECT tunneling, which in
+        // turn only works for TLS origins. Plaintext http:// origins would
+        // require absolute-form HTTP request rewriting (RFC 9112 §3.2.2),
+        // which is not implemented — and many corporate proxies reject
+        // CONNECT to non-443 ports anyway. Reject the combination with a
+        // clear error rather than letting it fail obscurely at the proxy.
+        if (!proxy_url_str.empty() && !is_https) {
+            co_await return_exception(
+              errc::metadata_invalid,
+              "oidc_http_proxy is set but the OIDC endpoint scheme is not "
+              "https. Plaintext OIDC origins through a forward proxy are "
+              "not supported; use an https:// discovery URL or clear "
+              "oidc_http_proxy. URL: {}",
+              url);
+        }
+
         if (!proxy_url_str.empty()) {
             vlog(
               seclog.debug,
