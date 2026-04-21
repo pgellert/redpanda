@@ -272,15 +272,14 @@ ss::future<reconnect_result_t> client::get_connected(
             vlog(ctxlog.trace, "connection refused {}", err);
         } catch (const ss::timed_out_error&) {
             vlog(ctxlog.trace, "connection timeout");
-        } catch (const net::proxy_connect_error& err) {
-            // Transient proxy hiccups (e.g. 5xx, EOF mid-headers) should
-            // be retried within the remaining budget. Permanent proxy
-            // errors (e.g. 407 auth required, malformed response) will
-            // simply re-fire on retry until `deadline` elapses and the
-            // caller sees a timed-out reconnect result; that is the same
-            // degradation mode as a permanently-refused direct connect.
-            vlog(ctxlog.trace, "{}", err.what());
         }
+        // Note: net::proxy_connect_error is deliberately NOT caught here.
+        // It carries actionable, proxy-specific context (e.g. "status
+        // HTTP/1.1 407 Proxy Authentication Required"), and swallowing
+        // it into a generic timed_out result would turn a fixable
+        // misconfiguration into an opaque outage. Transient proxy errors
+        // will still be retried at a higher level — OIDC has its own
+        // refresh-on-error timer — and permanent ones need to surface.
         // on the off chance that shutdown_now flag got set outside this loop,
         // we allow for one successful connect attempt. the alternative to this
         // heuristic would be to add reset interfaces and plumb that down
