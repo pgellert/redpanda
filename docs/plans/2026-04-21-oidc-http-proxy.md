@@ -169,15 +169,17 @@ Callers that do not set the proxy field are bit-identical to today."
 
 ## Task 4: Implement the CONNECT helper
 
-**Chosen stream-lifecycle approach (filled in after Task 1 probe):**
+**Chosen stream-lifecycle approach (from Task 1 probe):**
 
-<!-- TODO(executor): after Task 1, record the decision here, e.g.:
-     "Use connected_socket::output() + flush() + let go out of scope; Seastar 22.x
-     does not close the underlying sink on output_stream destruction."
-     OR
-     "Use data_sink via connected_socket::sink() directly; output_stream::close()
-     propagates to the socket."
--->
+Use `connected_socket::output()` + `write()` + `flush()` and let the stream go out of scope **without** calling `close()`. Same for `input()`.
+
+Verified against Seastar source:
+- `output_stream` destructor asserts only that `_end == 0 && _zc_len == 0` (iostream.hh:502). After a successful `flush()`, both are zero — destruction is safe.
+- `output_stream::close()` explicitly calls `_fd.close()` on the underlying `data_sink`, which closes the socket's output side (iostream-impl.hh:514). We deliberately avoid this.
+- `connected_socket` does not expose `sink()`/`source()` publicly — only `input()`/`output()` (net/api.hh:232-237). Stream API is the only path.
+- `input_stream` has no `read_until` method; use `read_exactly()` with a byte-by-byte scan, or `consume()` with a stateful consumer. We use a small read-a-byte-at-a-time loop for line reading since CONNECT responses are tiny.
+
+Nested TLS (`ss::tls::wrap_client` on an already-TLS-wrapped `connected_socket`) is supported by the API signature but unverified in the tree. The `https://` proxy path exercises it; if it misbehaves at runtime, the follow-up gtest will catch it.
 
 **Files:**
 - Modify: `src/v/net/transport.cc` (add helper in the anonymous namespace around lines 14–54)
