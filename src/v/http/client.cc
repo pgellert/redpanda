@@ -263,12 +263,23 @@ ss::future<reconnect_result_t> client::get_connected(
             // _dispatcher_gate is already closed. We need to synchronize
             // this loop with the `stop` call.
             ss::gate::holder gg(_connect_gate);
-            co_await connect(current + interval);
+            // Bound each attempt by the overall deadline so total connect
+            // time never exceeds the caller's timeout, even if a late
+            // failure leaves several hundred ms on the budget.
+            co_await connect(std::min(deadline, current + interval));
             break;
         } catch (const std::system_error& err) {
             vlog(ctxlog.trace, "connection refused {}", err);
         } catch (const ss::timed_out_error&) {
             vlog(ctxlog.trace, "connection timeout");
+        } catch (const net::proxy_connect_error& err) {
+            // Transient proxy hiccups (e.g. 5xx, EOF mid-headers) should
+            // be retried within the remaining budget. Permanent proxy
+            // errors (e.g. 407 auth required, malformed response) will
+            // simply re-fire on retry until `deadline` elapses and the
+            // caller sees a timed-out reconnect result; that is the same
+            // degradation mode as a permanently-refused direct connect.
+            vlog(ctxlog.trace, "{}", err.what());
         }
         // on the off chance that shutdown_now flag got set outside this loop,
         // we allow for one successful connect attempt. the alternative to this
