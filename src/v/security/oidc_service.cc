@@ -53,13 +53,59 @@ template<typename... Args>
       exception(ec, fmt::format(fmt, std::forward<Args>(args)...)));
 }
 
+/// Returns true if the URL's authority component contains userinfo (i.e.
+/// a 'user:pass@' prefix before the host). Used to reject credential-bearing
+/// proxy URLs: proxy authentication is not supported in v1, and silently
+/// accepting userinfo would cause authenticated proxies to fail opaquely
+/// at runtime while leaking credentials into broker logs.
+bool url_contains_userinfo(std::string_view url_str) {
+    auto sep = url_str.find("://");
+    if (sep == std::string_view::npos) {
+        return false;
+    }
+    auto authority_start = sep + 3;
+    auto authority_end = url_str.find_first_of("/?#", authority_start);
+    if (authority_end == std::string_view::npos) {
+        authority_end = url_str.size();
+    }
+    return url_str.substr(authority_start, authority_end - authority_start)
+             .find('@')
+           != std::string_view::npos;
+}
+
+/// Returns a safely-loggable form of a proxy URL. If the URL contains
+/// userinfo, replaces the entire authority with a placeholder so
+/// credentials cannot land in logs (e.g. via config-change or error paths
+/// that fire before strict validation rejects the value).
+ss::sstring redact_proxy_url(std::string_view url_str) {
+    if (!url_contains_userinfo(url_str)) {
+        return ss::sstring{url_str};
+    }
+    auto sep = url_str.find("://");
+    auto authority_start = sep + 3;
+    auto authority_end = url_str.find_first_of("/?#", authority_start);
+    if (authority_end == std::string_view::npos) {
+        authority_end = url_str.size();
+    }
+    return ssx::sformat(
+      "{}://<redacted>{}",
+      url_str.substr(0, sep),
+      url_str.substr(authority_end));
+}
+
 /// Parses a proxy URL into a net::base_transport::configuration::proxy_config.
 /// Accepts http:// and https:// schemes; any other scheme returns an error.
+/// Rejects URLs that embed userinfo (user:pass@) because proxy auth is not
+/// yet supported — silently dropping the credentials would make auth-
+/// requiring proxies fail opaquely.
 /// For https:// schemes, the caller must supply TLS credentials for the
 /// proxy (typically system trust).
 result<net::base_transport::configuration::proxy_config> parse_proxy_url(
   std::string_view url_str,
   ss::shared_ptr<ss::tls::certificate_credentials> system_creds) {
+    if (url_contains_userinfo(url_str)) {
+        return errc::metadata_invalid;
+    }
     auto parsed = parse_url(url_str);
     if (parsed.has_error()) {
         return errc::metadata_invalid;
@@ -217,11 +263,14 @@ struct service::impl {
                 vlog(
                   seclog.info, "OIDC: HTTP proxy cleared; direct connections");
             } else {
+                // Redact any embedded userinfo so a misconfigured proxy
+                // URL (rejected at request time) cannot leak credentials
+                // into broker logs during config propagation.
                 vlog(
                   seclog.info,
                   "OIDC: HTTP proxy set to {}; discovery and JWKS will route "
                   "through it",
-                  _http_proxy());
+                  redact_proxy_url(_http_proxy()));
             }
             ssx::spawn_with_gate(_gate, [this] { return update(); });
         });
@@ -458,7 +507,7 @@ struct service::impl {
               seclog.debug,
               "OIDC: routing request to {} via HTTP proxy {}",
               url,
-              proxy_url_str);
+              redact_proxy_url(proxy_url_str));
         }
 
         std::optional<ss::sstring> tls_host;
@@ -479,7 +528,7 @@ struct service::impl {
                 co_await return_exception(
                   errc::metadata_invalid,
                   "invalid oidc_http_proxy: {}",
-                  proxy_url_str);
+                  redact_proxy_url(proxy_url_str));
             }
             const bool proxy_is_https = proxy_scheme_res.assume_value().scheme
                                         == "https";
@@ -493,7 +542,7 @@ struct service::impl {
                 co_await return_exception(
                   parsed.assume_error(),
                   "invalid oidc_http_proxy: {}",
-                  proxy_url_str);
+                  redact_proxy_url(proxy_url_str));
             }
             proxy_cfg.emplace(std::move(parsed).assume_value());
         }
