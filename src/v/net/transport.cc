@@ -152,26 +152,38 @@ ss::future<> send_connect_and_read_response(
           fmt::format("non-numeric status code in: {}", status_line));
     }
     if (status_code != 200) {
-        // On non-200, capture up to a bounded amount of the proxy's response
-        // (remaining headers + any body bytes it sent) for diagnostic context.
-        // Bounded to 512 bytes so a misbehaving proxy cannot cause unbounded
-        // reads here; this is a best-effort diagnostic aid.
+        // On non-200, drain the response headers line-by-line (same framing
+        // as the success path) and accumulate them as diagnostic context.
+        // We deliberately do NOT attempt to read any response body: a 4xx
+        // proxy response typically has no body (and never has one for
+        // CONNECT per RFC 9110 §9.3.6), and using read_up_to() here would
+        // block until more bytes arrive or the caller's timeout fires —
+        // turning a clean "407 Proxy Authentication Required" into an
+        // opaque timeout. read_line terminates on blank-line OR EOF, so
+        // this loop always exits promptly.
         constexpr size_t max_context_bytes = 512;
         ss::sstring context;
         while (context.size() < max_context_bytes) {
-            auto chunk = co_await in.read_up_to(
-              max_context_bytes - context.size());
-            if (chunk.empty()) {
-                break;
+            auto line_opt = co_await read_line();
+            if (!line_opt.has_value() || line_opt->empty()) {
+                break; // EOF or end of headers
             }
-            context.append(chunk.get(), chunk.size());
+            if (!context.empty()) {
+                context.append("; ", 2);
+            }
+            auto remaining = max_context_bytes - context.size();
+            auto line_view = std::string_view(*line_opt);
+            if (line_view.size() > remaining) {
+                line_view = line_view.substr(0, remaining);
+            }
+            context.append(line_view.data(), line_view.size());
         }
         throw net::proxy_connect_error(
           proxy,
           origin,
           context.empty()
             ? fmt::format("status {}", status_line)
-            : fmt::format("status {}; context: {}", status_line, context));
+            : fmt::format("status {}; headers: {}", status_line, context));
     }
 
     // Discard remaining response headers until the terminating blank line.
