@@ -8,6 +8,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/with_timeout.hh>
+#include <seastar/util/later.hh>
 
 #include <charconv>
 #include <string_view>
@@ -74,25 +75,40 @@ ss::future<> send_connect_and_read_response(
     vlog(
       log->trace, "Sending CONNECT to proxy {} for origin {}", proxy, origin);
 
-    // Use high-level streams for readability, flush before letting them go
-    // out of scope. Do NOT call close() on these streams — that would close
-    // the underlying socket's read/write sides, which we want to keep open
-    // for the subsequent TLS-to-origin handshake.
+    // Use the high-level stream API for the CONNECT handshake. Note that
+    // connected_socket::output() enables batch_flushes: in that mode flush()
+    // returns a ready future immediately and the actual send is deferred to
+    // the reactor's flush poller, leaving _in_batch non-empty. The
+    // output_stream destructor asserts !_in_batch, and calling close() would
+    // shut down the socket's write side (SHUT_WR), which we cannot do — the
+    // subsequent TLS-to-origin handshake still needs to write. We therefore
+    // flush, then co_await ss::yield() so the flush poller gets a tick to
+    // drain the batch before the stream falls out of scope. The subsequent
+    // read on `in` almost always also suspends (waiting for the proxy's
+    // response), which gives the poller additional opportunities to run.
     auto out = fd.output();
     co_await out.write(request);
     co_await out.flush();
+    co_await ss::yield();
 
     auto in = fd.input();
 
     // Read the response line-by-line. Seastar's input_stream has no
     // read_until() — we scan one byte at a time, which is cheap because
     // the CONNECT response is tiny (a status line plus a few headers).
-    auto read_line = [&in]() -> ss::future<ss::sstring> {
+    // Returns nullopt on EOF so callers can distinguish "blank terminator"
+    // from "proxy hung up mid-headers".
+    auto read_line = [&in]() -> ss::future<std::optional<ss::sstring>> {
         ss::sstring line;
         while (true) {
             auto buf = co_await in.read_exactly(1);
             if (buf.empty()) {
-                co_return line; // EOF
+                // EOF: if we have already accumulated bytes, treat as
+                // malformed/truncated line; if not, signal EOF cleanly.
+                if (line.empty()) {
+                    co_return std::nullopt;
+                }
+                co_return line;
             }
             line.append(buf.get(), 1);
             if (
@@ -104,11 +120,12 @@ ss::future<> send_connect_and_read_response(
         }
     };
 
-    auto status_line = co_await read_line();
-    if (status_line.empty()) {
+    auto status_line_opt = co_await read_line();
+    if (!status_line_opt.has_value() || status_line_opt->empty()) {
         throw net::proxy_connect_error(
           proxy, origin, "proxy closed connection before sending status line");
     }
+    auto status_line = std::move(*status_line_opt);
 
     // Parse "HTTP/1.x NNN <reason>". Accept only status 200 (matches Go's
     // strict behaviour; real proxies universally return 200).
@@ -135,14 +152,40 @@ ss::future<> send_connect_and_read_response(
           fmt::format("non-numeric status code in: {}", status_line));
     }
     if (status_code != 200) {
+        // On non-200, capture up to a bounded amount of the proxy's response
+        // (remaining headers + any body bytes it sent) for diagnostic context.
+        // Bounded to 512 bytes so a misbehaving proxy cannot cause unbounded
+        // reads here; this is a best-effort diagnostic aid.
+        constexpr size_t max_context_bytes = 512;
+        ss::sstring context;
+        while (context.size() < max_context_bytes) {
+            auto chunk = co_await in.read_up_to(
+              max_context_bytes - context.size());
+            if (chunk.empty()) {
+                break;
+            }
+            context.append(chunk.get(), chunk.size());
+        }
         throw net::proxy_connect_error(
-          proxy, origin, fmt::format("status {}", status_line));
+          proxy,
+          origin,
+          context.empty()
+            ? fmt::format("status {}", status_line)
+            : fmt::format("status {}; context: {}", status_line, context));
     }
 
     // Discard remaining response headers until the terminating blank line.
+    // An EOF here means the proxy closed the connection before the empty
+    // terminator — surface that as an explicit error rather than silently
+    // declaring success and letting the downstream TLS handshake fail with
+    // an opaque error.
     while (true) {
-        auto line = co_await read_line();
-        if (line.empty()) {
+        auto line_opt = co_await read_line();
+        if (!line_opt.has_value()) {
+            throw net::proxy_connect_error(
+              proxy, origin, "proxy closed connection mid-headers");
+        }
+        if (line_opt->empty()) {
             break;
         }
     }

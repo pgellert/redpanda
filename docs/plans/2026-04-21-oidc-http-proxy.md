@@ -169,17 +169,17 @@ Callers that do not set the proxy field are bit-identical to today."
 
 ## Task 4: Implement the CONNECT helper
 
-**Chosen stream-lifecycle approach (from Task 1 probe):**
+**Chosen stream-lifecycle approach (corrected after initial code review):**
 
-Use `connected_socket::output()` + `write()` + `flush()` and let the stream go out of scope **without** calling `close()`. Same for `input()`.
+Use `connected_socket::output()` + `write()` + `flush()` + `co_await ss::yield()` and let the stream go out of scope **without** calling `close()`. Same for `input()`.
 
-Verified against Seastar source:
-- `output_stream` destructor asserts only that `_end == 0 && _zc_len == 0` (iostream.hh:502). After a successful `flush()`, both are zero — destruction is safe.
-- `output_stream::close()` explicitly calls `_fd.close()` on the underlying `data_sink`, which closes the socket's output side (iostream-impl.hh:514). We deliberately avoid this.
-- `connected_socket` does not expose `sink()`/`source()` publicly — only `input()`/`output()` (net/api.hh:232-237). Stream API is the only path.
-- `input_stream` has no `read_until` method; use `read_exactly()` with a byte-by-byte scan, or `consume()` with a stateful consumer. We use a small read-a-byte-at-a-time loop for line reading since CONNECT responses are tiny.
-
-Nested TLS (`ss::tls::wrap_client` on an already-TLS-wrapped `connected_socket`) is supported by the API signature but unverified in the tree. The `https://` proxy path exercises it; if it misbehaves at runtime, the follow-up gtest will catch it.
+Verified against Seastar source, and corrected from an earlier incomplete analysis:
+- `connected_socket::output()` hard-codes `output_stream_options{.batch_flushes = true}` (seastar src/net/stack.cc:123-127). In that mode, the `output_stream` destructor asserts `!_in_batch` (iostream.hh `~output_stream()`, batched branch), NOT `_end == 0 && _zc_len == 0` as first believed.
+- In batched mode, `flush()` returns a ready future immediately and sets `_in_batch = promise<>()`; the real send happens when the flush poller ticks (iostream-impl.hh `flush()`). So a naive `flush(); destroy;` pattern can leave `_in_batch` non-empty and trip the assertion.
+- `output_stream::close()` is not usable as a drain mechanism either: it calls `data_sink::close()`, which for socket sinks calls `_fd.shutdown(SHUT_WR)` (seastar src/net/posix-stack.cc:903-906), closing the write side of the underlying socket. That would break the subsequent TLS-to-origin handshake.
+- Seastar does not expose a public way to get a non-batched `output_stream` on a `connected_socket` (the `data_sink` is internal). So the chosen mitigation is `co_await seastar::yield()` immediately after `flush()`, which yields to the reactor and lets the flush poller tick at least once before the stream destructs. Subsequent `read_exactly(1)` calls normally also suspend, providing additional opportunities for the poller to drain `_in_batch`. This is best-effort and acknowledged; a followup could add a gtest that explicitly races a pre-buffered CONNECT response to stress the window.
+- `input_stream` has no `read_until` method; use `read_exactly(1)` in a loop. Our line-reader returns `std::optional<ss::sstring>` so EOF-mid-headers can be distinguished from the empty-line terminator and reported as a distinct error.
+- Nested TLS (`ss::tls::wrap_client` on an already-TLS-wrapped `connected_socket`) is supported by the API signature but unverified in the tree. The `https://` proxy path exercises it; if it misbehaves at runtime, a follow-up gtest will surface it.
 
 **Files:**
 - Modify: `src/v/net/transport.cc` (add helper in the anonymous namespace around lines 14–54)
