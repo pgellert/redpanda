@@ -24,8 +24,12 @@
 #include <seastar/net/tls.hh>
 #include <seastar/util/log.hh>
 
+#include <fmt/format.h>
+
 #include <memory>
 #include <optional>
+#include <stdexcept>
+#include <string_view>
 
 namespace net {
 
@@ -44,6 +48,23 @@ namespace net {
  * net::client_probe and add its own probes. A pointer to the superclass should
  * be passed into base_transport::set_probe.
  */
+
+/// Thrown when a forward-proxy CONNECT handshake fails, so error messages
+/// can name the proxy and the origin instead of producing a generic timeout.
+class proxy_connect_error : public std::runtime_error {
+public:
+    proxy_connect_error(
+      const unresolved_address& proxy,
+      const unresolved_address& origin,
+      std::string_view detail)
+      : std::runtime_error(
+          fmt::format(
+            "proxy {} failed to CONNECT to origin {}: {}",
+            proxy,
+            origin,
+            detail)) {}
+};
+
 class base_transport {
 public:
     struct configuration {
@@ -56,6 +77,18 @@ public:
         std::optional<ss::sstring> tls_sni_hostname;
         /// Potentially skip wait for EOF after BYE message on TLS session end
         bool wait_for_tls_server_eof = true;
+
+        /// When set, the transport will route the connection through an HTTP
+        /// forward proxy. The proxy must accept CONNECT requests addressed to
+        /// server_addr. If credentials is non-null, the connection to the
+        /// proxy itself is TLS-wrapped before the CONNECT request is sent
+        /// (i.e. an https:// proxy URL).
+        struct proxy_config {
+            unresolved_address address;
+            ss::shared_ptr<ss::tls::certificate_credentials> credentials;
+            std::optional<ss::sstring> tls_sni_hostname;
+        };
+        std::optional<proxy_config> proxy;
     };
 
     base_transport(configuration c, seastar::logger* log);
@@ -139,6 +172,7 @@ private:
     // Track if shutdown was called on the current `_fd`
     bool _shutdown{false};
     std::optional<client_probe*> _probe;
+    std::optional<configuration::proxy_config> _proxy;
 };
 
 } // namespace net

@@ -60,7 +60,8 @@ base_transport::base_transport(configuration c, seastar::logger* log)
   , _creds(c.credentials)
   , _tls_sni_hostname(c.tls_sni_hostname)
   , _wait_for_tls_server_eof(c.wait_for_tls_server_eof)
-  , _log(log) {}
+  , _log(log)
+  , _proxy(std::move(c.proxy)) {}
 
 ss::future<> base_transport::do_connect(clock_type::time_point timeout) {
     // hold invariant of having an always valid dispatch gate
