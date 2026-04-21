@@ -205,12 +205,14 @@ ss::future<> send_connect_and_read_response(
     }
 
     if (!parser.saw_terminator) {
+        // Transient: proxy closed mid-handshake.
         throw net::proxy_connect_error(
           proxy,
           origin,
           parser.status_line.empty()
             ? "proxy closed connection before sending status line"
-            : "proxy closed connection mid-headers");
+            : "proxy closed connection mid-headers",
+          /*retriable=*/true);
     }
 
     if (parser.had_post_terminator_bytes) {
@@ -253,6 +255,12 @@ ss::future<> send_connect_and_read_response(
           fmt::format("non-numeric status code in: {}", parser.status_line));
     }
     if (status_code != 200) {
+        // 5xx: treat as transient — proxy or upstream is briefly unwell,
+        // retries within the caller's budget may succeed.
+        // 4xx (incl. 407 auth required, 403 forbidden): permanent; an
+        // operator must change configuration to recover. Immediate
+        // surfacing with actionable context is the correct response.
+        const bool retriable = status_code >= 500 && status_code < 600;
         throw net::proxy_connect_error(
           proxy,
           origin,
@@ -261,7 +269,8 @@ ss::future<> send_connect_and_read_response(
             : fmt::format(
                 "status {}; headers: {}",
                 parser.status_line,
-                parser.headers_context));
+                parser.headers_context),
+          retriable);
     }
 
     vlog(log->trace, "CONNECT to {} via proxy {} succeeded", origin, proxy);

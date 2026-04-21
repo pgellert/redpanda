@@ -51,18 +51,30 @@ namespace net {
 
 /// Thrown when a forward-proxy CONNECT handshake fails, so error messages
 /// can name the proxy and the origin instead of producing a generic timeout.
+///
+/// `retriable` distinguishes transient failures (proxy 5xx, EOF mid-
+/// handshake, malformed truncation) from permanent ones (4xx auth/ACL
+/// denials, deterministically malformed responses, or policy-level
+/// rejections like non-200 statuses). Callers running reconnect loops
+/// should retry only on retriable errors so that real proxy
+/// misconfigurations surface immediately instead of being swallowed by a
+/// retry budget.
 class proxy_connect_error : public std::runtime_error {
 public:
     proxy_connect_error(
       const unresolved_address& proxy,
       const unresolved_address& origin,
-      std::string_view detail)
+      std::string_view detail,
+      bool retriable = false)
       : std::runtime_error(
           fmt::format(
             "proxy {} failed to CONNECT to origin {}: {}",
             proxy,
             origin,
-            detail)) {}
+            detail))
+      , retriable(retriable) {}
+
+    bool retriable;
 };
 
 class base_transport {
