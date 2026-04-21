@@ -136,6 +136,13 @@ public:
 
     bool has_tls() const { return static_cast<bool>(_creds); }
 
+    /// True when the transport will route connections via a forward proxy.
+    /// Callers running connect-retry loops should typically treat a single
+    /// proxied attempt as multi-stage (TCP + optional proxy TLS + CONNECT
+    /// + optional origin TLS) and budget a correspondingly larger
+    /// per-attempt timeout.
+    bool has_proxy() const { return _proxy.has_value(); }
+
 protected:
     virtual void fail_outstanding_futures() {}
 

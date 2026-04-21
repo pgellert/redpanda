@@ -239,7 +239,14 @@ ss::future<reconnect_result_t> client::get_connected(
       _dispatch_gate.is_closed());
     auto current = ss::lowres_clock::now();
     const auto deadline = current + timeout;
-    const auto interval = 1s; // 500ms;
+    // When a forward proxy is configured, a single connect attempt is
+    // multi-stage (TCP + optional proxy-TLS + CONNECT + optional origin-
+    // TLS) and can legitimately exceed the per-attempt retry granularity.
+    // Give proxied connects the full remaining budget so a healthy-but-
+    // moderately-latent proxy path succeeds on the first attempt instead
+    // of running out of budget after 1s and retrying against itself.
+    const auto interval = has_proxy() ? timeout
+                                      : ss::lowres_clock::duration{1s};
     while (!_connect_gate.is_closed() && current < deadline) {
         if (_as != nullptr) {
             _as->check();
