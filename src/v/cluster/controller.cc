@@ -221,7 +221,9 @@ ss::future<> controller::wire_up() {
             }),
             ss::sharded_parameter([] {
                 return config::shard_local_cfg().nested_group_behavior.bind();
-            }));
+            }),
+            ss::sharded_parameter(
+              [] { return config::shard_local_cfg().oidc_http_proxy.bind(); }));
       })
       .then([this] {
           return _tp_state.start(

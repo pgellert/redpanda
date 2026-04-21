@@ -18,6 +18,7 @@
 #include "metrics/metrics.h"
 #include "metrics/prometheus_sanitize.h"
 #include "net/tls_certificate_probe.h"
+#include "net/transport.h"
 #include "security/exceptions.h"
 #include "security/jwt.h"
 #include "security/logger.h"
@@ -50,6 +51,34 @@ template<typename... Args>
   Args&&... args) noexcept {
     return ss::coroutine::return_exception(
       exception(ec, fmt::format(fmt, std::forward<Args>(args)...)));
+}
+
+/// Parses a proxy URL into a net::base_transport::configuration::proxy_config.
+/// Accepts http:// and https:// schemes; any other scheme returns an error.
+/// For https:// schemes, the caller must supply TLS credentials for the
+/// proxy (typically system trust).
+result<net::base_transport::configuration::proxy_config> parse_proxy_url(
+  std::string_view url_str,
+  ss::shared_ptr<ss::tls::certificate_credentials> system_creds) {
+    auto parsed = parse_url(url_str);
+    if (parsed.has_error()) {
+        return errc::metadata_invalid;
+    }
+    auto url = std::move(parsed).assume_value();
+
+    net::base_transport::configuration::proxy_config cfg;
+    cfg.address = net::unresolved_address{url.host, url.port};
+
+    if (url.scheme == "http") {
+        cfg.credentials = nullptr;
+    } else if (url.scheme == "https") {
+        cfg.credentials = system_creds;
+        cfg.tls_sni_hostname.emplace(url.host);
+    } else {
+        return errc::metadata_invalid;
+    }
+
+    return cfg;
 }
 
 using seastar::operator co_await;
@@ -153,7 +182,8 @@ struct service::impl {
       config::binding<ss::sstring> mapping,
       config::binding<std::chrono::seconds> jwks_refresh_interval,
       config::binding<ss::sstring> group_claim_path,
-      config::binding<nested_group_behavior> nested_group_behavior)
+      config::binding<nested_group_behavior> nested_group_behavior,
+      config::binding<ss::sstring> http_proxy)
       : _verifier{}
       , _sasl_mechanisms{std::move(sasl_mechanisms)}
       , _sasl_mechanisms_overrides{std::move(sasl_mechanisms_overrides)}
@@ -166,6 +196,7 @@ struct service::impl {
       , _jwks_refresh_interval{std::move(jwks_refresh_interval)}
       , _group_claim_path(std::move(group_claim_path))
       , _nested_group_behavior(std::move(nested_group_behavior))
+      , _http_proxy(std::move(http_proxy))
       , _jwks_refresh{[this]() {
           ssx::spawn_with_gate(_gate, [this] { return update(); });
       }} {
@@ -179,6 +210,9 @@ struct service::impl {
             ssx::spawn_with_gate(_gate, [this] { return update(); });
         });
         _discovery_url.watch([this]() {
+            ssx::spawn_with_gate(_gate, [this] { return update(); });
+        });
+        _http_proxy.watch([this]() {
             ssx::spawn_with_gate(_gate, [this] { return update(); });
         });
         _mapping.watch([this]() { update_rule(); });
@@ -371,6 +405,13 @@ struct service::impl {
     }
 
     ss::future<ss::sstring> make_request(parsed_url url) {
+        if (!_http_proxy().empty()) {
+            vlog(
+              seclog.info,
+              "OIDC: routing request to {} via HTTP proxy {}",
+              url,
+              _http_proxy());
+        }
         auto is_https = url.scheme == "https";
         std::optional<ss::sstring> tls_host;
         if (is_https) {
@@ -401,11 +442,44 @@ struct service::impl {
                   });
             }
         }
+
+        std::optional<net::base_transport::configuration::proxy_config>
+          proxy_cfg;
+        if (const auto& proxy_url_str = _http_proxy(); !proxy_url_str.empty()) {
+            // TLS-capable system-trust credentials for https:// proxies. We
+            // reuse _creds if already built (origin is https, which is always
+            // true for OIDC discovery); otherwise build a minimal system-trust
+            // credential set.
+            if (!_creds) {
+                ss::tls::credentials_builder builder;
+                builder.set_client_auth(ss::tls::client_auth::NONE);
+                const auto& cfg = config::shard_local_cfg();
+                builder.set_minimum_tls_version(
+                  config::from_config(cfg.tls_min_version()));
+                builder.set_cipher_string(cfg.tls_v1_2_cipher_suites);
+                builder.set_ciphersuites(cfg.tls_v1_3_cipher_suites);
+                co_await builder.set_system_trust();
+                _creds = co_await net::build_reloadable_credentials_with_probe<
+                  ss::tls::certificate_credentials>(
+                  std::move(builder), "oidc_provider", "httpclient");
+            }
+
+            auto parsed = parse_proxy_url(proxy_url_str, _creds);
+            if (parsed.has_error()) {
+                co_await return_exception(
+                  parsed.assume_error(),
+                  "invalid oidc_http_proxy: {}",
+                  proxy_url_str);
+            }
+            proxy_cfg.emplace(std::move(parsed).assume_value());
+        }
+
         http::client client{net::base_transport::configuration{
           .server_addr = {url.host, url.port},
           .credentials = is_https ? _creds : nullptr,
           .tls_sni_hostname = tls_host,
           .wait_for_tls_server_eof = false,
+          .proxy = std::move(proxy_cfg),
         }};
 
         http::client::request_header req_hdr;
@@ -447,6 +521,7 @@ struct service::impl {
     config::binding<std::chrono::seconds> _jwks_refresh_interval;
     config::binding<ss::sstring> _group_claim_path;
     config::binding<nested_group_behavior> _nested_group_behavior;
+    config::binding<ss::sstring> _http_proxy;
     group_claim_policy _group_claim_policy;
     std::optional<parsed_url> _parsed_discovery_url;
     std::optional<parsed_url> _parsed_jwks_url;
@@ -467,7 +542,8 @@ service::service(
   config::binding<ss::sstring> mapping,
   config::binding<std::chrono::seconds> keys_refresh_interval,
   config::binding<ss::sstring> group_claim_path,
-  config::binding<nested_group_behavior> nested_group_behavior)
+  config::binding<nested_group_behavior> nested_group_behavior,
+  config::binding<ss::sstring> http_proxy)
   : _impl{std::make_unique<impl>(
       std::move(sasl_mechanisms),
       std::move(sasl_mechanisms_overrides),
@@ -478,7 +554,8 @@ service::service(
       std::move(mapping),
       std::move(keys_refresh_interval),
       std::move(group_claim_path),
-      std::move(nested_group_behavior))} {}
+      std::move(nested_group_behavior),
+      std::move(http_proxy))} {}
 
 service::~service() noexcept = default;
 

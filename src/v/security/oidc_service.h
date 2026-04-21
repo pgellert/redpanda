@@ -35,7 +35,8 @@ public:
       config::binding<ss::sstring> mapping,
       config::binding<std::chrono::seconds> jwks_refresh_interval,
       config::binding<ss::sstring> group_claim_path,
-      config::binding<nested_group_behavior> nested_group_behavior);
+      config::binding<nested_group_behavior> nested_group_behavior,
+      config::binding<ss::sstring> http_proxy);
     service(service&&) = delete;
     service& operator=(service&&) = delete;
     service(const service&) = delete;
