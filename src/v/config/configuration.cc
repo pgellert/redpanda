@@ -3922,7 +3922,47 @@ configuration::configuration()
       "fetches. Accepts http://host:port or https://host:port. Leave "
       "empty to connect directly.",
       {.needs_restart = needs_restart::no, .visibility = visibility::user},
-      "")
+      "",
+      [](const auto& v) -> std::optional<ss::sstring> {
+          if (v.empty()) {
+              return std::nullopt;
+          }
+          // Reject embedded userinfo (user:pass@) at commit time: the
+          // runtime path also rejects it, but without this validator the
+          // raw string would replicate across the cluster config before
+          // being discarded at request time — credentials must not be
+          // persisted. Inline parser to avoid adding a new security->config
+          // dependency just for this check.
+          {
+              std::string_view sv{v};
+              auto sep = sv.find("://");
+              if (sep != std::string_view::npos) {
+                  auto auth_start = sep + 3;
+                  auto auth_end = sv.find_first_of("/?#", auth_start);
+                  if (auth_end == std::string_view::npos) {
+                      auth_end = sv.size();
+                  }
+                  if (
+                    sv.substr(auth_start, auth_end - auth_start).find('@')
+                    != std::string_view::npos) {
+                      return "oidc_http_proxy must not contain embedded "
+                             "user:pass credentials (proxy auth not "
+                             "supported)";
+                  }
+              }
+          }
+          auto res = security::oidc::parse_url(v);
+          if (res.has_error()) {
+              return res.error().message();
+          }
+          const auto& url = res.assume_value();
+          if (url.scheme != "http" && url.scheme != "https") {
+              return ssx::sformat(
+                "oidc_http_proxy scheme must be http or https, got: {}",
+                url.scheme);
+          }
+          return std::nullopt;
+      })
   , oidc_token_audience(
       *this,
       "oidc_token_audience",
