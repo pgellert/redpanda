@@ -139,9 +139,11 @@ Each is reviewable in isolation. The first is the most scrutinized (transport-la
 
 ## Follow-ups
 
+- **Cross-field commit-time validator for `oidc_http_proxy` vs `oidc_discovery_url` scheme compatibility.** v1 rejects the `oidc_http_proxy` set + `oidc_discovery_url` http:// combination at request time (in `make_request`), which means the config commits cluster-wide and first surfaces as repeated error logs on the next OIDC refresh. A commit-time cross-field validator would reject the bad combination at `rpk cluster config set` time before replication. Adding this requires plumbing into `configuration` that lets a single-field validator read sibling property values, or a post-commit invariants pass. Flagged by adversarial review rounds 6–7.
 - Env-var fallback (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`).
 - `Proxy-Authorization` Basic-auth support.
-- Opt-in of other callers: metrics reporter, Iceberg REST catalog, AWS STS refresh, Azure AKS federated credentials, cloud storage (S3/ABS).
-- gtest unit coverage for CONNECT framing and nested TLS.
-- Docs: "OIDC behind a corporate proxy" operator guide including guidance on `NO_PROXY` for rpk and in-cluster admin-API hostnames (customer-reported issue outside this ticket's scope).
+- Absolute-form (RFC 9112 §3.2.2) HTTP request rewriting so plaintext OIDC origins can also be proxied (v1 requires https:// origin + proxy).
+- Opt-in of other callers: metrics reporter, Iceberg REST catalog, AWS STS refresh, Azure AKS federated credentials, cloud storage (S3/ABS). Each is a one-line wiring change on the caller side; `net::base_transport::configuration::proxy` is already the opt-in surface.
+- gtest unit coverage for CONNECT framing, nested TLS, oversized-header rejection, classified retry behaviour, and preservation-of-last-proxy-error-on-deadline.
+- Docs: "OIDC behind a corporate proxy" operator guide, including guidance on `NO_PROXY` for rpk and in-cluster admin-API hostnames (customer-reported issue outside this ticket's scope).
 - Observability fix (separate ticket): distinguish "JWKS unavailable" from "signature invalid" from "audience mismatch" in the OAUTHBEARER SASL error path.
