@@ -11,7 +11,7 @@ from ducktape.utils.util import wait_until
 
 from rptest.clients.python_librdkafka import PythonLibrdkafka
 from rptest.services.cluster import cluster
-from rptest.services.keycloak import KC_PORT
+from rptest.services.keycloak import KC_HTTPS_PORT
 from rptest.services.mitmproxy import MitmproxyService
 from rptest.tests.redpanda_oauth_test import (
     CLIENT_ID,
@@ -32,7 +32,12 @@ class OIDCViaProxyTest(RedpandaOIDCTestBase):
     """
 
     def __init__(self, test_context, **kwargs):
-        super().__init__(test_context, use_ssl=False, **kwargs)
+        # use_ssl=True so Keycloak's discovery URL is https://. The broker
+        # refuses to proxy plaintext OIDC origins (plaintext origin via
+        # CONNECT tunnel is unsupported, see oidc_service.cc), so the test
+        # must exercise the supported HTTPS-origin path that matches the
+        # real customer scenario (Azure AD, Okta, etc).
+        super().__init__(test_context, use_ssl=True, **kwargs)
         self.mitmproxy = MitmproxyService(test_context)
 
     def setUp(self):
@@ -72,14 +77,14 @@ class OIDCViaProxyTest(RedpandaOIDCTestBase):
         # discovery URL.
         return (
             f"iptables {action} OUTPUT -p tcp "
-            f"-d {self._keycloak_host} --dport {KC_PORT} -j DROP"
+            f"-d {self._keycloak_host} --dport {KC_HTTPS_PORT} -j DROP"
         )
 
     def _block_direct_keycloak_egress(self):
         cmd = self._iptables_rule("-A")
         for node in self.redpanda.nodes:
             self.logger.info(
-                f"Blocking direct egress to {self._keycloak_host}:{KC_PORT} on "
+                f"Blocking direct egress to {self._keycloak_host}:{KC_HTTPS_PORT} on "
                 f"{node.account.hostname}"
             )
             node.account.ssh(cmd)
