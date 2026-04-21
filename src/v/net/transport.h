@@ -85,7 +85,14 @@ public:
         /// (i.e. an https:// proxy URL).
         struct proxy_config {
             unresolved_address address;
+            /// If null, the proxy connection is plaintext (http:// proxy).
+            /// If non-null, the socket is TLS-wrapped with these credentials
+            /// before the CONNECT request is sent (https:// proxy). Distinct
+            /// from configuration::credentials, which applies to the origin
+            /// TLS handshake performed inside the CONNECT tunnel.
             ss::shared_ptr<ss::tls::certificate_credentials> credentials;
+            /// SNI used for the TLS handshake to the proxy. Ignored unless
+            /// credentials is non-null.
             std::optional<ss::sstring> tls_sni_hostname;
         };
         std::optional<proxy_config> proxy;
