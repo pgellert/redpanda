@@ -3915,6 +3915,14 @@ configuration::configuration()
           }
           return std::nullopt;
       })
+  , oidc_http_proxy(
+      *this,
+      "oidc_http_proxy",
+      "URL of the HTTP forward proxy used for OIDC discovery and JWKS "
+      "fetches. Accepts http://host:port or https://host:port. Leave "
+      "empty to connect directly.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      "")
   , oidc_token_audience(
       *this,
       "oidc_token_audience",
