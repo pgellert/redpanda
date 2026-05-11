@@ -21,7 +21,8 @@ def redpanda_cc_library(
         visibility = None,
         copts = [],
         deps = [],
-        tags = []):
+        tags = [],
+        features = []):
     """
     Define a Redpanda C++ library.
     """
@@ -41,7 +42,7 @@ def redpanda_cc_library(
         tags = tags,
         features = [
             "layering_check",
-        ],
+        ] + features,
     )
 
 # buildifier: disable=function-docstring-args

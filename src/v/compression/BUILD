@@ -25,6 +25,14 @@ redpanda_cc_library(
         "snappy_standard_compressor.h",
         "stream_zstd.h",
     ],
+    # The BCR `zlib` module (1.3.1.bcr.8) declares `zlib.h` twice in its
+    # modulemap: once as a public `textual header` and once as `private
+    # textual header`. Under layering_check, clang resolves `<zlib.h>` via
+    # the source include path first, hitting the private declaration and
+    # erroring with `-Wprivate-header` (which `-Werror` upgrades to a hard
+    # failure). Opt out of layering_check for this one target until the
+    # BCR module is fixed upstream.
+    features = ["-layering_check"],
     local_defines = ["ZSTD_STATIC_LINKING_ONLY"],
     visibility = ["//visibility:public"],
     deps = [
