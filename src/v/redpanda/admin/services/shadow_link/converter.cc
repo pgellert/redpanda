@@ -1007,6 +1007,14 @@ schema_registry_sync_options create_schema_registry_sync_options(
               shadow_entire_schema_registry&) {
               options.set_shadow_schema_registry_topic(
                 schema_registry_sync_options_shadow_schema_registry_topic{});
+          },
+          [](
+            const cluster_link::model::schema_registry_sync_config::
+              shadow_via_http_api&) {
+              // POC: the HTTP-API variant is not yet surfaced via the
+              // admin API. Configuration lands in link metadata via
+              // direct serde manipulation; admin clients still see the
+              // empty options for now.
           });
     }
 
