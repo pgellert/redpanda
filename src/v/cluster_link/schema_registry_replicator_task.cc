@@ -201,15 +201,19 @@ schema_registry_replicator_task::run_catch_up(ss::abort_source& as) {
             subjects_res.assume_error().message)};
     }
 
+    auto all_subjects = std::move(subjects_res).assume_value();
     auto replicated = co_await replicate_subjects(
-      std::move(subjects_res).assume_value(), as);
+      chunked_vector<ss::sstring>{all_subjects.copy()}, as);
+    co_await replicate_compatibility(all_subjects, as);
     vlog(
       cllog.info,
       "[sr-replicator] catch-up complete: replicated {} schemas, "
-      "{} validation failures, {} other failures",
+      "{} validation failures, {} other failures, "
+      "{} compatibility levels mirrored",
       _counters.schemas_replicated,
       _counters.schemas_failed_validation,
-      _counters.schemas_failed_other);
+      _counters.schemas_failed_other,
+      _counters.compatibility_levels_replicated);
     (void)replicated;
     _catch_up_done = true;
     co_return state_transition{
@@ -374,6 +378,69 @@ ss::future<size_t> schema_registry_replicator_task::replicate_subjects(
     }
     _counters.subjects_synchronized = _seen.size();
     co_return replicated;
+}
+
+ss::future<> schema_registry_replicator_task::replicate_compatibility(
+  const chunked_vector<ss::sstring>& subjects, ss::abort_source& as) {
+    // Global compat first.
+    {
+        auto src = co_await _source_client->get_compatibility(std::nullopt);
+        if (src.has_error()) {
+            if (src.assume_error().errc != sr_http_errc::not_found) {
+                vlog(
+                  cllog.debug,
+                  "[sr-replicator] get global compat failed: {}",
+                  src.assume_error().message);
+            }
+        } else {
+            auto put_res = co_await _dest_client->put_compatibility(
+              std::nullopt, src.assume_value());
+            if (put_res.has_error()) {
+                vlog(
+                  cllog.warn,
+                  "[sr-replicator] put global compat failed: {}",
+                  put_res.assume_error().message);
+                ++_counters.compatibility_replication_failures;
+            } else {
+                ++_counters.compatibility_levels_replicated;
+            }
+        }
+    }
+    // Per-subject compat. 404 means "no explicit override on source" and is
+    // not an error -- we just don't touch the dest's per-subject compat.
+    for (const auto& subject : subjects) {
+        as.check();
+        if (
+          !_include_regex || !_include_regex->ok()
+          || !RE2::FullMatch(subject, *_include_regex)) {
+            continue;
+        }
+        auto src = co_await _source_client->get_compatibility(subject);
+        if (src.has_error()) {
+            if (src.assume_error().errc == sr_http_errc::not_found) {
+                continue;
+            }
+            vlog(
+              cllog.debug,
+              "[sr-replicator] get compat({}) failed: {}",
+              subject,
+              src.assume_error().message);
+            ++_counters.compatibility_replication_failures;
+            continue;
+        }
+        auto put_res = co_await _dest_client->put_compatibility(
+          subject, src.assume_value());
+        if (put_res.has_error()) {
+            vlog(
+              cllog.warn,
+              "[sr-replicator] put compat({}) failed: {}",
+              subject,
+              put_res.assume_error().message);
+            ++_counters.compatibility_replication_failures;
+        } else {
+            ++_counters.compatibility_levels_replicated;
+        }
+    }
 }
 
 std::string_view

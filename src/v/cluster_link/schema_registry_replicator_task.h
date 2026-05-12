@@ -76,6 +76,8 @@ public:
         size_t schemas_failed_other{0};
         size_t subjects_synchronized{0};
         size_t cycles_observed{0};
+        size_t compatibility_levels_replicated{0};
+        size_t compatibility_replication_failures{0};
     };
     const counters& get_counters() const { return _counters; }
 
@@ -102,6 +104,11 @@ private:
 
     /// Ensure the destination SR is in IMPORT mode (idempotent).
     ss::future<bool> ensure_dest_import_mode();
+
+    /// Mirror the global compatibility level and the per-subject overrides
+    /// from source to destination. Logs + counts errors without aborting.
+    ss::future<> replicate_compatibility(
+      const chunked_vector<ss::sstring>& subjects, ss::abort_source&);
 
     /// Tracks the (subject, version) tuples we've successfully written to
     /// the destination. Used to make catch-up + tail idempotent.
