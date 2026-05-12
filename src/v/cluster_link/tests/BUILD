@@ -234,3 +234,22 @@ redpanda_cc_gtest(
         "@googletest//:gtest",
     ],
 )
+
+redpanda_cc_gtest(
+    name = "sr_http_client_mock_test",
+    timeout = "short",
+    srcs = [
+        "sr_http_client_mock_test.cc",
+    ],
+    cpu = 1,
+    deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/cluster_link:sr_http_client",
+        "//src/v/http",
+        "//src/v/pandaproxy/schema_registry:types",
+        "//src/v/test_utils:gtest",
+        "@boost//:beast",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
