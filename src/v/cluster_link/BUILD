@@ -197,6 +197,35 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "schema_registry_replicator_task",
+    srcs = [
+        "schema_registry_replicator_task.cc",
+    ],
+    hdrs = [
+        "schema_registry_replicator_task.h",
+    ],
+    implementation_deps = [
+        ":logger",
+        "//src/v/ssx:future_util",
+        "@abseil-cpp//absl/strings",
+    ],
+    visibility = ["//src/v/cluster_link:__subpackages__"],
+    deps = [
+        ":impl",
+        ":sr_http_client",
+        ":sr_topo_sort",
+        "//src/v/base",
+        "//src/v/cluster:fwd",
+        "//src/v/cluster_link/model",
+        "//src/v/container:chunked_hash_map",
+        "//src/v/container:chunked_vector",
+        "//src/v/pandaproxy/schema_registry:types",
+        "@re2",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "group_mirroring_task",
     srcs = [
         "group_mirroring_task.cc",
@@ -262,6 +291,7 @@ redpanda_cc_library(
         ":group_mirroring_task",
         ":impl",
         ":logger",
+        ":schema_registry_replicator_task",
         ":security_migrator",
         ":source_topic_syncer",
         "//src/v/cluster:fwd",
