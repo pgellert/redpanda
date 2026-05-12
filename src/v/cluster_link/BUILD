@@ -148,6 +148,25 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "sr_topo_sort",
+    srcs = [
+        "sr_topo_sort.cc",
+    ],
+    hdrs = [
+        "sr_topo_sort.h",
+    ],
+    implementation_deps = [
+        "//src/v/container:chunked_hash_map",
+    ],
+    visibility = ["//src/v/cluster_link:__subpackages__"],
+    deps = [
+        "//src/v/base",
+        "//src/v/container:chunked_vector",
+        "//src/v/pandaproxy/schema_registry:types",
+    ],
+)
+
+redpanda_cc_library(
     name = "sr_http_client",
     srcs = [
         "sr_http_client.cc",

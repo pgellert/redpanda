@@ -220,3 +220,17 @@ redpanda_cc_gtest(
         "@googletest//:gtest",
     ],
 )
+
+redpanda_cc_gtest(
+    name = "sr_topo_sort_test",
+    timeout = "short",
+    srcs = [
+        "sr_topo_sort_test.cc",
+    ],
+    deps = [
+        "//src/v/cluster_link:sr_topo_sort",
+        "//src/v/pandaproxy/schema_registry:types",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+    ],
+)
