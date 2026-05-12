@@ -269,6 +269,20 @@ schema_registry_sync_config::shadow_entire_schema_registry::format_to(
     return fmt::format_to(it, "{{ shadow_entire_schema_registry }}");
 }
 
+fmt::iterator schema_registry_sync_config::shadow_via_http_api::format_to(
+  fmt::iterator it) const {
+    return fmt::format_to(
+      it,
+      "{{ shadow_via_http_api: {{ source_url: {}, basic_auth_user: {}, "
+      "include_regex: {}, tail_interval: {}, version_revisit_interval: {} }} "
+      "}}",
+      source_url,
+      basic_auth_user.has_value() ? "<set>" : "<unset>",
+      include_regex,
+      get_tail_interval(),
+      get_version_revisit_interval());
+}
+
 fmt::iterator schema_registry_sync_config::format_to(fmt::iterator it) const {
     if (sync_schema_registry_topic_mode.has_value()) {
         return ss::visit(

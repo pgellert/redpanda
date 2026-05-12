@@ -519,7 +519,7 @@ struct topic_metadata_mirroring_config
 struct schema_registry_sync_config
   : serde::envelope<
       schema_registry_sync_config,
-      serde::version<0>,
+      serde::version<1>,
       serde::compat_version<0>> {
     struct shadow_entire_schema_registry
       : serde::envelope<
@@ -535,8 +535,53 @@ struct schema_registry_sync_config
         fmt::iterator format_to(fmt::iterator) const;
     };
 
+    /// HTTP-based replication from a Confluent-compatible source SR. Used
+    /// when the source is not a Redpanda cluster (and therefore the
+    /// `_schemas` topic is not directly replicatable) — e.g. Confluent
+    /// Cloud / Confluent Platform / MSK Glue (future).
+    struct shadow_via_http_api
+      : serde::envelope<
+          shadow_via_http_api,
+          serde::version<0>,
+          serde::compat_version<0>> {
+        ss::sstring source_url;
+        std::optional<ss::sstring> basic_auth_user;
+        std::optional<ss::sstring> basic_auth_pass;
+        ss::sstring include_regex{".*"};
+        std::optional<ss::lowres_clock::duration> tail_interval;
+        std::optional<ss::lowres_clock::duration> version_revisit_interval;
+
+        static constexpr auto default_tail_interval = std::chrono::milliseconds{
+          250};
+        static constexpr auto default_version_revisit_interval
+          = std::chrono::seconds{5};
+
+        ss::lowres_clock::duration get_tail_interval() const {
+            return tail_interval.value_or(default_tail_interval);
+        }
+        ss::lowres_clock::duration get_version_revisit_interval() const {
+            return version_revisit_interval.value_or(
+              default_version_revisit_interval);
+        }
+
+        friend bool operator==(
+          const shadow_via_http_api&, const shadow_via_http_api&) = default;
+
+        auto serde_fields() {
+            return std::tie(
+              source_url,
+              basic_auth_user,
+              basic_auth_pass,
+              include_regex,
+              tail_interval,
+              version_revisit_interval);
+        }
+
+        fmt::iterator format_to(fmt::iterator) const;
+    };
+
     using shadow_schema_registry_mode_t
-      = serde::variant<shadow_entire_schema_registry>;
+      = serde::variant<shadow_entire_schema_registry, shadow_via_http_api>;
 
     std::optional<shadow_schema_registry_mode_t>
       sync_schema_registry_topic_mode;
