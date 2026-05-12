@@ -52,10 +52,11 @@ What's deliberately deferred to follow-ups (and why):
   The transport already supports TLS via
   `net::base_transport::configuration::credentials`; wiring it is
   config plumbing, not protocol work.
-- **Compatibility-level replication.** `get_compatibility` /
-  `put_compatibility` are implemented in `sr_http_client` but not
-  yet called from the task. Hooking them in is a ~15-line addition
-  in `run_catch_up` / `run_tail` plus a `_seen_compat` map.
+- ~~**Compatibility-level replication.**~~ DONE — the task now mirrors
+  the global compatibility level and per-subject overrides at
+  catch-up time (commit `28654376af`). Per-subject `404` from the
+  source is correctly treated as "no override, inherit global" and
+  not as an error. Per-tail revisits for compat drift remain a TODO.
 - **Per-subject status (E-199 stretch goal).** Counters are
   per-link; per-subject status would need a new map exposed via an
   override of `task::get_status_report()`.
@@ -230,10 +231,46 @@ worth recording but not acting on tonight:
 ## Commit history (this branch)
 
 ```
-git log --oneline dev..slsr/poc
+$ git log --oneline dev..slsr/poc
+28654376af cluster_link/sr: mirror compatibility levels alongside schemas
+64487075eb cluster_link/tests: mock-driven HTTP integration tests for sr_http_client
+9c58f37da7 docs/plans: findings + handoff notes for overnight SR POC
+e0e08ac3a6 admin/shadow_link/converter: handle shadow_via_http_api variant
+76bd0adbe3 cluster_link: introduce schema_registry_replicator_task
+f4377728fb cluster_link: toposort schemas by references for IMPORT-mode writes
+1ef061b7a6 cluster_link/tests: unit tests for sr_http_client pure-logic helpers
+544afcc57a cluster_link: add HTTP client wrapper for Schema Registry calls
+b134ca98a9 cluster_link/model: add shadow_via_http_api variant for SR sync
+cf55eb1f47 docs/plans: record cluster_link survey findings for SR POC
+80521885d1 docs/plans: implementation plan for SR shadow link POC
+b4af37ec4d docs/plans: design for SR shadow link POC
+4dc5b8aa41 tests/rptest: add Confluent SR ducktape harness
 ```
 
-Each commit is self-contained and re-orderable; commit-by-commit
+13 commits, each self-contained and re-orderable; commit-by-commit
 review should be feasible. There are no fixup commits because the
-issues caught by clang-format / clang were small enough to land
-in the same commit.
+issues caught by clang-format / clang were small enough to land in
+the same commit. Net diff vs `dev`: ~2.4kLOC of code + tests + docs.
+
+## Final test status
+
+```
+$ bazel test //src/v/cluster_link/tests/...
+```
+
+13 / 13 PASS, including the three new tests this branch adds:
+
+- `sr_http_client_test` (9 unit tests, ~0.6s) — URL parsing + Basic auth.
+- `sr_topo_sort_test` (11 unit tests, ~0.6s) — reference DAG.
+- `sr_http_client_mock_test` (9 integration tests, ~0.4s) — gmock-scripted
+  HTTP responses cover the full request/response wire protocol.
+
+Wide build is green:
+
+```
+$ bazel build //src/v/redpanda //src/v/cluster_link/...
+```
+
+i.e. the new variant in `schema_registry_sync_config` does not break
+any downstream code, and the new task is fully linked into the
+`redpanda` binary.
