@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -e
+
+source "$(dirname "${BASH_SOURCE[0]}")/download-utils"
+
+# Confluent Platform Community Edition includes Schema Registry.
+# Pin to a version compatible with the Apache Kafka version used by
+# the multi-cluster shadow-link tests (kafka 3.7/3.8 -> CP 7.7.x).
+CP_VERSION=7.7.1
+CP_FILE=confluent-community-${CP_VERSION}.tar.gz
+
+# Confluent's archive is the canonical source for the tarball.
+CP_URL=https://packages.confluent.io/archive/7.7/${CP_FILE}
+
+mkdir /opt/confluent
+DL_STRIP=1 download_extract ${CP_URL} /opt/confluent
