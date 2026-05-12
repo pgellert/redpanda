@@ -207,3 +207,16 @@ redpanda_cc_gtest(
         "@seastar//:testing",
     ],
 )
+
+redpanda_cc_gtest(
+    name = "sr_http_client_test",
+    timeout = "short",
+    srcs = [
+        "sr_http_client_test.cc",
+    ],
+    deps = [
+        "//src/v/cluster_link:sr_http_client",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+    ],
+)
