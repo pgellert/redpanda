@@ -148,6 +148,36 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "sr_http_client",
+    srcs = [
+        "sr_http_client.cc",
+    ],
+    hdrs = [
+        "sr_http_client.h",
+    ],
+    implementation_deps = [
+        ":logger",
+        "//src/v/bytes",
+        "//src/v/http:utils",
+        "//src/v/json",
+        "//src/v/net:types",
+        "//src/v/utils:base64",
+        "@boost//:algorithm",
+    ],
+    visibility = ["//src/v/cluster_link:__subpackages__"],
+    deps = [
+        "//src/v/base",
+        "//src/v/bytes:iobuf",
+        "//src/v/container:chunked_vector",
+        "//src/v/http",
+        "//src/v/pandaproxy/schema_registry:types",
+        "//src/v/utils:unresolved_address",
+        "@boost//:beast",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "group_mirroring_task",
     srcs = [
         "group_mirroring_task.cc",
