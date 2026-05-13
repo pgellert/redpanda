@@ -204,17 +204,50 @@ worth recording but not acting on tonight:
 - **Build warnings.** No `-Werror` failures observed but a clean
   pass with `--config=clang-tidy` was not attempted.
 
+## End-to-end test result (2026-05-13 morning)
+
+`tests/rptest/tests/confluent_sr_shadow_link_test.py` — PASS.
+
+```
+Topology: Apache Kafka 3.8 (KRaft) + Confluent SR 7.7.1
+          + Redpanda single-node destination
+Seeded:   3 simple Avro subjects + 1 referent + 1 referrer = 5 schemas
+```
+
+Measurements from this run (1-broker dest, in-VM docker):
+
+| signal | value |
+|---|---|
+| catch-up start → IMPORT mode set | 341 ms |
+| catch-up start → 5 schemas + 1 compat replicated | 420 ms |
+| new-subject discovery latency (post-catch-up registration → visible on dest) | **258 ms** |
+| ID preservation | 5/5 (orders=1, shipments=2, customers=3, common-types=4, events-with-common=5) |
+| reference DAG ordering | correct (referrer written after referent) |
+
+Two bugs surfaced + fixed during the e2e bring-up that were
+invisible to the unit + gmock tests:
+
+1. The stash that added the Confluent SR ducktape service did not
+   wire the corresponding stage into `tests/docker/Dockerfile`, so
+   the test-node image was missing `/opt/confluent/bin/`. Fixed by
+   adding a `confluent-schema-registry` stage + COPY line.
+2. `http::client::request_and_collect_response` does not auto-set
+   the `Content-Length` header for non-empty payloads, so the
+   destination SR was reading the body as zero bytes and returning
+   `422 parse error at offset 0`. `sr_http_client::do_write_json`
+   now sets the header explicitly.
+
 ## Suggested next steps (in order)
 
-1. Surface the new variant in the admin API
-   (`shadow_linking_rpc.json` + the converter), so users can
-   actually configure a link to use the HTTP-API mode.
-2. Wire the destination URL from
-   `pandaproxy::schema_registry::configuration` instead of
-   hardcoding 127.0.0.1:8081.
-3. Extend `tests/rptest/tests/confluent_sr_migration_test.py`
-   (from stash@{1}) to create a link with `shadow_via_http_api`,
-   start the task, and assert dest contents byte-for-byte.
+The original "next steps" list collapsed: admin-API surfacing, dest
+URL wiring, and the ducktape e2e are all done.  Updated priority
+list:
+
+1. Wire the destination URL from `pandaproxy::schema_registry::configuration`
+   instead of relying on the `destination_url` override in the
+   variant (only the test sets it today). Defaulting to the local
+   broker's actual SR port removes a foot-gun for non-default
+   configurations.
 4. Run that test once with N=20 to validate correctness, then
    N=1000 to get the first set of memory/throughput numbers.
 5. Add the gmock-based integration tests for
