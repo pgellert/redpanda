@@ -191,6 +191,8 @@ redpanda_cc_library(
         "//src/v/http",
         "//src/v/json",
         "//src/v/pandaproxy/schema_registry:types",
+        "//src/v/ssx:semaphore",
+        "//src/v/utils:token_bucket",
         "//src/v/utils:unresolved_address",
         "@boost//:beast",
         "@seastar",

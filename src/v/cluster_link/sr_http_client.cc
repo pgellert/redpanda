@@ -24,6 +24,7 @@
 #include "utils/base64.h"
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/as_future.hh>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/beast/http/field.hpp>
@@ -77,11 +78,23 @@ sr_http_errc errc_for_status(bh::status s) {
     if (s == bh::status::not_found) {
         return sr_http_errc::not_found;
     }
+    if (s == bh::status::too_many_requests) {
+        return sr_http_errc::rate_limited;
+    }
     if (status_is_5xx(s)) {
         return sr_http_errc::server_error;
     }
     return sr_http_errc::bad_request;
 }
+
+/// Default Retry-After for 429s in the absence of an explicit header.
+/// http::abstract_client::request_and_collect_response intentionally
+/// returns only {status, body} without the response headers, so we
+/// can't extract the actual header value here. Plumbing headers
+/// through that interface is out of scope for the POC; the task layer
+/// uses this as a conservative default and applies its own
+/// exponential backoff on top.
+constexpr std::chrono::seconds kDefaultRetryAfter{1};
 
 /// Parse the iobuf as JSON without materializing the body as a single
 /// contiguous string. Wraps iobuf -> std::istream -> rapidjson IStream.
@@ -130,15 +143,21 @@ std::string_view to_string_view(sr_http_errc e) {
         return "unexpected_response";
     case sr_http_errc::not_in_import_mode:
         return "not_in_import_mode";
+    case sr_http_errc::rate_limited:
+        return "rate_limited";
     }
     return "unknown";
 }
 
 sr_http_error sr_http_error::from_status(bh::status status, ss::sstring msg) {
-    return {
+    sr_http_error err{
       .errc = errc_for_status(status),
       .message = std::move(msg),
       .http_status = status};
+    if (err.errc == sr_http_errc::rate_limited) {
+        err.retry_after = kDefaultRetryAfter;
+    }
+    return err;
 }
 
 std::optional<sr_endpoint> sr_endpoint::from_url(std::string_view url) {
@@ -201,14 +220,65 @@ sr_http_client::sr_http_client(sr_endpoint endpoint)
   : _endpoint(std::move(endpoint))
   , _owned_client(
       std::make_unique<http::client>(
-        net::base_transport::configuration{.server_addr = _endpoint.addr})) {}
+        net::base_transport::configuration{.server_addr = _endpoint.addr}))
+  , _in_flight(
+      std::max<size_t>(1, _endpoint.max_concurrent),
+      "cluster_link/sr/in_flight")
+  , _current_rps(_endpoint.target_rps) {
+    if (_current_rps > 0) {
+        _rate_bucket = std::make_unique<token_bucket<>>(
+          _current_rps, "cluster_link/sr/rate");
+    }
+}
 
 sr_http_client::sr_http_client(
   sr_endpoint endpoint, http::abstract_client& borrowed)
   : _endpoint(std::move(endpoint))
-  , _borrowed_client(&borrowed) {}
+  , _borrowed_client(&borrowed)
+  , _in_flight(
+      std::max<size_t>(1, _endpoint.max_concurrent),
+      "cluster_link/sr/in_flight")
+  , _current_rps(_endpoint.target_rps) {
+    if (_current_rps > 0) {
+        _rate_bucket = std::make_unique<token_bucket<>>(
+          _current_rps, "cluster_link/sr/rate");
+    }
+}
 
 sr_http_client::~sr_http_client() = default;
+
+ss::future<sr_http_client::request_permit>
+sr_http_client::acquire_request_permit() {
+    auto units = co_await ss::get_units(_in_flight, 1);
+    if (_rate_bucket) {
+        // Block this fiber until the bucket has a token. Other fibers
+        // sharing the bucket get queued behind us.
+        co_await _rate_bucket->throttle(1, _abort_src);
+    }
+    co_return request_permit{.in_flight = std::move(units)};
+}
+
+void sr_http_client::scale_rate(double factor) {
+    if (!_rate_bucket || _current_rps == 0) {
+        return;
+    }
+    size_t new_rps = std::max<size_t>(
+      1, static_cast<size_t>(static_cast<double>(_current_rps) * factor));
+    if (new_rps == _current_rps) {
+        return;
+    }
+    _rate_bucket->update_rate(new_rps);
+    _current_rps = new_rps;
+}
+
+void sr_http_client::cancel_inflight() {
+    if (!_abort_src.abort_requested()) {
+        _abort_src.request_abort();
+    }
+    if (_rate_bucket) {
+        _rate_bucket->shutdown();
+    }
+}
 
 http::abstract_client& sr_http_client::client() {
     if (_owned_client) {
@@ -262,6 +332,13 @@ bh::request_header<> sr_http_client::build_request(
 template<typename T, typename Parse>
 ss::future<sr_result<T>>
 sr_http_client::do_get_json(const ss::sstring& path, Parse parse) {
+    auto permit_res = co_await ss::coroutine::as_future<request_permit>(
+      acquire_request_permit());
+    if (permit_res.failed()) {
+        co_return sr_http_error::transport(
+          ssx::sformat("rate-limit / in-flight wait aborted for GET {}", path));
+    }
+    auto permit = permit_res.get();
     auto req = build_request(
       bh::verb::get, path, /*include_content_type=*/false);
     http::downloaded_response resp;
@@ -295,6 +372,16 @@ sr_http_client::do_get_json(const ss::sstring& path, Parse parse) {
 
 ss::future<sr_result<iobuf>> sr_http_client::do_write_json_iobuf(
   bh::verb verb, const ss::sstring& path, iobuf body) {
+    auto permit_res = co_await ss::coroutine::as_future<request_permit>(
+      acquire_request_permit());
+    if (permit_res.failed()) {
+        co_return sr_http_error::transport(
+          ssx::sformat(
+            "rate-limit / in-flight wait aborted for {} {}",
+            bh::to_string(verb),
+            path));
+    }
+    auto permit = permit_res.get();
     auto req = build_request(verb, path, /*include_content_type=*/true);
     // beast/http::client doesn't auto-set Content-Length when the body is
     // streamed via request_and_collect_response, so we must set it

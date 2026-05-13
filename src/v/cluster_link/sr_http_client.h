@@ -17,8 +17,11 @@
 #include "container/chunked_vector.h"
 #include "http/client.h"
 #include "pandaproxy/schema_registry/types.h"
+#include "ssx/semaphore.h"
+#include "utils/token_bucket.h"
 #include "utils/unresolved_address.h"
 
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/sstring.hh>
 
@@ -42,6 +45,19 @@ struct sr_endpoint {
     ss::sstring path_prefix;
     std::optional<ss::sstring> basic_auth_user;
     std::optional<ss::sstring> basic_auth_pass;
+
+    /// Maximum concurrent HTTP requests in flight against this endpoint.
+    /// Sized to the bandwidth-delay product: at 300ms RTT and 10 RPS the
+    /// natural concurrency is ~3; at low RTT it's just "how many
+    /// independent connections we can drive simultaneously".
+    size_t max_concurrent{1};
+
+    /// Target request rate, in requests/second, against this endpoint. 0
+    /// means unlimited (typical for dest = localhost). Confluent Cloud's
+    /// documented limit is 75 reads/s + 25 writes/s per LSRC shared
+    /// across all clients, so the operator-set value should be a *share*
+    /// of that, e.g. 10 to leave room for production traffic.
+    size_t target_rps{0};
 
     /// Construct an sr_endpoint from a URL string of the form
     /// "http://host:port[/path]". Returns std::nullopt on parse failure.
@@ -69,6 +85,10 @@ enum class sr_http_errc {
     /// Source SR rejected a write because the target subject is in
     /// READWRITE / READONLY mode instead of IMPORT.
     not_in_import_mode,
+    /// Source returned HTTP 429 Too Many Requests. The task layer can
+    /// inspect the optional retry_after_seconds on the error to back
+    /// off and adapt its target rate downward.
+    rate_limited,
 };
 
 std::string_view to_string_view(sr_http_errc);
@@ -78,6 +98,10 @@ struct sr_http_error {
     ss::sstring message;
     /// Populated when the underlying HTTP call produced a response.
     std::optional<boost::beast::http::status> http_status;
+    /// Populated when the server returned a Retry-After header
+    /// (typically alongside 429 or 503). Holds the suggested
+    /// delay before the caller should retry.
+    std::optional<std::chrono::seconds> retry_after;
 
     static sr_http_error transport(ss::sstring msg) {
         return {.errc = sr_http_errc::transport, .message = std::move(msg)};
@@ -156,6 +180,19 @@ public:
       const ss::sstring& subject,
       const pandaproxy::schema_registry::stored_schema& s);
 
+    /// Reduce the target_rps by the given fraction (e.g. 0.5 halves it).
+    /// Called by the task layer in response to repeated 429s, to back
+    /// off the steady-state rate.
+    void scale_rate(double factor);
+
+    /// The current effective target_rps, possibly lower than the
+    /// configured value if scale_rate has fired.
+    size_t current_target_rps() const { return _current_rps; }
+
+    /// Abort all in-flight semaphore waiters so the task can shut down
+    /// cleanly.
+    void cancel_inflight();
+
 private:
     sr_endpoint _endpoint;
     /// Either _owned_client is populated (owning case) or _borrowed_client is
@@ -163,7 +200,24 @@ private:
     std::unique_ptr<http::client> _owned_client;
     http::abstract_client* _borrowed_client{nullptr};
 
+    /// Bounds concurrent in-flight HTTP requests.
+    ssx::semaphore _in_flight;
+    /// Smooths request rate. Null when target_rps == 0 (e.g. dest =
+    /// localhost — no rate limit needed).
+    std::unique_ptr<token_bucket<>> _rate_bucket;
+    /// Current effective rate (possibly reduced via scale_rate()).
+    size_t _current_rps{0};
+    /// Aborted on cancel_inflight to break out of semaphore waits.
+    ss::abort_source _abort_src;
+
     http::abstract_client& client();
+
+    /// Acquire one in-flight permit + one rate-limit token. Returns an
+    /// RAII-style permit that releases on destruction.
+    struct request_permit {
+        ssx::semaphore_units in_flight;
+    };
+    ss::future<request_permit> acquire_request_permit();
 
     /// Build a beast request_header with the given verb, path (relative to
     /// path_prefix), and content-type, applying Basic auth if configured.
