@@ -133,12 +133,14 @@ bool schema_registry_replicator_task::maybe_rebuild_clients() {
         _source_client = std::make_unique<sr_http_client>(std::move(*src_ep));
     }
     if (!_dest_client) {
-        auto dst_ep = sr_endpoint::from_url(kLocalSrUrl);
+        const auto& dest_url = _active_http_cfg->destination_url.value_or(
+          ss::sstring{kLocalSrUrl});
+        auto dst_ep = sr_endpoint::from_url(dest_url);
         if (!dst_ep.has_value()) {
             vlog(
-              cllog.error,
-              "[sr-replicator] could not parse local SR URL {} (BUG)",
-              kLocalSrUrl);
+              cllog.warn,
+              "[sr-replicator] could not parse destination_url: {}",
+              dest_url);
             return false;
         }
         _dest_client = std::make_unique<sr_http_client>(std::move(*dst_ep));

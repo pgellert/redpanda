@@ -408,9 +408,42 @@ message SchemaRegistrySyncOptions {
     // `_schemas` topic, unset this field, then either fail-over the topic or
     // delete it.
     message ShadowSchemaRegistryTopic {}
+    // Replicate from a Confluent-compatible Schema Registry over its
+    // HTTP API. Use this when the source is not a Redpanda cluster
+    // (e.g. Confluent Cloud, Confluent Platform, AWS Glue) and the
+    // source `_schemas` topic is therefore not directly mirrorable.
+    //
+    // The Redpanda destination is driven into IMPORT mode and the
+    // source's subject names and schema IDs are preserved
+    // byte-for-byte.
+    message ShadowViaHttpApi {
+        // Source SR base URL, including scheme + host + port, e.g.
+        // "http://confluent-sr:8081" or "http://lsrc.cflt.cloud".
+        string source_url = 1;
+        // Optional HTTP Basic auth username. Confluent Cloud uses an
+        // API key as the username.
+        string basic_auth_user = 2;
+        // Optional HTTP Basic auth password. Confluent Cloud uses an
+        // API secret as the password. Write-only.
+        string basic_auth_pass = 3 [(google.api.field_behavior) = INPUT_ONLY];
+        // RE2 regex of subjects to include. Defaults to ".*" if unset.
+        string include_regex = 4;
+        // Interval between tail polls for new subjects/versions on
+        // the source. Defaults to 250ms.
+        google.protobuf.Duration tail_interval = 5;
+        // Interval at which previously-seen subjects are revisited
+        // for new versions and config drift. Defaults to 5s.
+        google.protobuf.Duration version_revisit_interval = 6;
+        // Optional override of the destination SR URL. If empty,
+        // defaults to http://127.0.0.1:8081 (the local Redpanda SR).
+        // Used in tests and unusual topologies; typical deployments
+        // leave this unset.
+        string destination_url = 7;
+    }
     // Schema Registry shadowing mode.
     oneof schema_registry_shadowing_mode {
         ShadowSchemaRegistryTopic shadow_schema_registry_topic = 1;
+        ShadowViaHttpApi shadow_via_http_api = 2;
     }
 }
 // Options for syncing consumer offsets

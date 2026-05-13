@@ -38,6 +38,7 @@ using proto::admin::name_filter;
 using proto::admin::plain_config;
 using proto::admin::schema_registry_sync_options;
 using proto::admin::schema_registry_sync_options_shadow_schema_registry_topic;
+using proto::admin::schema_registry_sync_options_shadow_via_http_api;
 using proto::admin::scram_config;
 using proto::admin::scram_mechanism;
 using proto::admin::security_settings_sync_options;
@@ -199,6 +200,32 @@ create_schema_registry_sync_config(
         const schema_registry_sync_options_shadow_schema_registry_topic&) {
           config.sync_schema_registry_topic_mode = cluster_link::model::
             schema_registry_sync_config::shadow_entire_schema_registry{};
+      },
+      [&config](const schema_registry_sync_options_shadow_via_http_api& v) {
+          cluster_link::model::schema_registry_sync_config::shadow_via_http_api
+            cfg;
+          cfg.source_url = v.get_source_url();
+          if (!v.get_basic_auth_user().empty()) {
+              cfg.basic_auth_user = v.get_basic_auth_user();
+          }
+          if (!v.get_basic_auth_pass().empty()) {
+              cfg.basic_auth_pass = v.get_basic_auth_pass();
+          }
+          if (!v.get_include_regex().empty()) {
+              cfg.include_regex = v.get_include_regex();
+          }
+          if (v.get_tail_interval() != absl::ZeroDuration()) {
+              cfg.tail_interval = absl::ToChronoNanoseconds(
+                v.get_tail_interval());
+          }
+          if (v.get_version_revisit_interval() != absl::ZeroDuration()) {
+              cfg.version_revisit_interval = absl::ToChronoNanoseconds(
+                v.get_version_revisit_interval());
+          }
+          if (!v.get_destination_url().empty()) {
+              cfg.destination_url = v.get_destination_url();
+          }
+          config.sync_schema_registry_topic_mode = std::move(cfg);
       },
       [&config](std::monostate) {
           config.sync_schema_registry_topic_mode = std::nullopt;
@@ -1008,13 +1035,28 @@ schema_registry_sync_options create_schema_registry_sync_options(
               options.set_shadow_schema_registry_topic(
                 schema_registry_sync_options_shadow_schema_registry_topic{});
           },
-          [](
+          [&options](
             const cluster_link::model::schema_registry_sync_config::
-              shadow_via_http_api&) {
-              // POC: the HTTP-API variant is not yet surfaced via the
-              // admin API. Configuration lands in link metadata via
-              // direct serde manipulation; admin clients still see the
-              // empty options for now.
+              shadow_via_http_api& v) {
+              schema_registry_sync_options_shadow_via_http_api proto_v;
+              proto_v.set_source_url(ss::sstring{v.source_url});
+              if (v.basic_auth_user.has_value()) {
+                  proto_v.set_basic_auth_user(ss::sstring{*v.basic_auth_user});
+              }
+              // Note: basic_auth_pass is INPUT_ONLY in the proto, so
+              // we intentionally do not echo it on read-back.
+              proto_v.set_include_regex(ss::sstring{v.include_regex});
+              if (v.tail_interval.has_value()) {
+                  proto_v.set_tail_interval(absl::FromChrono(*v.tail_interval));
+              }
+              if (v.version_revisit_interval.has_value()) {
+                  proto_v.set_version_revisit_interval(
+                    absl::FromChrono(*v.version_revisit_interval));
+              }
+              if (v.destination_url.has_value()) {
+                  proto_v.set_destination_url(ss::sstring{*v.destination_url});
+              }
+              options.set_shadow_via_http_api(std::move(proto_v));
           });
     }
 

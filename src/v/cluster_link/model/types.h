@@ -550,6 +550,7 @@ struct schema_registry_sync_config
         ss::sstring include_regex{".*"};
         std::optional<ss::lowres_clock::duration> tail_interval;
         std::optional<ss::lowres_clock::duration> version_revisit_interval;
+        std::optional<ss::sstring> destination_url;
 
         static constexpr auto default_tail_interval = std::chrono::milliseconds{
           250};
@@ -574,7 +575,8 @@ struct schema_registry_sync_config
               basic_auth_pass,
               include_regex,
               tail_interval,
-              version_revisit_interval);
+              version_revisit_interval,
+              destination_url);
         }
 
         fmt::iterator format_to(fmt::iterator) const;
