@@ -78,6 +78,8 @@ public:
         size_t cycles_observed{0};
         size_t compatibility_levels_replicated{0};
         size_t compatibility_replication_failures{0};
+        size_t modes_replicated{0};
+        size_t mode_replication_failures{0};
     };
     const counters& get_counters() const { return _counters; }
 
@@ -108,6 +110,12 @@ private:
     /// Mirror the global compatibility level and the per-subject overrides
     /// from source to destination. Logs + counts errors without aborting.
     ss::future<> replicate_compatibility(
+      const chunked_vector<ss::sstring>& subjects, ss::abort_source&);
+
+    /// Mirror per-subject mode from source to destination. Global mode is
+    /// deliberately not mirrored — the dest stays in IMPORT while the link
+    /// is active. Logs + counts errors without aborting.
+    ss::future<> replicate_modes(
       const chunked_vector<ss::sstring>& subjects, ss::abort_source&);
 
     /// Tracks the (subject, version) tuples we've successfully written to

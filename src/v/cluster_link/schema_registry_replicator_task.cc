@@ -207,15 +207,19 @@ schema_registry_replicator_task::run_catch_up(ss::abort_source& as) {
     auto replicated = co_await replicate_subjects(
       chunked_vector<ss::sstring>{all_subjects.copy()}, as);
     co_await replicate_compatibility(all_subjects, as);
+    // Mode mirroring runs after schemas land — setting per-subject mode
+    // on the dest requires the subject to exist.
+    co_await replicate_modes(all_subjects, as);
     vlog(
       cllog.info,
       "[sr-replicator] catch-up complete: replicated {} schemas, "
       "{} validation failures, {} other failures, "
-      "{} compatibility levels mirrored",
+      "{} compat levels mirrored, {} modes mirrored",
       _counters.schemas_replicated,
       _counters.schemas_failed_validation,
       _counters.schemas_failed_other,
-      _counters.compatibility_levels_replicated);
+      _counters.compatibility_levels_replicated,
+      _counters.modes_replicated);
     (void)replicated;
     _catch_up_done = true;
     co_return state_transition{
@@ -441,6 +445,52 @@ ss::future<> schema_registry_replicator_task::replicate_compatibility(
             ++_counters.compatibility_replication_failures;
         } else {
             ++_counters.compatibility_levels_replicated;
+        }
+    }
+}
+
+ss::future<> schema_registry_replicator_task::replicate_modes(
+  const chunked_vector<ss::sstring>& subjects, ss::abort_source& as) {
+    // Per-subject mode only. The dest's global mode is deliberately
+    // pinned to IMPORT while the link is active — mirroring source's
+    // global would re-enable external writes and break shadowing.
+    //
+    // Per-subject 404 means "no explicit override on source"; the
+    // subject inherits source's global, and we leave dest's per-subject
+    // mode unset (it'll fall back to dest's global = IMPORT). That's
+    // strictly more restrictive than source, so writes still fail on
+    // dest as expected for shadowed state.
+    for (const auto& subject : subjects) {
+        as.check();
+        if (
+          !_include_regex || !_include_regex->ok()
+          || !RE2::FullMatch(subject, *_include_regex)) {
+            continue;
+        }
+        auto src = co_await _source_client->get_mode(subject);
+        if (src.has_error()) {
+            if (src.assume_error().errc == sr_http_errc::not_found) {
+                continue;
+            }
+            vlog(
+              cllog.debug,
+              "[sr-replicator] get mode({}) failed: {}",
+              subject,
+              src.assume_error().message);
+            ++_counters.mode_replication_failures;
+            continue;
+        }
+        auto put_res = co_await _dest_client->put_mode(
+          subject, src.assume_value());
+        if (put_res.has_error()) {
+            vlog(
+              cllog.warn,
+              "[sr-replicator] put mode({}) failed: {}",
+              subject,
+              put_res.assume_error().message);
+            ++_counters.mode_replication_failures;
+        } else {
+            ++_counters.modes_replicated;
         }
     }
 }
