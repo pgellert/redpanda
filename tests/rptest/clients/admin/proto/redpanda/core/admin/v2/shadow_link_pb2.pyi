@@ -818,22 +818,78 @@ class SchemaRegistrySyncOptions(google.protobuf.message.Message):
 
         def __init__(self) -> None:
             ...
+
+    @typing.final
+    class ShadowViaHttpApi(google.protobuf.message.Message):
+        """Replicate from a Confluent-compatible Schema Registry over its
+        HTTP API. Use this when the source is not a Redpanda cluster
+        (e.g. Confluent Cloud, Confluent Platform, AWS Glue) and the
+        source `_schemas` topic is therefore not directly mirrorable.
+
+        The Redpanda destination is driven into IMPORT mode and the
+        source's subject names and schema IDs are preserved
+        byte-for-byte.
+        """
+        DESCRIPTOR: google.protobuf.descriptor.Descriptor
+        SOURCE_URL_FIELD_NUMBER: builtins.int
+        BASIC_AUTH_USER_FIELD_NUMBER: builtins.int
+        BASIC_AUTH_PASS_FIELD_NUMBER: builtins.int
+        INCLUDE_REGEX_FIELD_NUMBER: builtins.int
+        TAIL_INTERVAL_FIELD_NUMBER: builtins.int
+        VERSION_REVISIT_INTERVAL_FIELD_NUMBER: builtins.int
+        DESTINATION_URL_FIELD_NUMBER: builtins.int
+        source_url: builtins.str
+        'Source SR base URL, including scheme + host + port, e.g.\n        "http://confluent-sr:8081" or "http://lsrc.cflt.cloud".\n        '
+        basic_auth_user: builtins.str
+        'Optional HTTP Basic auth username. Confluent Cloud uses an\n        API key as the username.\n        '
+        basic_auth_pass: builtins.str
+        'Optional HTTP Basic auth password. Confluent Cloud uses an\n        API secret as the password. Write-only.\n        '
+        include_regex: builtins.str
+        'RE2 regex of subjects to include. Defaults to ".*" if unset.'
+        destination_url: builtins.str
+        'Optional override of the destination SR URL. If empty,\n        defaults to http://127.0.0.1:8081 (the local Redpanda SR).\n        Used in tests and unusual topologies; typical deployments\n        leave this unset.\n        '
+
+        @property
+        def tail_interval(self) -> google.protobuf.duration_pb2.Duration:
+            """Interval between tail polls for new subjects/versions on
+            the source. Defaults to 250ms.
+            """
+
+        @property
+        def version_revisit_interval(self) -> google.protobuf.duration_pb2.Duration:
+            """Interval at which previously-seen subjects are revisited
+            for new versions and config drift. Defaults to 5s.
+            """
+
+        def __init__(self, *, source_url: builtins.str=..., basic_auth_user: builtins.str=..., basic_auth_pass: builtins.str=..., include_regex: builtins.str=..., tail_interval: google.protobuf.duration_pb2.Duration | None=..., version_revisit_interval: google.protobuf.duration_pb2.Duration | None=..., destination_url: builtins.str=...) -> None:
+            ...
+
+        def HasField(self, field_name: typing.Literal['tail_interval', b'tail_interval', 'version_revisit_interval', b'version_revisit_interval']) -> builtins.bool:
+            ...
+
+        def ClearField(self, field_name: typing.Literal['basic_auth_pass', b'basic_auth_pass', 'basic_auth_user', b'basic_auth_user', 'destination_url', b'destination_url', 'include_regex', b'include_regex', 'source_url', b'source_url', 'tail_interval', b'tail_interval', 'version_revisit_interval', b'version_revisit_interval']) -> None:
+            ...
     SHADOW_SCHEMA_REGISTRY_TOPIC_FIELD_NUMBER: builtins.int
+    SHADOW_VIA_HTTP_API_FIELD_NUMBER: builtins.int
 
     @property
     def shadow_schema_registry_topic(self) -> Global___SchemaRegistrySyncOptions.ShadowSchemaRegistryTopic:
         ...
 
-    def __init__(self, *, shadow_schema_registry_topic: Global___SchemaRegistrySyncOptions.ShadowSchemaRegistryTopic | None=...) -> None:
+    @property
+    def shadow_via_http_api(self) -> Global___SchemaRegistrySyncOptions.ShadowViaHttpApi:
         ...
 
-    def HasField(self, field_name: typing.Literal['schema_registry_shadowing_mode', b'schema_registry_shadowing_mode', 'shadow_schema_registry_topic', b'shadow_schema_registry_topic']) -> builtins.bool:
+    def __init__(self, *, shadow_schema_registry_topic: Global___SchemaRegistrySyncOptions.ShadowSchemaRegistryTopic | None=..., shadow_via_http_api: Global___SchemaRegistrySyncOptions.ShadowViaHttpApi | None=...) -> None:
         ...
 
-    def ClearField(self, field_name: typing.Literal['schema_registry_shadowing_mode', b'schema_registry_shadowing_mode', 'shadow_schema_registry_topic', b'shadow_schema_registry_topic']) -> None:
+    def HasField(self, field_name: typing.Literal['schema_registry_shadowing_mode', b'schema_registry_shadowing_mode', 'shadow_schema_registry_topic', b'shadow_schema_registry_topic', 'shadow_via_http_api', b'shadow_via_http_api']) -> builtins.bool:
         ...
 
-    def WhichOneof(self, oneof_group: typing.Literal['schema_registry_shadowing_mode', b'schema_registry_shadowing_mode']) -> typing.Literal['shadow_schema_registry_topic'] | None:
+    def ClearField(self, field_name: typing.Literal['schema_registry_shadowing_mode', b'schema_registry_shadowing_mode', 'shadow_schema_registry_topic', b'shadow_schema_registry_topic', 'shadow_via_http_api', b'shadow_via_http_api']) -> None:
+        ...
+
+    def WhichOneof(self, oneof_group: typing.Literal['schema_registry_shadowing_mode', b'schema_registry_shadowing_mode']) -> typing.Literal['shadow_schema_registry_topic', 'shadow_via_http_api'] | None:
         ...
 Global___SchemaRegistrySyncOptions: typing_extensions.TypeAlias = SchemaRegistrySyncOptions
 
