@@ -204,50 +204,104 @@ worth recording but not acting on tonight:
 - **Build warnings.** No `-Werror` failures observed but a clean
   pass with `--config=clang-tidy` was not attempted.
 
+## Multi-version + per-subject compat replication (2026-05-13)
+
+`tests/rptest/tests/confluent_sr_shadow_link_versions_test.py` — PASS.
+
+Seeds 10 subjects × 5 versions = 50 schemas on the Confluent source,
+each subject pinned to a different target compatibility level
+(`BACKWARD`, `FORWARD`, `FULL`, `NONE`, cycled), with a non-default
+global compat (`FULL`). After the shadow link starts the test
+verifies, on the destination:
+
+- Every (subject, version) tuple is present with its source-side
+  global id preserved.
+- Source's global compatibility level is mirrored.
+- Each subject's per-subject compatibility override is mirrored
+  (converges within ~15s in practice).
+- Schema bodies match byte-for-byte under JSON canonicalisation.
+
+Confirms the answers to the related questions: **yes, multiple
+versions per subject replicate correctly** (the existing
+`list_versions` / `get_subject_version` / `_seen.version_to_id`
+machinery is fine), and **yes, compatibility (global + per-subject)
+is mirrored**. The destination is also forced into global IMPORT
+mode, but source-side per-subject *mode* is not yet replicated —
+see "What could go wrong" below.
+
 ## Scale + tail-stability characterization (2026-05-13)
 
-`tests/rptest/tests/confluent_sr_shadow_link_scale_test.py` — 3/3 PASS.
+`tests/rptest/tests/confluent_sr_shadow_link_scale_test.py` —
+4/4 PASS at N ∈ {100, 500, 1000, 5000}.
 
 Each variant pre-seeds N subjects on Confluent SR (1 version each),
 times catch-up on the destination, then runs 20 fresh post-catch-up
-registrations and captures the latency distribution.
+registrations and captures the latency distribution. Single-broker
+dest, in-VM docker harness.
 
-Single-broker dest, in-VM docker harness:
+| N    | seed     | catch-up | schemas/s |
+|------|----------|----------|-----------|
+| 100  | 0.5s     | 1.35s    | 74        |
+| 500  | 2.0s     | 4.90s    | 102       |
+| 1000 | 2.8s     | 8.47s    | 118       |
+| 5000 | 13.3s    | 41.07s   | 122       |
 
-| N    | seed time | catch-up | schemas/s |
-|------|-----------|----------|-----------|
-| 100  | 0.5s      | 0.81s    | 123       |
-| 500  | 1.5s      | 2.82s    | 177       |
-| 1000 | 2.5s      | 4.84s    | 206       |
+Fresh-subject discovery latency (20 probes, ms):
 
-| N    | min   | p50   | p95   | max   | mean  | stdev |
-|------|-------|-------|-------|-------|-------|-------|
-| 100  | 214ms | 267ms | 321ms | 322ms | 263ms | 29ms  |
-| 500  | 218ms | 271ms | 278ms | 329ms | 265ms | 26ms  |
-| 1000 | 222ms | 277ms | 285ms | 444ms | 268ms | 49ms  |
-
-20 fresh-subject probes per row. The 250ms tail interval is the
-floor; the actual replication work per tick is small.
+| N    | min | p50 | p95 | max  | mean | stdev |
+|------|-----|-----|-----|------|------|-------|
+| 100  | 135 | 254 | 314 | 325  | 265  | 42    |
+| 500  | 253 | 269 | 372 | 374  | 283  | 36    |
+| 1000 | 224 | 289 | 442 | 457  | 293  | 60    |
+| 5000 | 229 | 298 | 723 | 1016 | 330  | 193   |
 
 Observations:
 
-- **Catch-up throughput improves with N**, not the reverse — 123 →
-  177 → 206 schemas/s as we scale from 100 → 1000. The
-  per-tick fixed costs (list subjects, IMPORT mode, compat) amortize
-  over more schemas. At 1000 we're at roughly 5ms per schema.
-- **Tail discovery latency is flat across 10x scale.** p50 only
-  shifts 267 → 277ms. The replicator's actual work is bounded by
-  the diff between source and seen sets, which is O(1) when one
-  new subject lands per tick — independent of total subject count.
-- **No ceiling observed** in the 100-to-1000 range on a
-  single-broker docker dest. The max latency spike at N=1000
-  (444ms, one out of 20 samples) hints at where variance starts
-  to creep in, but it's still under the 1s discovery contract.
+- **Catch-up throughput plateaus** around 120 schemas/s in the
+  100-5000 range. Per-schema cost is ~8ms dominated by the GET
+  versions / GET schema / POST dest round trips, all serialized
+  on one shard.
+- **Tail discovery latency p50 is essentially flat** across the 50x
+  scale (254 → 298ms). The 250ms tail tick is the floor.
+- **Variance grows with N**: stdev climbs from 42ms at N=100 to
+  193ms at N=5000, and p95 nearly doubles from 314ms to 723ms.
+  Above ~2k schemas the `GET /subjects` response gets large
+  enough that the per-tick body parse stalls the tail loop
+  occasionally.
 - **Test-infra note**: matrix runs need Confluent SR on a
   non-default port (the scale test uses 18081). 8081 is shared
   between Redpanda's own SR and Confluent's; without separation
   the kernel can hold a TIME_WAIT binding into the next matrix
   variant when ducktape recycles containers.
+
+### N=10000: empirical ceiling
+
+The matrix is **capped at N=5000** in CI. Below are the numbers
+captured from an earlier run that included N=10000 (the run
+failed the framework's `>200KB oversize-allocation` guard, but
+the replication itself completed):
+
+| signal | N=1000 | N=10000 | change |
+|---|---|---|---|
+| catch-up time | 8.47s | **100.07s** | 12× |
+| catch-up rate | 118/s | **100/s** | -15% |
+| tail p50 | 289ms | **324ms** | +12% |
+| tail p95 | 442ms | **990ms** | +124% |
+| tail max | 457ms | **2083ms** | 4.6× |
+| tail stdev | 60ms | **422ms** | 7× |
+
+At N=10000 the `GET /subjects` response body reaches ~280KB.
+`sr_http_client::iobuf_to_string` does a single contiguous
+allocation of that size, tripping seastar's >200KB oversize
+warning. Replication completes correctly but tail-loop variance
+explodes. The path forward to lift this ceiling is:
+
+1. **Stream-parse** the `GET /subjects` response from the iobuf
+   directly (drop the bulk `iobuf_to_string` copy).
+2. **Paginate via `?offset=N&limit=M`** when the source supports
+   it (Confluent Cloud does; OSS Confluent / Warpstream do not).
+3. **Maintain a persistent diff baseline** rather than re-listing
+   every 250ms (this is the bigger structural win).
 
 ## End-to-end test result (2026-05-13 morning)
 
@@ -293,16 +347,113 @@ list:
    variant (only the test sets it today). Defaulting to the local
    broker's actual SR port removes a foot-gun for non-default
    configurations.
-4. Run that test once with N=20 to validate correctness, then
-   N=1000 to get the first set of memory/throughput numbers.
-5. Add the gmock-based integration tests for
-   `schema_registry_replicator_task` that script HTTP responses
-   to drive the catch-up + tail loops; would close the gap
-   between "compiles" and "validated."
-6. Replicate compat levels (call `get_compatibility`/`put_compatibility`
-   from `run_catch_up` and on the slow tail tick).
-7. Backoff + rate limiting at the source-client layer.
-8. mTLS plumbing (`net::base_transport::configuration::credentials`).
+2. Replicate source-side mode (per-subject + global). Today only
+   dest's global is forced to IMPORT; the source's actual mode
+   shape is dropped on the floor. Symmetric to compat replication.
+3. Stream-parse the `GET /subjects` body to lift the ~5k subject
+   single-shard ceiling. Either rapidjson's `IStreamWrapper`
+   over an iobuf adapter, or Confluent-style pagination.
+4. Backoff + rate limiting at the source-client layer.
+5. mTLS plumbing (`net::base_transport::configuration::credentials`).
+
+## What could go wrong (severity-sorted)
+
+A frank review of the current implementation's failure modes, grouped
+by severity. Items marked DONE refer to features the POC has tested
+end-to-end; everything else is a known gap.
+
+### High — correctness / data integrity
+
+- **Source mode not mirrored.** `_dest_client->put_mode(nullopt, IMPORT)`
+  is the only mode write the task ever issues. Source's per-subject
+  modes (e.g. a subject pinned READONLY by the source operator) are
+  silently dropped on dest. Fix is symmetric to compat replication.
+- **Soft + hard deletes not propagated.** A subject deleted on
+  source stays on dest. From the dest, "is this subject still real"
+  becomes unanswerable.
+- **CFLT-only schema metadata not preserved.** `schema_metadata`,
+  rules, and `ruleSet` (Data Contract Rules) are not parsed or
+  forwarded. Customers using DCR silently lose those fields.
+- **Qualified subjects (`:context:subject`) flattened.** Source
+  qualifier strings are deserialized as
+  `context_subject::unqualified`, so subjects in non-default contexts
+  end up in dest's default context regardless of source context.
+- **Dest pre-existing schema collisions.** If dest already has any
+  schema id that overlaps source's, the IMPORT-mode POST may
+  silently accept (content match — idempotent) or reject (different
+  body). The task does not pre-scan dest's inventory and can't
+  warn the user.
+- **Reference cycles cause permanent retry.** `topo_sort_by_refs`
+  emits cyclic nodes in input order with `cycle_detected`; the
+  subsequent POSTs fail because the referent doesn't exist yet.
+  The task increments `cycles_observed` and retries every tick
+  forever. SR allows cycles at the wire level, so this is reachable
+  on real data.
+- **Validation failures stick.** A schema rejected by dest is
+  counted in `schemas_failed_validation` but not requeued. It
+  stays missing until something on the source bumps a version.
+
+### Medium — operational / behaviour
+
+- **No backoff.** A consistently broken source SR produces a
+  250ms-cadence WARN-log torrent. Confluent Cloud's
+  documented 25 wps / 75 rps per-LSRC rate limit gets tripped
+  within seconds.
+- **`PUT /mode IMPORT` (global) is one-way from the user's POV.**
+  Once the link is on, external writes to dest's SR fail. No
+  restoration on link delete; no record of what dest's original
+  mode was.
+- **Validation failures' specific error not surfaced cleanly.** The
+  task distinguishes `bad_request` vs `not_in_import_mode` vs
+  `unexpected_response` internally, but only the broad `task_state`
+  is exposed to the admin API.
+- **Per-subject status is link-level only.** E-199 marks per-subject
+  status as a stretch goal but operators replicating thousands of
+  subjects will want it to triage individual failures.
+- **No metrics surfaced.** The internal counters
+  (`schemas_replicated`, `*_failed_*`, `cycles_observed`,
+  `compatibility_levels_replicated`) live on the task but aren't
+  emitted to Prometheus.
+
+### Medium — scale / performance
+
+- **Single shard.** The task is a `controller_locked_task`, so all
+  source GETs + dest POSTs serialize through one shard. Sharding
+  would require splitting work by subject hash + ensuring writes
+  on the same subject don't reorder.
+- **Re-list `GET /subjects` every 250ms.** At N=10000 the response
+  body is ~280KB and re-parsed every tick; that's where tail
+  latency stdev jumps from 60ms (at 1k) to 422ms (at 10k). The
+  whole-body parse is also what trips the framework's 200KB
+  oversize-allocation guard.
+- **`_seen` map grows unbounded.** One entry per (subject, version);
+  Confluent Cloud LSRC ceiling is ~80k versions — that's fine for
+  memory but slow for the diff on every tick.
+- **Controller-leader handoff re-runs catch-up.** No persistent
+  checkpoint; a new leader rediscovers the whole source inventory
+  from scratch. POSTs are idempotent (same id + same body) so
+  it's safe, just wasteful.
+
+### Low — acceptable for POC, flagged for production
+
+- HTTP Basic in plaintext only; no mTLS, no bearer, no OIDC.
+- `basic_auth_pass` is `INPUT_ONLY` in the proto — admin clients
+  can't read it back. Intentional but worth flagging in the API
+  docs.
+- The `OS::__GLOBAL`-style context handling that Confluent Cloud
+  uses for cross-context operations isn't implemented.
+- No test against an actual Confluent Cloud LSRC over real WAN
+  latency / real CC rate limits.
+
+### Tested end-to-end so far (DONE column)
+
+- 5-subject + reference test: id preservation, reference DAG order
+- Multi-version test: 50 schemas across 10 × 5 versions
+- Per-subject + global compat replication
+- Sub-second new-subject discovery in the no-load case (258ms)
+- Catch-up + tail behaviour up to N=5000
+- Empirical ceiling at N=10000 (works but trips the framework's
+  oversize-allocation guard)
 9. Wire the admin-API for per-link status reporting + add per-subject
    status as the E-199 stretch goal.
 
