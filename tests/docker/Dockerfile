@@ -266,6 +266,16 @@ RUN --mount=type=cache,id=dl-cache,target=/dl-cache /keycloak && rm /keycloak
 
 #################################
 
+# Confluent Platform Community Edition, used as a foreign Schema
+# Registry source for cross-vendor migration tests. Installed under
+# /opt/confluent.
+FROM base AS confluent-schema-registry
+
+COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/confluent-schema-registry /
+RUN --mount=type=cache,id=dl-cache,target=/dl-cache /confluent-schema-registry && rm /confluent-schema-registry
+
+#################################
+
 FROM golang AS tinygo
 
 COPY --chown=0:0 --chmod=0755 tests/docker/ducktape-deps/tinygo /
@@ -451,6 +461,7 @@ COPY --from=kgo-verifier /opt/kgo-verifier /opt/kgo-verifier
 COPY --from=byoc-mock /opt/redpanda-tests/go/byoc-mock/.rpk.managed-byoc /root/.local/bin/.rpk.managed-byoc
 COPY --from=plugin-mock /opt/redpanda-tests/go/plugin-mock/.rpk.ac-pluginmock /root/.local/bin/.rpk.ac-pluginmock
 COPY --from=keycloak /opt/keycloak/ /opt/keycloak/
+COPY --from=confluent-schema-registry /opt/confluent/ /opt/confluent/
 COPY --from=wasi-transforms /opt/transforms/ /opt/transforms/
 COPY --from=ocsf /opt/ocsf-schema/ /opt/ocsf-schema/
 COPY --from=ocsf /opt/ocsf-server/ /opt/ocsf-server/
