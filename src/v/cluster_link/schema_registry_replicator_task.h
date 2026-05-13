@@ -80,8 +80,19 @@ public:
         size_t compatibility_replication_failures{0};
         size_t modes_replicated{0};
         size_t mode_replication_failures{0};
+        /// Estimated total subjects we plan to replicate during catch-up.
+        /// Set when run_catch_up first lists the source. Used together
+        /// with schemas_replicated to give the operator a progress ratio.
+        size_t catchup_total_subjects{0};
+        /// True once run_catch_up has finished its first pass.
+        bool catchup_complete{false};
     };
     const counters& get_counters() const { return _counters; }
+
+    /// Override to surface the counters into task_state_reason so they
+    /// show up in admin v2 status reports without a proto schema change.
+    /// Format: "<state>; replicated=X/Y compat=A modes=B errors=C+D".
+    model::task_status_report get_status_report() const override;
 
 protected:
     ss::future<state_transition> run_impl(ss::abort_source&) override;

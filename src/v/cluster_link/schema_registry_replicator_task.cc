@@ -204,6 +204,7 @@ schema_registry_replicator_task::run_catch_up(ss::abort_source& as) {
     }
 
     auto all_subjects = std::move(subjects_res).assume_value();
+    _counters.catchup_total_subjects = all_subjects.size();
     auto replicated = co_await replicate_subjects(
       chunked_vector<ss::sstring>{all_subjects.copy()}, as);
     co_await replicate_compatibility(all_subjects, as);
@@ -222,6 +223,7 @@ schema_registry_replicator_task::run_catch_up(ss::abort_source& as) {
       _counters.modes_replicated);
     (void)replicated;
     _catch_up_done = true;
+    _counters.catchup_complete = true;
     co_return state_transition{
       .desired_state = model::task_state::active,
       .reason = "catch-up complete"};
@@ -493,6 +495,29 @@ ss::future<> schema_registry_replicator_task::replicate_modes(
             ++_counters.modes_replicated;
         }
     }
+}
+
+model::task_status_report
+schema_registry_replicator_task::get_status_report() const {
+    auto base = controller_locked_task::get_status_report();
+    // Append counters as a tail on task_state_reason. This avoids
+    // changing the proto for now and gives operators something
+    // useful via the existing admin v2 status path.
+    auto suffix = ssx::sformat(
+      " | replicated={}/{} compat={}/{} modes={}/{} validation_failures={} "
+      "other_failures={} cycles={} catchup_complete={}",
+      _counters.schemas_replicated,
+      _counters.catchup_total_subjects,
+      _counters.compatibility_levels_replicated,
+      _counters.compatibility_replication_failures,
+      _counters.modes_replicated,
+      _counters.mode_replication_failures,
+      _counters.schemas_failed_validation,
+      _counters.schemas_failed_other,
+      _counters.cycles_observed,
+      _counters.catchup_complete ? "yes" : "no");
+    base.task_state_reason.append(suffix.data(), suffix.size());
+    return base;
 }
 
 std::string_view
