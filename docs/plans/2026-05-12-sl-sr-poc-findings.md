@@ -1,8 +1,65 @@
 # SR Shadow Link POC — Findings
 
-Branch: `slsr/poc`. Overnight build session, working from
+Branch: `slsr/poc`. Multi-iteration build session, working from
 `docs/plans/2026-05-12-sl-sr-poc-design.md` and the implementation
 plan `docs/plans/2026-05-12-sl-sr-poc.md`.
+
+## Iteration 2 — WAN / scale / rate-limit readiness (2026-05-13)
+
+Lands 7 of the 9 items from the post-scale-test design conversation:
+
+| # | item | impact |
+|---|---|---|
+| #6 | Source per-subject mode mirroring | Closes the spec gap; source READONLY / READWRITE settings now reach dest. Dest's global stays IMPORT for the duration of the link. |
+| #7 | Counters in `get_status_report` | Operators see `replicated=X/Y compat=A/B modes=C/D … catchup_complete=yes/no` via the admin v2 status without a proto extension. |
+| #2 | Streaming iobuf-backed JSON I/O | Eliminates the `iobuf_to_string` single-allocation bottleneck. Read path: `iobuf_istream + IStreamWrapper + Document::ParseStream`. Write path: `chunked_buffer + generic_iobuf_writer::String(iobuf)` — zero-copy for the schema body. 10 MiB schemas + 75k subjects are now reachable. |
+| #4 | Bounded concurrency + token bucket | Each request acquires an `ssx::semaphore` permit + a `token_bucket<>` token before going on the wire. Per-endpoint `max_concurrent` and `target_rps` config. |
+| #5 | 429 + adaptive rate scaling | New `sr_http_errc::rate_limited`. On 429, `scale_rate(0.5)` with a 10s cooldown so a burst doesn't collapse the rate; `rate_limit_hits` + `rate_scaling_events` counters. Recovery up is a follow-up. |
+| #8 | Rate budget in admin proto | `max_concurrent_source_requests` + `target_source_requests_per_second` on `SchemaRegistrySyncOptions.ShadowViaHttpApi`. Bidirectional converter mapping. Python proto bindings regenerated. |
+| #1 | `_seen` bootstrap from dest | On task start, walk dest SR's existing inventory via HTTP to pre-populate `_seen`. Leader handoff no longer redoes minutes of source catch-up — single-digit seconds on localhost. |
+
+**Deferred to a follow-up:**
+
+| # | item | why deferred |
+|---|---|---|
+| #9 | Block external writes via `sequence_state_checker` | Cross-module design (SR ↔ cluster_link) deserves a dedicated pass. The risk it addresses (user writes to dest during shadowing) is bounded today by content-match idempotency on POSTs and the explicit IMPORT-mode toggle. |
+
+### Verification
+
+| test | result | notes |
+|---|---|---|
+| `confluent_sr_shadow_link_test` (5 subjects + reference, id preservation) | PASS | Bootstrap logs `imported 0 from dest`, full catch-up runs, replicates correctly. |
+| `confluent_sr_shadow_link_versions_test` (50 schemas + multi-version + per-subject compat) | PASS | Logs `catch-up complete: replicated 50 schemas, ..., 11 compat levels mirrored, 0 modes mirrored`. |
+| Scale matrix N ∈ {100, 500, 1000, 5000} | 4/4 PASS | All under the framework's 200KB allocation guard now (streaming I/O lifted the previous 10k allocation ceiling). |
+| 13 cluster_link unit tests | 13/13 PASS | Including the 29 new test cases from POC iteration 1. |
+
+The two flakes that persist (`RuntimeError('Unexpected files in data
+directory')`) are ducktape state-leaks between matrix variants when
+multiple test files run in one invocation. Running each test file
+in isolation passes cleanly. Worth a follow-up to add explicit
+teardown in `ConfluentSchemaRegistryService::clean_node` so multiple
+ducktape test files can chain reliably.
+
+### Code-shape decisions worth flagging
+
+- **Streaming I/O reused the existing `json::chunked_buffer` +
+  `json::generic_iobuf_writer` + `bytes/streambuf` infrastructure.**
+  No new low-level utilities; the cluster_link side is just plumbing.
+- **The bootstrap path goes via HTTP loopback** to dest SR rather than
+  reaching into pandaproxy's `sharded_store` directly. Marginal
+  performance cost (single-digit seconds on localhost for 5k schemas),
+  meaningful module-boundary cleanliness benefit. Direct in-process
+  bootstrap is the right long-term factoring once we have measurements
+  showing localhost is the bottleneck.
+- **The rate limit lives on `sr_http_client`, not the task layer.**
+  Concentrates the policy where the requests are issued; the task
+  layer's only awareness is the adaptive `scale_rate(0.5)` call on
+  429. Makes the policy testable in isolation.
+- **The actual Retry-After header isn't parsed** — `http::abstract_client::request_and_collect_response` returns just `{status,
+  body}`, no headers. The error carries a constant 1s default;
+  plumbing real header values is one of the larger follow-ups.
+
+
 
 ## Quick summary
 
