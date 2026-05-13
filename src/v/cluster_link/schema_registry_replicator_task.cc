@@ -301,6 +301,7 @@ ss::future<size_t> schema_registry_replicator_task::replicate_subjects(
         }
         auto versions_res = co_await _source_client->list_versions(subject);
         if (versions_res.has_error()) {
+            (void)maybe_handle_rate_limit(versions_res.assume_error());
             vlog(
               cllog.warn,
               "[sr-replicator] list_versions({}) failed: {}",
@@ -317,6 +318,7 @@ ss::future<size_t> schema_registry_replicator_task::replicate_subjects(
             auto schema_res = co_await _source_client->get_subject_version(
               subject, version);
             if (schema_res.has_error()) {
+                (void)maybe_handle_rate_limit(schema_res.assume_error());
                 vlog(
                   cllog.warn,
                   "[sr-replicator] get_subject_version({},{}) failed: {}",
@@ -530,6 +532,39 @@ schema_registry_replicator_task::get_status_report() const {
       _counters.catchup_complete ? "yes" : "no");
     base.task_state_reason.append(suffix.data(), suffix.size());
     return base;
+}
+
+bool schema_registry_replicator_task::maybe_handle_rate_limit(
+  const sr_http_error& err) {
+    if (err.errc != sr_http_errc::rate_limited) {
+        return false;
+    }
+    ++_counters.rate_limit_hits;
+    auto now = ss::lowres_clock::now();
+    if (
+      _last_rate_scale_at.has_value()
+      && (now - *_last_rate_scale_at) < rate_scale_cooldown) {
+        // Debounce: don't keep halving on a burst of 429s within one
+        // tick. Caller still sees the error and the request will be
+        // retried on the next tick where the slower bucket applies.
+        vlog(
+          cllog.debug,
+          "[sr-replicator] 429 (within scale cooldown) — current rps={}",
+          _source_client ? _source_client->current_target_rps() : 0);
+        return true;
+    }
+    _last_rate_scale_at = now;
+    ++_counters.rate_scaling_events;
+    if (_source_client) {
+        _source_client->scale_rate(rate_scale_down_factor);
+        vlog(
+          cllog.warn,
+          "[sr-replicator] 429 from source — scaled target rate to {} rps "
+          "(retry_after={}s)",
+          _source_client->current_target_rps(),
+          err.retry_after.has_value() ? err.retry_after->count() : 0);
+    }
+    return true;
 }
 
 std::string_view

@@ -80,6 +80,11 @@ public:
         size_t compatibility_replication_failures{0};
         size_t modes_replicated{0};
         size_t mode_replication_failures{0};
+        /// Number of HTTP 429 responses seen from the source.
+        size_t rate_limit_hits{0};
+        /// Number of times we scaled our target rate downward in
+        /// response to repeated 429s.
+        size_t rate_scaling_events{0};
         /// Estimated total subjects we plan to replicate during catch-up.
         /// Set when run_catch_up first lists the source. Used together
         /// with schemas_replicated to give the operator a progress ratio.
@@ -123,6 +128,11 @@ private:
     ss::future<> replicate_compatibility(
       const chunked_vector<ss::sstring>& subjects, ss::abort_source&);
 
+    /// Helper: when an HTTP error is a 429, debounce-call scale_rate
+    /// on the source client and bump the counters. Returns true iff
+    /// the error was a rate-limit hit.
+    bool maybe_handle_rate_limit(const sr_http_error& err);
+
     /// Mirror per-subject mode from source to destination. Global mode is
     /// deliberately not mirrored — the dest stays in IMPORT while the link
     /// is active. Logs + counts errors without aborting.
@@ -149,6 +159,14 @@ private:
     bool _dest_import_mode_set{false};
     bool _catch_up_done{false};
     size_t _tick_count{0};
+    /// Last time we scaled the source client's rate downward. Used to
+    /// debounce — a burst of 429s within one tick shouldn't cause us
+    /// to halve our rate multiple times.
+    std::optional<ss::lowres_clock::time_point> _last_rate_scale_at;
+    /// Minimum time between scale-down events.
+    static constexpr auto rate_scale_cooldown = std::chrono::seconds{10};
+    /// Multiplier applied on scale-down (0.5 = halve).
+    static constexpr double rate_scale_down_factor = 0.5;
 
     counters _counters{};
 };
