@@ -172,19 +172,23 @@ private:
       const ss::sstring& relative_path,
       bool include_content_type) const;
 
-    /// Issue a GET request and parse the JSON body, mapping HTTP errors
-    /// to sr_http_error. Caller provides a `parse` function that returns
-    /// sr_result<T> given the body as a string.
+    /// Issue a GET request and stream-parse the JSON body, mapping HTTP
+    /// errors to sr_http_error. Caller provides a `parse` function that
+    /// takes a parsed rapidjson Document and returns sr_result<T>.
+    ///
+    /// Uses iobuf_istream + rapidjson IStreamWrapper so the response body
+    /// is never bulk-copied into a contiguous string. Works for response
+    /// bodies of arbitrary size (75k subjects, 10MiB schemas).
     template<typename T, typename Parse>
     ss::future<sr_result<T>> do_get_json(const ss::sstring& path, Parse parse);
 
-    /// Issue a write request (PUT/POST) with a JSON body. Returns the raw
-    /// response body on success so the caller can parse the response if
-    /// needed.
-    ss::future<sr_result<ss::sstring>> do_write_json(
-      boost::beast::http::verb verb,
-      const ss::sstring& path,
-      const ss::sstring& body);
+    /// Issue a write request (PUT/POST) with a JSON body. The body is
+    /// passed as an iobuf and sent through the HTTP layer without ever
+    /// materializing as a single contiguous std::string allocation.
+    /// Returns the raw response body on success so the caller can parse
+    /// the response if needed.
+    ss::future<sr_result<iobuf>> do_write_json_iobuf(
+      boost::beast::http::verb verb, const ss::sstring& path, iobuf body);
 };
 
 } // namespace cluster_link

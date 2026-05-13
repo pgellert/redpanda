@@ -177,8 +177,8 @@ redpanda_cc_library(
     implementation_deps = [
         ":logger",
         "//src/v/bytes",
+        "//src/v/bytes:streambuf",
         "//src/v/http:utils",
-        "//src/v/json",
         "//src/v/net:types",
         "//src/v/utils:base64",
         "@boost//:algorithm",
@@ -189,6 +189,7 @@ redpanda_cc_library(
         "//src/v/bytes:iobuf",
         "//src/v/container:chunked_vector",
         "//src/v/http",
+        "//src/v/json",
         "//src/v/pandaproxy/schema_registry:types",
         "//src/v/utils:unresolved_address",
         "@boost//:beast",

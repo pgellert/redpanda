@@ -12,11 +12,13 @@
 #include "cluster_link/sr_http_client.h"
 
 #include "bytes/bytes.h"
+#include "bytes/streambuf.h"
 #include "cluster_link/logger.h"
 #include "http/utils.h"
+#include "json/chunked_buffer.h"
 #include "json/document.h"
-#include "json/stringbuffer.h"
-#include "json/writer.h"
+#include "json/iobuf_writer.h"
+#include "json/istreamwrapper.h"
 #include "net/types.h"
 #include "pandaproxy/schema_registry/types.h"
 #include "utils/base64.h"
@@ -81,12 +83,33 @@ sr_http_errc errc_for_status(bh::status s) {
     return sr_http_errc::bad_request;
 }
 
-/// Convert an iobuf response body to an ss::sstring.
-ss::sstring iobuf_to_string(const iobuf& buf) {
+/// Parse the iobuf as JSON without materializing the body as a single
+/// contiguous string. Wraps iobuf -> std::istream -> rapidjson IStream.
+/// The Document itself uses rapidjson's MemoryPoolAllocator which
+/// allocates in <64KB chunks, so this is safe for arbitrarily large
+/// response bodies.
+[[nodiscard]] json::Document parse_iobuf_as_json(iobuf body) {
+    iobuf_istream is(std::move(body));
+    json::IStreamWrapper rj_stream(is.istream());
+    json::Document doc;
+    doc.ParseStream(rj_stream);
+    return doc;
+}
+
+/// Format a short error-body excerpt for log messages without
+/// allocating the whole body as a single string. Truncates to the
+/// first 256 bytes which is enough to capture an SR error_code/message.
+ss::sstring excerpt_iobuf(const iobuf& buf, size_t max_bytes = 256) {
     std::string tmp;
-    tmp.reserve(buf.size_bytes());
+    size_t remaining = std::min(max_bytes, buf.size_bytes());
+    tmp.reserve(remaining);
     for (const auto& frag : buf) {
-        tmp.append(frag.get(), frag.size());
+        if (remaining == 0) {
+            break;
+        }
+        auto take = std::min(remaining, frag.size());
+        tmp.append(frag.get(), take);
+        remaining -= take;
     }
     return ss::sstring{tmp.data(), tmp.size()};
 }
@@ -256,27 +279,33 @@ sr_http_client::do_get_json(const ss::sstring& path, Parse parse) {
             "GET {} returned {}: {}",
             path,
             static_cast<unsigned>(resp.status),
-            iobuf_to_string(resp.body)));
+            excerpt_iobuf(resp.body)));
     }
-    auto body = iobuf_to_string(resp.body);
-    co_return parse(body);
+    auto doc = parse_iobuf_as_json(std::move(resp.body));
+    if (doc.HasParseError()) {
+        co_return sr_http_error{
+          .errc = sr_http_errc::unexpected_response,
+          .message = ssx::sformat(
+            "GET {} JSON parse error at offset {}",
+            path,
+            doc.GetErrorOffset())};
+    }
+    co_return parse(doc);
 }
 
-ss::future<sr_result<ss::sstring>> sr_http_client::do_write_json(
-  bh::verb verb, const ss::sstring& path, const ss::sstring& body) {
+ss::future<sr_result<iobuf>> sr_http_client::do_write_json_iobuf(
+  bh::verb verb, const ss::sstring& path, iobuf body) {
     auto req = build_request(verb, path, /*include_content_type=*/true);
     // beast/http::client doesn't auto-set Content-Length when the body is
     // streamed via request_and_collect_response, so we must set it
     // explicitly or the server reads zero bytes and complains about a
     // parse error at offset 0.
-    auto cl = ssx::sformat("{}", body.size());
+    auto cl = ssx::sformat("{}", body.size_bytes());
     req.set(bh::field::content_length, as_beast_sv(cl));
-    iobuf payload;
-    payload.append(body.data(), body.size());
     http::downloaded_response resp;
     try {
         resp = co_await client().request_and_collect_response(
-          std::move(req), std::move(payload));
+          std::move(req), std::move(body));
     } catch (...) {
         co_return sr_http_error::transport(
           ssx::sformat(
@@ -289,7 +318,7 @@ ss::future<sr_result<ss::sstring>> sr_http_client::do_write_json(
       resp.status != bh::status::ok && resp.status != bh::status::created
       && resp.status != bh::status::no_content) {
         // Detect the Schema Registry's "subject not in IMPORT mode" error.
-        auto err_body = iobuf_to_string(resp.body);
+        auto err_body = excerpt_iobuf(resp.body);
         if (
           status_is_4xx(resp.status)
           && err_body.find("import mode") != ss::sstring::npos) {
@@ -308,16 +337,15 @@ ss::future<sr_result<ss::sstring>> sr_http_client::do_write_json(
             static_cast<unsigned>(resp.status),
             err_body));
     }
-    co_return iobuf_to_string(resp.body);
+    co_return std::move(resp.body);
 }
 
 ss::future<sr_result<chunked_vector<ss::sstring>>>
 sr_http_client::list_subjects() {
     co_return co_await do_get_json<chunked_vector<ss::sstring>>(
       "/subjects",
-      [](const ss::sstring& body) -> sr_result<chunked_vector<ss::sstring>> {
-          json::Document doc;
-          if (doc.Parse(body).HasParseError() || !doc.IsArray()) {
+      [](const json::Document& doc) -> sr_result<chunked_vector<ss::sstring>> {
+          if (!doc.IsArray()) {
               return sr_http_error{
                 .errc = sr_http_errc::unexpected_response,
                 .message = "GET /subjects: expected JSON array"};
@@ -341,9 +369,9 @@ sr_http_client::list_versions(const ss::sstring& subject) {
     auto encoded = http::uri_encode(subject, http::uri_encode_slash::yes);
     auto path = ssx::sformat("/subjects/{}/versions", encoded);
     co_return co_await do_get_json<chunked_vector<int32_t>>(
-      path, [&](const ss::sstring& body) -> sr_result<chunked_vector<int32_t>> {
-          json::Document doc;
-          if (doc.Parse(body).HasParseError() || !doc.IsArray()) {
+      path,
+      [&](const json::Document& doc) -> sr_result<chunked_vector<int32_t>> {
+          if (!doc.IsArray()) {
               return sr_http_error{
                 .errc = sr_http_errc::unexpected_response,
                 .message = ssx::sformat(
@@ -368,9 +396,8 @@ ss::future<sr_result<pps::stored_schema>> sr_http_client::get_subject_version(
     auto encoded = http::uri_encode(subject, http::uri_encode_slash::yes);
     auto path = ssx::sformat("/subjects/{}/versions/{}", encoded, version);
     co_return co_await do_get_json<pps::stored_schema>(
-      path, [&](const ss::sstring& body) -> sr_result<pps::stored_schema> {
-          json::Document doc;
-          if (doc.Parse(body).HasParseError() || !doc.IsObject()) {
+      path, [&](const json::Document& doc) -> sr_result<pps::stored_schema> {
+          if (!doc.IsObject()) {
               return sr_http_error{
                 .errc = sr_http_errc::unexpected_response,
                 .message = "get_subject_version: expected JSON object"};
@@ -446,9 +473,8 @@ sr_http_client::get_mode(std::optional<ss::sstring> subject) {
                       http::uri_encode(*subject, http::uri_encode_slash::yes))
                   : ss::sstring{"/mode"};
     co_return co_await do_get_json<pps::mode>(
-      path, [&](const ss::sstring& body) -> sr_result<pps::mode> {
-          json::Document doc;
-          if (doc.Parse(body).HasParseError() || !doc.IsObject()) {
+      path, [&](const json::Document& doc) -> sr_result<pps::mode> {
+          if (!doc.IsObject()) {
               return sr_http_error{
                 .errc = sr_http_errc::unexpected_response,
                 .message = "get_mode: expected JSON object"};
@@ -478,9 +504,8 @@ sr_http_client::get_compatibility(std::optional<ss::sstring> subject) {
                   : ss::sstring{"/config"};
     co_return co_await do_get_json<pps::compatibility_level>(
       path,
-      [&](const ss::sstring& body) -> sr_result<pps::compatibility_level> {
-          json::Document doc;
-          if (doc.Parse(body).HasParseError() || !doc.IsObject()) {
+      [&](const json::Document& doc) -> sr_result<pps::compatibility_level> {
+          if (!doc.IsObject()) {
               return sr_http_error{
                 .errc = sr_http_errc::unexpected_response,
                 .message = "get_compat: expected JSON object"};
@@ -513,8 +538,16 @@ sr_http_client::put_mode(std::optional<ss::sstring> subject, pps::mode m) {
                       "/mode/{}",
                       http::uri_encode(*subject, http::uri_encode_slash::yes))
                   : ss::sstring{"/mode"};
-    auto body = ssx::sformat(R"({{"mode":"{}"}})", pps::to_string_view(m));
-    auto resp = co_await do_write_json(bh::verb::put, path, body);
+    // Small body, build into a chunked_buffer for consistency. ~30 bytes.
+    json::chunked_buffer sb;
+    json::generic_iobuf_writer<json::chunked_buffer> w{sb};
+    w.StartObject();
+    w.Key("mode");
+    auto mv = pps::to_string_view(m);
+    w.String(mv.data(), mv.size());
+    w.EndObject();
+    auto resp = co_await do_write_json_iobuf(
+      bh::verb::put, path, std::move(sb).as_iobuf());
     if (resp.has_error()) {
         co_return resp.assume_error();
     }
@@ -528,9 +561,15 @@ ss::future<sr_result<void>> sr_http_client::put_compatibility(
                       "/config/{}",
                       http::uri_encode(*subject, http::uri_encode_slash::yes))
                   : ss::sstring{"/config"};
-    auto body = ssx::sformat(
-      R"({{"compatibility":"{}"}})", pps::to_string_view(lvl));
-    auto resp = co_await do_write_json(bh::verb::put, path, body);
+    json::chunked_buffer sb;
+    json::generic_iobuf_writer<json::chunked_buffer> w{sb};
+    w.StartObject();
+    w.Key("compatibility");
+    auto cv = pps::to_string_view(lvl);
+    w.String(cv.data(), cv.size());
+    w.EndObject();
+    auto resp = co_await do_write_json_iobuf(
+      bh::verb::put, path, std::move(sb).as_iobuf());
     if (resp.has_error()) {
         co_return resp.assume_error();
     }
@@ -542,14 +581,13 @@ ss::future<sr_result<int32_t>> sr_http_client::post_schema_with_id(
     auto encoded = http::uri_encode(subject, http::uri_encode_slash::yes);
     auto path = ssx::sformat("/subjects/{}/versions", encoded);
 
-    // Build the request body with explicit id + version. This is the
-    // IMPORT-mode wire format honored by post_subject_versions.h.
-    //
-    // Note: we intentionally use rapidjson for the schema string field so
-    // that the inlined schema body is correctly JSON-escaped (avro/json
-    // schemas contain embedded quotes).
-    json::StringBuffer sb;
-    json::Writer<json::StringBuffer> w{sb};
+    // Build the request body into a chunked_buffer so the body never
+    // becomes a single contiguous allocation. The schema_definition
+    // raw_string is itself an iobuf — using generic_iobuf_writer's
+    // String(iobuf) overload streams it in fragment-wise. This is the
+    // critical path for 10 MiB schemas.
+    json::chunked_buffer sb;
+    json::generic_iobuf_writer<json::chunked_buffer> w{sb};
     w.StartObject();
     w.Key("id");
     w.Int(s.id());
@@ -558,18 +596,8 @@ ss::future<sr_result<int32_t>> sr_http_client::post_schema_with_id(
     w.Key("schemaType");
     auto type_sv = pps::to_string_view(s.schema.type());
     w.String(type_sv.data(), type_sv.size());
-    {
-        // Render the raw schema body as a string. The raw is an iobuf; copy
-        // it into a temporary std::string for rapidjson.
-        std::string raw;
-        const auto& def_iobuf = s.schema.def().raw()();
-        raw.reserve(def_iobuf.size_bytes());
-        for (const auto& frag : def_iobuf) {
-            raw.append(frag.get(), frag.size());
-        }
-        w.Key("schema");
-        w.String(raw.data(), raw.size());
-    }
+    w.Key("schema");
+    w.String(s.schema.def().raw()()); // iobuf overload, zero-copy
     if (!s.schema.def().refs().empty()) {
         w.Key("references");
         w.StartArray();
@@ -588,16 +616,16 @@ ss::future<sr_result<int32_t>> sr_http_client::post_schema_with_id(
     }
     w.EndObject();
 
-    auto resp = co_await do_write_json(
-      bh::verb::post, path, ss::sstring{sb.GetString(), sb.GetSize()});
+    auto resp = co_await do_write_json_iobuf(
+      bh::verb::post, path, std::move(sb).as_iobuf());
     if (resp.has_error()) {
         co_return resp.assume_error();
     }
-    // Response shape: {"id": <id>}
-    json::Document doc;
-    if (
-      doc.Parse(resp.assume_value().data()).HasParseError()
-      || !doc.IsObject()) {
+    // Response shape: {"id": <id>}. Stream-parse instead of bulk copy
+    // (irrelevant for size — response is ~10 bytes — but consistent
+    // with the rest of the client).
+    auto doc = parse_iobuf_as_json(std::move(resp).assume_value());
+    if (doc.HasParseError() || !doc.IsObject()) {
         co_return sr_http_error{
           .errc = sr_http_errc::unexpected_response,
           .message = "post_schema_with_id: expected JSON object"};
