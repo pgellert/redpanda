@@ -189,10 +189,66 @@ schema_registry_replicator_task::run_impl(ss::abort_source& as) {
           .reason = "sr replication inactive (no source url / unset config)"};
     }
     ++_tick_count;
+    if (!_seen_bootstrap_done) {
+        co_await bootstrap_seen_from_dest();
+        _seen_bootstrap_done = true;
+    }
     if (!_catch_up_done) {
         co_return co_await run_catch_up(as);
     }
     co_return co_await run_tail(as);
+}
+
+ss::future<> schema_registry_replicator_task::bootstrap_seen_from_dest() {
+    // Walk the destination's existing inventory so a new leader after
+    // a handoff doesn't redo the source-side catch-up. Best-effort:
+    // if the dest can't be reached yet, fall through to full catch-up.
+    auto t0 = ss::lowres_clock::now();
+    auto subjects_res = co_await _dest_client->list_subjects();
+    if (subjects_res.has_error()) {
+        vlog(
+          cllog.debug,
+          "[sr-replicator] bootstrap_seen: dest list_subjects failed: {}; "
+          "falling back to full catch-up",
+          subjects_res.assume_error().message);
+        co_return;
+    }
+    size_t versions_total = 0;
+    auto all_subjects = std::move(subjects_res).assume_value();
+    for (const auto& subject : all_subjects) {
+        auto versions_res = co_await _dest_client->list_versions(subject);
+        if (versions_res.has_error()) {
+            continue;
+        }
+        auto& bucket = _seen[subject];
+        for (auto v : versions_res.assume_value()) {
+            // We need the id to make _seen complete. Issue a
+            // get_subject_version against the dest to read it.
+            auto schema_res = co_await _dest_client->get_subject_version(
+              subject, v);
+            if (schema_res.has_error()) {
+                continue;
+            }
+            bucket.version_to_id.try_emplace(
+              v, pps::schema_id{schema_res.assume_value().id()});
+            ++versions_total;
+        }
+    }
+    auto elapsed = ss::lowres_clock::now() - t0;
+    vlog(
+      cllog.info,
+      "[sr-replicator] bootstrap_seen: imported {} (subject, version) tuples "
+      "from dest in {}ms; skipping full catch-up if non-empty",
+      versions_total,
+      std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+    if (versions_total > 0) {
+        // Mark catch-up as done so we skip the source-side rescan.
+        // The tail loop still discovers anything new on source.
+        _catch_up_done = true;
+        _counters.catchup_complete = true;
+        _counters.subjects_synchronized = _seen.size();
+        _counters.schemas_replicated = versions_total;
+    }
 }
 
 ss::future<task::state_transition>

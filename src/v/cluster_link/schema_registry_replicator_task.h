@@ -107,6 +107,17 @@ private:
     /// Returns false if the config indicates the task should be inactive.
     bool maybe_rebuild_clients();
 
+    /// On task start, walk the *destination* SR to learn what's already
+    /// been replicated and pre-populate _seen.version_to_id. Means a
+    /// controller-leader handoff doesn't re-run the source-side
+    /// catch-up from scratch — the new leader picks up where the old
+    /// one left off in a handful of localhost HTTP round trips.
+    ///
+    /// Best-effort: if bootstrap fails (e.g. dest SR not yet up), we
+    /// silently fall through to full catch-up.
+    ss::future<> bootstrap_seen_from_dest();
+    bool _seen_bootstrap_done{false};
+
     /// Catch-up: pull every subject, write every (sub, ver) we haven't
     /// already seen. Returns the desired terminal state for this tick.
     ss::future<state_transition> run_catch_up(ss::abort_source&);
