@@ -838,6 +838,8 @@ class SchemaRegistrySyncOptions(google.protobuf.message.Message):
         TAIL_INTERVAL_FIELD_NUMBER: builtins.int
         VERSION_REVISIT_INTERVAL_FIELD_NUMBER: builtins.int
         DESTINATION_URL_FIELD_NUMBER: builtins.int
+        MAX_CONCURRENT_SOURCE_REQUESTS_FIELD_NUMBER: builtins.int
+        TARGET_SOURCE_REQUESTS_PER_SECOND_FIELD_NUMBER: builtins.int
         source_url: builtins.str
         'Source SR base URL, including scheme + host + port, e.g.\n        "http://confluent-sr:8081" or "http://lsrc.cflt.cloud".\n        '
         basic_auth_user: builtins.str
@@ -848,6 +850,10 @@ class SchemaRegistrySyncOptions(google.protobuf.message.Message):
         'RE2 regex of subjects to include. Defaults to ".*" if unset.'
         destination_url: builtins.str
         'Optional override of the destination SR URL. If empty,\n        defaults to http://127.0.0.1:8081 (the local Redpanda SR).\n        Used in tests and unusual topologies; typical deployments\n        leave this unset.\n        '
+        max_concurrent_source_requests: builtins.int
+        'Maximum concurrent HTTP requests in flight against the source\n        SR. Sized to the bandwidth-delay product — at 300ms RTT and\n        10 RPS the natural concurrency is ~3. Defaults to 1 (purely\n        serial) if unset.\n        '
+        target_source_requests_per_second: builtins.int
+        "Target request rate (requests/second) at which the\n        replicator will pull from the source SR. Confluent Cloud's\n        documented limit is 75 reads/s + 25 writes/s per LSRC shared\n        across all clients; operators should set a *share* here\n        (e.g. 10) to leave room for production traffic. 0 means\n        unlimited; defaults to 0 if unset.\n        "
 
         @property
         def tail_interval(self) -> google.protobuf.duration_pb2.Duration:
@@ -861,13 +867,13 @@ class SchemaRegistrySyncOptions(google.protobuf.message.Message):
             for new versions and config drift. Defaults to 5s.
             """
 
-        def __init__(self, *, source_url: builtins.str=..., basic_auth_user: builtins.str=..., basic_auth_pass: builtins.str=..., include_regex: builtins.str=..., tail_interval: google.protobuf.duration_pb2.Duration | None=..., version_revisit_interval: google.protobuf.duration_pb2.Duration | None=..., destination_url: builtins.str=...) -> None:
+        def __init__(self, *, source_url: builtins.str=..., basic_auth_user: builtins.str=..., basic_auth_pass: builtins.str=..., include_regex: builtins.str=..., tail_interval: google.protobuf.duration_pb2.Duration | None=..., version_revisit_interval: google.protobuf.duration_pb2.Duration | None=..., destination_url: builtins.str=..., max_concurrent_source_requests: builtins.int=..., target_source_requests_per_second: builtins.int=...) -> None:
             ...
 
         def HasField(self, field_name: typing.Literal['tail_interval', b'tail_interval', 'version_revisit_interval', b'version_revisit_interval']) -> builtins.bool:
             ...
 
-        def ClearField(self, field_name: typing.Literal['basic_auth_pass', b'basic_auth_pass', 'basic_auth_user', b'basic_auth_user', 'destination_url', b'destination_url', 'include_regex', b'include_regex', 'source_url', b'source_url', 'tail_interval', b'tail_interval', 'version_revisit_interval', b'version_revisit_interval']) -> None:
+        def ClearField(self, field_name: typing.Literal['basic_auth_pass', b'basic_auth_pass', 'basic_auth_user', b'basic_auth_user', 'destination_url', b'destination_url', 'include_regex', b'include_regex', 'max_concurrent_source_requests', b'max_concurrent_source_requests', 'source_url', b'source_url', 'tail_interval', b'tail_interval', 'target_source_requests_per_second', b'target_source_requests_per_second', 'version_revisit_interval', b'version_revisit_interval']) -> None:
             ...
     SHADOW_SCHEMA_REGISTRY_TOPIC_FIELD_NUMBER: builtins.int
     SHADOW_VIA_HTTP_API_FIELD_NUMBER: builtins.int

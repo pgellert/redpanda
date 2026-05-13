@@ -130,6 +130,18 @@ bool schema_registry_replicator_task::maybe_rebuild_clients() {
         }
         src_ep->basic_auth_user = _active_http_cfg->basic_auth_user;
         src_ep->basic_auth_pass = _active_http_cfg->basic_auth_pass;
+        src_ep->max_concurrent
+          = _active_http_cfg->max_concurrent_source_requests.value_or(1);
+        src_ep->target_rps
+          = _active_http_cfg->target_source_requests_per_second.value_or(0);
+        vlog(
+          cllog.info,
+          "[sr-replicator] source client: {}:{} (max_concurrent={}, "
+          "target_rps={})",
+          src_ep->addr.host(),
+          src_ep->addr.port(),
+          src_ep->max_concurrent,
+          src_ep->target_rps);
         _source_client = std::make_unique<sr_http_client>(std::move(*src_ep));
     }
     if (!_dest_client) {

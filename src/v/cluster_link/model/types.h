@@ -551,6 +551,8 @@ struct schema_registry_sync_config
         std::optional<ss::lowres_clock::duration> tail_interval;
         std::optional<ss::lowres_clock::duration> version_revisit_interval;
         std::optional<ss::sstring> destination_url;
+        std::optional<size_t> max_concurrent_source_requests;
+        std::optional<size_t> target_source_requests_per_second;
 
         static constexpr auto default_tail_interval = std::chrono::milliseconds{
           250};
@@ -576,7 +578,9 @@ struct schema_registry_sync_config
               include_regex,
               tail_interval,
               version_revisit_interval,
-              destination_url);
+              destination_url,
+              max_concurrent_source_requests,
+              target_source_requests_per_second);
         }
 
         fmt::iterator format_to(fmt::iterator) const;

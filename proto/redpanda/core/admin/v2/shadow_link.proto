@@ -439,6 +439,18 @@ message SchemaRegistrySyncOptions {
         // Used in tests and unusual topologies; typical deployments
         // leave this unset.
         string destination_url = 7;
+        // Maximum concurrent HTTP requests in flight against the source
+        // SR. Sized to the bandwidth-delay product — at 300ms RTT and
+        // 10 RPS the natural concurrency is ~3. Defaults to 1 (purely
+        // serial) if unset.
+        int32 max_concurrent_source_requests = 8;
+        // Target request rate (requests/second) at which the
+        // replicator will pull from the source SR. Confluent Cloud's
+        // documented limit is 75 reads/s + 25 writes/s per LSRC shared
+        // across all clients; operators should set a *share* here
+        // (e.g. 10) to leave room for production traffic. 0 means
+        // unlimited; defaults to 0 if unset.
+        int32 target_source_requests_per_second = 9;
     }
     // Schema Registry shadowing mode.
     oneof schema_registry_shadowing_mode {

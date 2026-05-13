@@ -225,6 +225,14 @@ create_schema_registry_sync_config(
           if (!v.get_destination_url().empty()) {
               cfg.destination_url = v.get_destination_url();
           }
+          if (v.get_max_concurrent_source_requests() > 0) {
+              cfg.max_concurrent_source_requests = static_cast<size_t>(
+                v.get_max_concurrent_source_requests());
+          }
+          if (v.get_target_source_requests_per_second() > 0) {
+              cfg.target_source_requests_per_second = static_cast<size_t>(
+                v.get_target_source_requests_per_second());
+          }
           config.sync_schema_registry_topic_mode = std::move(cfg);
       },
       [&config](std::monostate) {
@@ -1055,6 +1063,14 @@ schema_registry_sync_options create_schema_registry_sync_options(
               }
               if (v.destination_url.has_value()) {
                   proto_v.set_destination_url(ss::sstring{*v.destination_url});
+              }
+              if (v.max_concurrent_source_requests.has_value()) {
+                  proto_v.set_max_concurrent_source_requests(
+                    static_cast<int32_t>(*v.max_concurrent_source_requests));
+              }
+              if (v.target_source_requests_per_second.has_value()) {
+                  proto_v.set_target_source_requests_per_second(
+                    static_cast<int32_t>(*v.target_source_requests_per_second));
               }
               options.set_shadow_via_http_api(std::move(proto_v));
           });
