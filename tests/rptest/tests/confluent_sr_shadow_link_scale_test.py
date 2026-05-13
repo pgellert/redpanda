@@ -230,7 +230,7 @@ class ConfluentSrShadowLinkScaleTest(RedpandaTest):
         return latencies
 
     @cluster(num_nodes=3)
-    @matrix(n_schemas=[100, 500, 1000])
+    @matrix(n_schemas=[100, 500, 1000, 10000])
     def test_catchup_and_tail_latency_scale(self, n_schemas: int):
         """
         Pre-seed N subjects on Confluent, time catch-up against the
