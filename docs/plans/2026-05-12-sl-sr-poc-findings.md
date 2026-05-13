@@ -204,6 +204,51 @@ worth recording but not acting on tonight:
 - **Build warnings.** No `-Werror` failures observed but a clean
   pass with `--config=clang-tidy` was not attempted.
 
+## Scale + tail-stability characterization (2026-05-13)
+
+`tests/rptest/tests/confluent_sr_shadow_link_scale_test.py` — 3/3 PASS.
+
+Each variant pre-seeds N subjects on Confluent SR (1 version each),
+times catch-up on the destination, then runs 20 fresh post-catch-up
+registrations and captures the latency distribution.
+
+Single-broker dest, in-VM docker harness:
+
+| N    | seed time | catch-up | schemas/s |
+|------|-----------|----------|-----------|
+| 100  | 0.5s      | 0.81s    | 123       |
+| 500  | 1.5s      | 2.82s    | 177       |
+| 1000 | 2.5s      | 4.84s    | 206       |
+
+| N    | min   | p50   | p95   | max   | mean  | stdev |
+|------|-------|-------|-------|-------|-------|-------|
+| 100  | 214ms | 267ms | 321ms | 322ms | 263ms | 29ms  |
+| 500  | 218ms | 271ms | 278ms | 329ms | 265ms | 26ms  |
+| 1000 | 222ms | 277ms | 285ms | 444ms | 268ms | 49ms  |
+
+20 fresh-subject probes per row. The 250ms tail interval is the
+floor; the actual replication work per tick is small.
+
+Observations:
+
+- **Catch-up throughput improves with N**, not the reverse — 123 →
+  177 → 206 schemas/s as we scale from 100 → 1000. The
+  per-tick fixed costs (list subjects, IMPORT mode, compat) amortize
+  over more schemas. At 1000 we're at roughly 5ms per schema.
+- **Tail discovery latency is flat across 10x scale.** p50 only
+  shifts 267 → 277ms. The replicator's actual work is bounded by
+  the diff between source and seen sets, which is O(1) when one
+  new subject lands per tick — independent of total subject count.
+- **No ceiling observed** in the 100-to-1000 range on a
+  single-broker docker dest. The max latency spike at N=1000
+  (444ms, one out of 20 samples) hints at where variance starts
+  to creep in, but it's still under the 1s discovery contract.
+- **Test-infra note**: matrix runs need Confluent SR on a
+  non-default port (the scale test uses 18081). 8081 is shared
+  between Redpanda's own SR and Confluent's; without separation
+  the kernel can hold a TIME_WAIT binding into the next matrix
+  variant when ducktape recycles containers.
+
 ## End-to-end test result (2026-05-13 morning)
 
 `tests/rptest/tests/confluent_sr_shadow_link_test.py` — PASS.
