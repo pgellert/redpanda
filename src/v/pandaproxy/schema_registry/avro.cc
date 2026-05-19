@@ -320,6 +320,41 @@ void unqualify_type_reference(json::Value& val, sanitize_context& ctx) {
     }
 }
 
+// `{"type":"<primitive>"}` is equivalent to `"<primitive>"` per the Avro
+// Parsing Canonical Form. Collapses only single-member objects so
+// primitives with extra attributes (e.g. logicalType, connect.parameters)
+// are preserved.
+bool is_collapsible_primitive_object(const json::Value::Object& o) {
+    if (o.MemberCount() != 1) {
+        return false;
+    }
+    auto it = o.FindMember("type");
+    if (it == o.MemberEnd() || !it->value.IsString()) {
+        return false;
+    }
+    std::string_view t{it->value.GetString(), it->value.GetStringLength()};
+    return string_switch<bool>(t)
+      .match("null", true)
+      .match("boolean", true)
+      .match("int", true)
+      .match("long", true)
+      .match("float", true)
+      .match("double", true)
+      .match("bytes", true)
+      .match("string", true)
+      .default_match(false);
+}
+
+void maybe_collapse_to_primitive(json::Value& v, sanitize_context& ctx) {
+    if (!is_collapsible_primitive_object(v.GetObject())) {
+        return;
+    }
+    auto& type_v = v.GetObject().FindMember("type")->value;
+    // SetString frees v's storage (which backs type_v); copy first.
+    ss::sstring type_name{type_v.GetString(), type_v.GetStringLength()};
+    v.SetString(type_name.data(), type_name.length(), ctx.alloc);
+}
+
 result<void>
 sanitize_union_symbol_name(json::Value& name, sanitize_context& ctx) {
     // A name should have the leading dot stripped iff it's the only one
@@ -370,30 +405,38 @@ result<void> sanitize_avro_type(
         return outcome::success();
     }
 
+    std::sort(o.begin(), o.end(), member_sorter<object_type::complex>{});
+
     switch (type.value()) {
     case avro::AVRO_ARRAY:
-    case avro::AVRO_ENUM:
-    case avro::AVRO_FIXED:
-    case avro::AVRO_MAP:
-        std::sort(o.begin(), o.end(), member_sorter<object_type::complex>{});
-        for (auto& i : o) {
-            if (auto res = sanitize(i.value, ctx); !res.has_value()) {
+        // Only recurse into known schema-bearing children; other members
+        // are opaque user metadata that the primitive-collapse pass would
+        // otherwise corrupt.
+        if (auto it = o.FindMember("items"); it != o.MemberEnd()) {
+            if (auto res = sanitize(it->value, ctx); !res.has_value()) {
                 return res;
             }
-            if (i.value.IsString()) {
-                std::string_view member_name{
-                  i.name.GetString(), i.name.GetStringLength()};
-                if (member_name == "items" || member_name == "values") {
-                    unqualify_type_reference(i.value, ctx);
-                }
+            if (it->value.IsString()) {
+                unqualify_type_reference(it->value, ctx);
             }
         }
         break;
-    case avro::AVRO_RECORD: {
-        auto res = sanitize_record(o, ctx);
-        std::sort(o.begin(), o.end(), member_sorter<object_type::complex>{});
-        return res;
-    }
+    case avro::AVRO_MAP:
+        if (auto it = o.FindMember("values"); it != o.MemberEnd()) {
+            if (auto res = sanitize(it->value, ctx); !res.has_value()) {
+                return res;
+            }
+            if (it->value.IsString()) {
+                unqualify_type_reference(it->value, ctx);
+            }
+        }
+        break;
+    case avro::AVRO_ENUM:
+    case avro::AVRO_FIXED:
+        // No schema-bearing children.
+        break;
+    case avro::AVRO_RECORD:
+        return sanitize_record(o, ctx);
     default:
         break;
     }
@@ -404,7 +447,11 @@ result<void> sanitize(json::Value& v, sanitize_context& ctx) {
     switch (v.GetType()) {
     case json::Type::kObjectType: {
         auto o = v.GetObject();
-        return sanitize(o, ctx);
+        if (auto res = sanitize(o, ctx); res.has_error()) {
+            return res;
+        }
+        maybe_collapse_to_primitive(v, ctx);
+        return outcome::success();
     }
     case json::Type::kArrayType: {
         auto a = v.GetArray();

@@ -442,3 +442,140 @@ BOOST_AUTO_TEST_CASE(test_sanitize_avro_no_normalize_without_namespace) {
       pps::schema_type::avro};
     BOOST_REQUIRE_EQUAL(sanitized, expected);
 }
+
+// CORE-16247 regression: nested `{"type":"<primitive>"}` collapses to bare
+// form. Covers all 8 Avro primitives across record-field, array-items,
+// map-values, and union-branch positions.
+const pps::schema_definition primitive_object_forms{
+  R"({"type":"record","name":"R","fields":[)"
+  R"({"name":"f_null","type":{"type":"null"}},)"
+  R"({"name":"f_bool","type":{"type":"boolean"}},)"
+  R"({"name":"f_int","type":{"type":"int"}},)"
+  R"({"name":"f_long","type":{"type":"long"}},)"
+  R"({"name":"f_float","type":{"type":"float"}},)"
+  R"({"name":"f_double","type":{"type":"double"}},)"
+  R"({"name":"f_bytes","type":{"type":"bytes"}},)"
+  R"({"name":"f_string","type":{"type":"string"}},)"
+  R"({"name":"f_array","type":{"type":"array","items":{"type":"string"}}},)"
+  R"({"name":"f_map","type":{"type":"map","values":{"type":"int"}}},)"
+  R"({"name":"f_union","type":["null",{"type":"string"}]})"
+  R"(]})",
+  pps::schema_type::avro};
+
+const pps::schema_definition primitive_object_forms_sanitized{
+  R"({"type":"record","name":"R","fields":[)"
+  R"({"name":"f_null","type":"null"},)"
+  R"({"name":"f_bool","type":"boolean"},)"
+  R"({"name":"f_int","type":"int"},)"
+  R"({"name":"f_long","type":"long"},)"
+  R"({"name":"f_float","type":"float"},)"
+  R"({"name":"f_double","type":"double"},)"
+  R"({"name":"f_bytes","type":"bytes"},)"
+  R"({"name":"f_string","type":"string"},)"
+  R"({"name":"f_array","type":{"type":"array","items":"string"}},)"
+  R"({"name":"f_map","type":{"type":"map","values":"int"}},)"
+  R"({"name":"f_union","type":["null","string"]})"
+  R"(]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_sanitize_avro_collapse_primitive_object_form) {
+    BOOST_REQUIRE_EQUAL(
+      pps::sanitize_avro_schema_definition(primitive_object_forms.share())
+        .value(),
+      primitive_object_forms_sanitized);
+}
+
+// CORE-16246 regression: the verbose and bare forms reported in the ticket
+// must canonicalize to the same definition.
+const pps::schema_definition core_16246_verbose{
+  R"({"type":"record","name":"TestRecord","namespace":"test","fields":[)"
+  R"({"name":"tags","type":["null",{"type":"array","items":{"type":"string"}}],"default":null})"
+  R"(]})",
+  pps::schema_type::avro};
+
+const pps::schema_definition core_16246_bare{
+  R"({"type":"record","name":"TestRecord","namespace":"test","fields":[)"
+  R"({"name":"tags","type":["null",{"type":"array","items":"string"}],"default":null})"
+  R"(]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_sanitize_avro_verbose_and_bare_equivalent) {
+    BOOST_REQUIRE_EQUAL(
+      pps::sanitize_avro_schema_definition(core_16246_verbose.share()).value(),
+      pps::sanitize_avro_schema_definition(core_16246_bare.share()).value());
+}
+
+// A primitive object carrying additional attributes (e.g. logicalType) is
+// NOT a primitive simple-form equivalent and must be preserved.
+const pps::schema_definition logical_type_preserved{
+  R"({"type":"record","name":"R","fields":[)"
+  R"({"name":"t","type":{"type":"long","logicalType":"timestamp-millis"}})"
+  R"(]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_sanitize_avro_logical_type_preserved) {
+    BOOST_REQUIRE_EQUAL(
+      pps::sanitize_avro_schema_definition(logical_type_preserved.share())
+        .value(),
+      logical_type_preserved);
+}
+
+// A `{"type":"<non-primitive>"}` object (here a named-type reference) is
+// not equivalent to the bare string form and must be preserved.
+const pps::schema_definition named_ref_object_form{
+  R"({"type":"record","name":"Outer","fields":[)"
+  R"({"name":"f","type":{"type":"Outer"}})"
+  R"(]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_sanitize_avro_named_ref_object_not_collapsed) {
+    BOOST_REQUIRE_EQUAL(
+      pps::sanitize_avro_schema_definition(named_ref_object_form.share())
+        .value(),
+      named_ref_object_form);
+}
+
+// A `{"type":[...]}` (a union in the type position) is single-member but
+// its type value is not a string, so the collapser must skip it.
+const pps::schema_definition union_in_type_field{
+  R"({"type":["null","string"]})", pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_sanitize_avro_union_in_type_not_collapsed) {
+    BOOST_REQUIRE_EQUAL(
+      pps::sanitize_avro_schema_definition(union_in_type_field.share()).value(),
+      union_in_type_field);
+}
+
+// Sanitization is idempotent: a canonical schema must be a fixed point.
+BOOST_AUTO_TEST_CASE(test_sanitize_avro_idempotent) {
+    auto once = pps::sanitize_avro_schema_definition(
+                  primitive_object_forms.share())
+                  .value();
+    auto twice = pps::sanitize_avro_schema_definition(once.share()).value();
+    BOOST_REQUIRE_EQUAL(once, twice);
+}
+
+// Custom metadata members on array/map/enum/fixed schemas may contain
+// arbitrary JSON values, including ones that incidentally have the shape of
+// a primitive schema (e.g. {"type":"int"}). Sanitize must not recurse into
+// such custom members, or the primitive-object collapse would corrupt them.
+const pps::schema_definition custom_metadata_in_complex_types{
+  R"({"type":"record","name":"R","fields":[)"
+  R"({"name":"a","type":{"type":"array","items":"string",)"
+  R"("custom":{"type":"int"}}},)"
+  R"({"name":"m","type":{"type":"map","values":"string",)"
+  R"("custom":{"type":"int"}}},)"
+  R"({"name":"e","type":{"type":"enum","name":"E","symbols":["x","y"],)"
+  R"("custom":{"type":"int"}}},)"
+  R"({"name":"x","type":{"type":"fixed","name":"F","size":4,)"
+  R"("custom":{"type":"int"}}}]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(
+  test_sanitize_avro_preserves_complex_type_custom_metadata) {
+    BOOST_REQUIRE_EQUAL(
+      pps::sanitize_avro_schema_definition(
+        custom_metadata_in_complex_types.share())
+        .value(),
+      custom_metadata_in_complex_types);
+}
