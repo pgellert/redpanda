@@ -781,6 +781,77 @@ make_avro_schema_definition(schema_getter& store, subject_schema schema) {
           fmt::format("Invalid schema {}", ex->what())})));
 }
 
+namespace {
+
+// Aliases are semantically a set of strings; sort and dedupe in place.
+// Non-string elements are invalid Avro and left alone — sorting them via
+// GetString() would hit a RapidJSON assertion or UB.
+void sort_aliases(json::Value::Object& o) {
+    auto it = o.FindMember("aliases");
+    if (it == o.MemberEnd() || !it->value.IsArray()) {
+        return;
+    }
+    auto& aliases = it->value;
+    for (const auto& v : aliases.GetArray()) {
+        if (!v.IsString()) {
+            return;
+        }
+    }
+    auto sv = [](const json::Value& v) {
+        return std::string_view{v.GetString(), v.GetStringLength()};
+    };
+    std::sort(
+      aliases.Begin(),
+      aliases.End(),
+      [&](const json::Value& l, const json::Value& r) {
+          return sv(l) < sv(r);
+      });
+    auto new_end = std::unique(
+      aliases.Begin(),
+      aliases.End(),
+      [&](const json::Value& l, const json::Value& r) {
+          return sv(l) == sv(r);
+      });
+    aliases.Erase(new_end, aliases.End());
+}
+
+// Walk the schema portion of the JSON tree, applying normalize-only
+// transforms to each schema-level object. The walker descends only into
+// members that the Avro spec defines as schema-bearing: `type`, `items`,
+// `values`, `fields`, and union branches (arrays under `type`). Arbitrary
+// user metadata members are not visited so we cannot accidentally normalize
+// data that happens to share a key name with a schema attribute (e.g. a
+// custom `aliases` array carrying non-string values).
+void apply_normalize_passes(json::Value& v) {
+    if (v.IsArray()) {
+        // Union branches or a record's `fields` array — each element is a
+        // schema or field-level object.
+        for (auto& e : v.GetArray()) {
+            apply_normalize_passes(e);
+        }
+        return;
+    }
+    if (!v.IsObject()) {
+        return;
+    }
+    auto o = v.GetObject();
+    sort_aliases(o);
+    if (auto it = o.FindMember("type"); it != o.MemberEnd()) {
+        apply_normalize_passes(it->value);
+    }
+    if (auto it = o.FindMember("items"); it != o.MemberEnd()) {
+        apply_normalize_passes(it->value);
+    }
+    if (auto it = o.FindMember("values"); it != o.MemberEnd()) {
+        apply_normalize_passes(it->value);
+    }
+    if (auto it = o.FindMember("fields"); it != o.MemberEnd()) {
+        apply_normalize_passes(it->value);
+    }
+}
+
+} // namespace
+
 result<schema_definition>
 sanitize_avro_schema_definition(schema_definition def) {
     json::Document doc;
@@ -828,6 +899,43 @@ sanitize_avro_schema_definition(schema_definition def) {
       std::move(meta)};
 }
 
+result<schema_definition>
+normalize_avro_schema_definition(schema_definition def) {
+    auto sanitized = sanitize_avro_schema_definition(std::move(def));
+    if (sanitized.has_error()) {
+        return sanitized;
+    }
+    auto sd = std::move(sanitized).assume_value();
+
+    json::Document doc;
+    constexpr auto flags = rapidjson::kParseDefaultFlags
+                           | rapidjson::kParseStopWhenDoneFlag;
+    json::chunked_input_stream is{sd.shared_raw()()};
+    doc.ParseStream<flags>(is);
+    if (doc.HasParseError()) {
+        return error_info{
+          error_code::schema_invalid,
+          fmt::format(
+            "Invalid schema: {} at offset {}",
+            rapidjson::GetParseError_En(doc.GetParseError()),
+            doc.GetErrorOffset())};
+    }
+
+    apply_normalize_passes(doc);
+
+    auto [_, type, refs, meta] = std::move(sd).destructure();
+    json::chunked_buffer buf;
+    json::Writer<json::chunked_buffer> w{buf};
+    if (!doc.Accept(w)) {
+        return error_info{error_code::schema_invalid, "Invalid schema"};
+    }
+    return schema_definition{
+      schema_definition::raw_string{std::move(buf).as_iobuf()},
+      schema_type::avro,
+      std::move(refs),
+      std::move(meta)};
+}
+
 ss::future<subject_schema> make_canonical_avro_schema(
   schema_getter&, subject_schema unparsed_schema, normalize norm) {
     auto [sub, unparsed] = std::move(unparsed_schema).destructure();
@@ -840,9 +948,9 @@ ss::future<subject_schema> make_canonical_avro_schema(
       std::move(def), type, std::move(refs), std::move(meta)};
     // TODO: Check references
     // co_await collect_schema(store, {}, sub, {sub, schema.share()});
-    co_return subject_schema{
-      std::move(sub),
-      sanitize_avro_schema_definition(std::move(schema)).value()};
+    auto canonical = norm ? normalize_avro_schema_definition(std::move(schema))
+                          : sanitize_avro_schema_definition(std::move(schema));
+    co_return subject_schema{std::move(sub), std::move(canonical).value()};
 }
 
 ss::future<schema_definition> format_avro_schema_definition(

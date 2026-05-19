@@ -579,3 +579,64 @@ BOOST_AUTO_TEST_CASE(
         .value(),
       custom_metadata_in_complex_types);
 }
+
+// When normalize is requested, aliases at both schema level and field level
+// are sorted lexicographically and deduplicated.
+const pps::schema_definition aliases_unsorted{
+  R"({"type":"record","name":"R","aliases":["c","a","b","a"],"fields":[)"
+  R"({"name":"f","type":"string","aliases":["z","y","z"]})"
+  R"(]})",
+  pps::schema_type::avro};
+
+const pps::schema_definition aliases_normalized{
+  R"({"type":"record","name":"R","fields":[)"
+  R"({"name":"f","type":"string","aliases":["y","z"]})"
+  R"(],"aliases":["a","b","c"]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_normalize_avro_sorts_and_dedupes_aliases) {
+    BOOST_REQUIRE_EQUAL(
+      pps::normalize_avro_schema_definition(aliases_unsorted.share()).value(),
+      aliases_normalized);
+}
+
+// Without normalize, sanitize leaves alias contents in their submitted order
+// (including duplicates).
+const pps::schema_definition aliases_unsorted_sanitized{
+  R"({"type":"record","name":"R","fields":[)"
+  R"({"name":"f","type":"string","aliases":["z","y","z"]})"
+  R"(],"aliases":["c","a","b","a"]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_sanitize_avro_preserves_alias_order) {
+    BOOST_REQUIRE_EQUAL(
+      pps::sanitize_avro_schema_definition(aliases_unsorted.share()).value(),
+      aliases_unsorted_sanitized);
+}
+
+// Normalize is idempotent: re-normalizing already-normalized output is a
+// fixed point.
+BOOST_AUTO_TEST_CASE(test_normalize_avro_idempotent) {
+    auto once
+      = pps::normalize_avro_schema_definition(aliases_unsorted.share()).value();
+    auto twice = pps::normalize_avro_schema_definition(once.share()).value();
+    BOOST_REQUIRE_EQUAL(once, twice);
+}
+
+// Non-string alias elements are invalid Avro, but normalize must not crash
+// or hit RapidJSON UB on them; the array is preserved verbatim so that
+// downstream validation produces a precise error.
+const pps::schema_definition non_string_aliases_input{
+  R"({"type":"record","name":"R","aliases":[1,2,3],"fields":[]})",
+  pps::schema_type::avro};
+
+const pps::schema_definition non_string_aliases_sanitized{
+  R"({"type":"record","name":"R","fields":[],"aliases":[1,2,3]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_normalize_avro_skips_non_string_aliases) {
+    BOOST_REQUIRE_EQUAL(
+      pps::normalize_avro_schema_definition(non_string_aliases_input.share())
+        .value(),
+      non_string_aliases_sanitized);
+}

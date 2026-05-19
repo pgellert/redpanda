@@ -23,6 +23,11 @@ make_avro_schema_definition(schema_getter& store, subject_schema schema);
 result<schema_definition>
 sanitize_avro_schema_definition(schema_definition def);
 
+// Sanitize plus the additional transforms that callers opt into via
+// `?normalize=true` (alias sorting, default re-keying).
+result<schema_definition>
+normalize_avro_schema_definition(schema_definition def);
+
 ss::future<subject_schema> make_canonical_avro_schema(
   schema_getter& store, subject_schema schema, normalize norm = normalize::no);
 
