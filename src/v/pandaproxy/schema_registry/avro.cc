@@ -815,19 +815,40 @@ void sort_aliases(json::Value::Object& o) {
     aliases.Erase(new_end, aliases.End());
 }
 
-// Walk the schema portion of the JSON tree, applying normalize-only
-// transforms to each schema-level object. The walker descends only into
-// members that the Avro spec defines as schema-bearing: `type`, `items`,
-// `values`, `fields`, and union branches (arrays under `type`). Arbitrary
-// user metadata members are not visited so we cannot accidentally normalize
-// data that happens to share a key name with a schema attribute (e.g. a
-// custom `aliases` array carrying non-string values).
-void apply_normalize_passes(json::Value& v) {
-    if (v.IsArray()) {
-        // Union branches or a record's `fields` array — each element is a
-        // schema or field-level object.
+// Sort object keys inside a default value recursively. Default values are
+// data, so array element order is semantically significant — only object
+// keys are reordered.
+void sort_default_value_keys(json::Value& v) {
+    if (v.IsObject()) {
+        auto o = v.GetObject();
+        std::sort(o.begin(), o.end(), [](const auto& a, const auto& b) {
+            std::string_view a_name{
+              a.name.GetString(), a.name.GetStringLength()};
+            std::string_view b_name{
+              b.name.GetString(), b.name.GetStringLength()};
+            return a_name < b_name;
+        });
+        for (auto& m : o) {
+            sort_default_value_keys(m.value);
+        }
+    } else if (v.IsArray()) {
         for (auto& e : v.GetArray()) {
-            apply_normalize_passes(e);
+            sort_default_value_keys(e);
+        }
+    }
+}
+
+void normalize_field(json::Value& v);
+
+// Visit a schema value, dispatching on the `type` tag so we only recurse
+// into the schema-bearing child for the current kind (record→fields,
+// array→items, map→values). Members named like a schema keyword on a
+// wrong-kind object are user metadata and left alone.
+void normalize_schema(json::Value& v) {
+    if (v.IsArray()) {
+        // Union branches: each element is itself a schema.
+        for (auto& e : v.GetArray()) {
+            normalize_schema(e);
         }
         return;
     }
@@ -836,19 +857,58 @@ void apply_normalize_passes(json::Value& v) {
     }
     auto o = v.GetObject();
     sort_aliases(o);
+
+    auto type_it = o.FindMember("type");
+    if (type_it == o.MemberEnd()) {
+        return;
+    }
+    auto& type_v = type_it->value;
+    if (type_v.IsObject() || type_v.IsArray()) {
+        // Nested schema or inline union under `type`.
+        normalize_schema(type_v);
+        return;
+    }
+    if (!type_v.IsString()) {
+        return;
+    }
+    std::string_view t{type_v.GetString(), type_v.GetStringLength()};
+    if (t == "record") {
+        if (
+          auto it = o.FindMember("fields");
+          it != o.MemberEnd() && it->value.IsArray()) {
+            for (auto& f : it->value.GetArray()) {
+                normalize_field(f);
+            }
+        }
+    } else if (t == "array") {
+        if (auto it = o.FindMember("items"); it != o.MemberEnd()) {
+            normalize_schema(it->value);
+        }
+    } else if (t == "map") {
+        if (auto it = o.FindMember("values"); it != o.MemberEnd()) {
+            normalize_schema(it->value);
+        }
+    }
+    // enum/fixed/primitive/named-ref have no schema-bearing children.
+}
+
+// Visit a record field: aliases, the field's type (schema), and the
+// optional default (data).
+void normalize_field(json::Value& v) {
+    if (!v.IsObject()) {
+        return;
+    }
+    auto o = v.GetObject();
+    sort_aliases(o);
     if (auto it = o.FindMember("type"); it != o.MemberEnd()) {
-        apply_normalize_passes(it->value);
+        normalize_schema(it->value);
     }
-    if (auto it = o.FindMember("items"); it != o.MemberEnd()) {
-        apply_normalize_passes(it->value);
-    }
-    if (auto it = o.FindMember("values"); it != o.MemberEnd()) {
-        apply_normalize_passes(it->value);
-    }
-    if (auto it = o.FindMember("fields"); it != o.MemberEnd()) {
-        apply_normalize_passes(it->value);
+    if (auto it = o.FindMember("default"); it != o.MemberEnd()) {
+        sort_default_value_keys(it->value);
     }
 }
+
+void apply_normalize_passes(json::Value& v) { normalize_schema(v); }
 
 } // namespace
 

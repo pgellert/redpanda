@@ -640,3 +640,41 @@ BOOST_AUTO_TEST_CASE(test_normalize_avro_skips_non_string_aliases) {
         .value(),
       non_string_aliases_sanitized);
 }
+
+// Default values: object keys are sorted recursively, array element order
+// is preserved (semantically significant in Avro), primitives untouched.
+// This schema exercises a nested-record default, an array-of-records
+// default, and a primitive string default.
+const pps::schema_definition defaults_unsorted{
+  R"({"type":"record","name":"R","fields":[)"
+  R"({"name":"rec","type":{"type":"record","name":"Inner","fields":[)"
+  R"({"name":"b","type":"int"},{"name":"a","type":"int"}]},)"
+  R"("default":{"b":2,"a":1}},)"
+  R"({"name":"items","type":{"type":"array","items":"Inner"},)"
+  R"("default":[{"b":20,"a":10},{"b":40,"a":30}]},)"
+  R"({"name":"label","type":"string","default":"hi"}]})",
+  pps::schema_type::avro};
+
+const pps::schema_definition defaults_normalized{
+  R"({"type":"record","name":"R","fields":[)"
+  R"({"name":"rec","type":{"type":"record","name":"Inner","fields":[)"
+  R"({"name":"b","type":"int"},{"name":"a","type":"int"}]},)"
+  R"("default":{"a":1,"b":2}},)"
+  R"({"name":"items","type":{"type":"array","items":"Inner"},)"
+  R"("default":[{"a":10,"b":20},{"a":30,"b":40}]},)"
+  R"({"name":"label","type":"string","default":"hi"}]})",
+  pps::schema_type::avro};
+
+BOOST_AUTO_TEST_CASE(test_normalize_avro_sorts_default_object_keys) {
+    BOOST_REQUIRE_EQUAL(
+      pps::normalize_avro_schema_definition(defaults_unsorted.share()).value(),
+      defaults_normalized);
+}
+
+// Without normalize, sanitize does not visit default values; their object
+// key order is preserved as submitted.
+BOOST_AUTO_TEST_CASE(test_sanitize_avro_preserves_default_keys) {
+    BOOST_REQUIRE_EQUAL(
+      pps::sanitize_avro_schema_definition(defaults_unsorted.share()).value(),
+      defaults_unsorted);
+}
