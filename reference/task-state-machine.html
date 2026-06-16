@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shadow Linking — Task State Machine & Operator Controls (reference)</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --bg:#fdfcf9;
+          --live:#2f6b3a; --dorm:#8a6d3b; }
+  * { box-sizing:border-box; }
+  body { font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width:50rem; margin:3rem auto; padding:0 1.6rem; line-height:1.5; }
+  h1 { font-size:1.7rem; margin:0 0 .2rem; }
+  h2 { font-size:1.15rem; margin:2rem 0 .6rem; border-bottom:1px solid var(--rule); padding-bottom:.25rem; }
+  .sub { color:var(--muted); font-style:italic; margin:0 0 1.2rem; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; margin:.4rem 0 1rem; }
+  th,td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--rule); vertical-align:top; }
+  th { font-variant:small-caps; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.8rem; }
+  .ascii { font-family:"SF Mono",Menlo,monospace; font-size:.76rem; line-height:1.4; background:#f5f1e8; border:1px solid var(--rule);
+           padding:1rem; border-radius:4px; overflow-x:auto; white-space:pre; }
+  .pill { display:inline-block; font-size:.72rem; font-variant:small-caps; letter-spacing:.04em; padding:.05em .55em; border-radius:3px; color:#fff; }
+  .p-live{background:var(--live);} .p-dorm{background:var(--dorm);}
+  .note { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.6rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; margin:1rem 0; }
+  a { color:var(--accent); }
+  footer { margin-top:2.5rem; border-top:1px solid var(--rule); padding-top:.8rem; color:var(--muted); font-size:.8rem; }
+  @media print { body{margin:0;max-width:none;} a{color:var(--ink);text-decoration:none;} }
+</style>
+</head>
+<body>
+
+<h1>Task State Machine &amp; Operator Controls</h1>
+<p class="sub">Reference for the <code>cluster_link::task</code> lifecycle and how operators drive it from <code>rpk</code>.</p>
+
+<h2>Two independent axes</h2>
+<table>
+  <tr><th>Axis</th><th>What it is</th><th>Set by</th><th>Code</th></tr>
+  <tr><td><b>enabled</b></td><td>Config flag: should this task run at all? <code>is_enabled()</code> returns <code>_config.is_enabled</code></td>
+      <td>Operator, via link config</td><td class="file">source_topic_syncer.cc:222 etc.</td></tr>
+  <tr><td><b>state</b></td><td>Runtime status: active / paused / link_unavailable / stopped / faulted</td>
+      <td>The task runner &amp; reconciler</td><td class="file">model/types.h:162</td></tr>
+</table>
+<p>"Pausing" is the <b>enabled</b> axis (<code>paused: true</code> ⇒ <code>is_enabled()=false</code>); the <code>paused</code> <i>state</i> is the runtime consequence of it.</p>
+
+<h2>The five states (and the docs' names)</h2>
+<table>
+  <tr><th>Code state</th><th>Docs name</th><th>Runner</th><th>Meaning</th></tr>
+  <tr><td><code>active</code></td><td>ACTIVE</td><td><span class="pill p-live">live</span></td><td>Running &amp; syncing normally</td></tr>
+  <tr><td><code>link_unavailable</code></td><td>LINK_UNAVAILABLE</td><td><span class="pill p-live">live</span></td><td>Can't reach source — <b>retrying every interval</b></td></tr>
+  <tr><td><code>faulted</code></td><td>FAULTED</td><td><span class="pill p-live">live</span></td><td><code>run_impl</code> threw — still retrying on the timer</td></tr>
+  <tr><td><code>paused</code></td><td>PAUSED</td><td><span class="pill p-dorm">dormant</span></td><td>Disabled by config; runner torn down</td></tr>
+  <tr><td><code>stopped</code></td><td>NOT_RUNNING</td><td><span class="pill p-dorm">dormant</span></td><td>Not running here (e.g. lost leadership)</td></tr>
+</table>
+
+<div class="note">
+<b>The load-bearing distinction:</b> <span class="pill p-live">live</span> states keep a runner alive whose timer re-arms after every run (<code>task.cc:94-98</code>), so they <b>self-recover</b> on the next successful <code>run_impl</code>. <span class="pill p-dorm">dormant</span> states have no runner — only the reconciler's <code>should_start</code> can revive them, and it <i>only</i> fires from <code>stopped</code>/<code>paused</code> (<code>task.cc:212-213</code>).
+</div>
+
+<h2>Transitions</h2>
+<div class="ascii">                  run_impl returns active (always allowed)
+       ┌─────────────────────────◀─────────────────────────┐
+       │                                                    │
+   ▶ active ──run_impl: source unreachable──▶ link_unavailable│  live: runner
+       │  │                                       │          │  keeps ticking,
+       │  │  run_impl throws ──▶ faulted ◀─────────┘ (throw)  │  retries each
+       │  │                       │   └────run_impl ok───▶ active  interval
+       │  ▼ pause()  / stop()     ▼ (runner still alive)
+       │ paused / stopped   ◀── dormant: runner destroyed
+       └────────── should_start (only from paused|stopped) ──┘
+</div>
+<p><b>Validity rule</b> (<code>task.cc:341-352</code>): <code>link_unavailable</code> is reachable <i>only</i> from <code>active</code>. Every other target state (<code>active</code>, <code>paused</code>, <code>stopped</code>, <code>faulted</code>) is always allowed.</p>
+
+<h2>Reconciler predicates (run per shard on a timer)</h2>
+<table>
+  <tr><th>Predicate</th><th>Fires action when…</th><th>Code</th></tr>
+  <tr><td><code>should_start</code> → <code>start()</code></td><td>state ∈ {stopped, paused} <b>and</b> <code>is_enabled()</code> <b>and</b> <code>should_start_impl</code></td><td class="file">task.cc:209</td></tr>
+  <tr><td><code>should_pause</code> → <code>pause()</code></td><td><b>not</b> <code>is_enabled()</code> <b>and</b> <code>should_start_impl</code>, and not already paused</td><td class="file">task.cc:228</td></tr>
+  <tr><td><code>should_stop</code> → <code>stop()</code></td><td><code>should_stop_impl</code> (e.g. lost controller / partition leadership)</td><td class="file">task.cc:220</td></tr>
+</table>
+
+<h2>Operator controls (<code>rpk shadow</code>)</h2>
+<p>Subcommands: <code>create · update · describe · status · list · delete · failover · config generate</code>.
+There is <b>no <code>pause</code>/<code>resume</code> subcommand</b> and no "restart task" command.</p>
+<p><b>To pause/resume a task</b>, edit the link config and apply it:</p>
+<div class="ascii">rpk shadow update &lt;LINK_NAME&gt;          # opens config in $EDITOR (update.go:36)
+  consumer_offset_sync_options:
+    paused: true        # ⇒ is_enabled()=false ⇒ reconciler calls pause()
+# save+close → rpk sends only the changed field paths (update.go:190-204)</div>
+<p>Per-task flags live at <code>types.go:146</code> (topic sync), <code>:187</code> (consumer offsets), <code>:199</code> (security).
+<b>Inversion to watch:</b> CLI/YAML says <code>paused</code>; core reads <code>is_enabled</code> = <code>!paused</code> (mapped <code>mapper.go:227/262/282</code>).</p>
+
+<div class="note">
+<b>Unsticking a task:</b> <code>link_unavailable</code> self-heals once the source is reachable — no action needed. To force a clean restart of a wedged/<code>faulted</code> task, the only <code>rpk</code> lever is a <code>paused: true</code> → update → <code>paused: false</code> → update cycle, which deterministically lands it back in <code>active</code> with a fresh runner. <code>failover</code> is unrelated (topic promotion, not task control).
+</div>
+
+<footer>
+Reference doc · pairs with <a href="../lessons/0002-where-work-runs.html">Lesson 0002</a> ·
+C++ refs verified on branch <code>slsr/schema-replication</code>; <code>rpk</code> refs in <code>src/go/rpk/pkg/cli/shadow/</code>, 2026-06-15.
+</footer>
+</body>
+</html>

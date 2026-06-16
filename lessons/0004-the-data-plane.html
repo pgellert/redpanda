@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0004 — The data plane: copying bytes, preserving offsets</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --data:#7a3b2e;
+          --bg:#fdfcf9; --ok:#2f6b3a; --no:#9a2b2b; }
+  * { box-sizing:border-box; }
+  body { font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width:46rem; margin:3rem auto; padding:0 1.6rem; line-height:1.58; }
+  h1 { font-size:1.8rem; margin:0 0 .1rem; line-height:1.15; }
+  .kicker { font-variant:small-caps; letter-spacing:.08em; color:var(--accent); font-size:.85rem; }
+  .sub { color:var(--muted); font-style:italic; margin:.2rem 0 1.6rem; }
+  h2 { font-size:1.2rem; margin:2.2rem 0 .5rem; }
+  p { margin:.7rem 0; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  .win { background:#f3efe6; border:1px solid var(--rule); border-left:4px solid var(--accent); padding:.8rem 1rem; margin:1.2rem 0; border-radius:0 4px 4px 0; }
+  .win b { font-variant:small-caps; letter-spacing:.04em; }
+  .recall { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.6rem 1rem; margin:1.1rem 0; border-radius:0 4px 4px 0; font-size:.92rem; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; margin:.5rem 0 1rem; }
+  th,td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--rule); vertical-align:top; }
+  th { font-variant:small-caps; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.8rem; }
+  .ascii { font-family:"SF Mono",Menlo,monospace; font-size:.73rem; line-height:1.4; background:#f5f1e8; border:1px solid var(--rule);
+           padding:1rem; border-radius:4px; overflow-x:auto; white-space:pre; }
+  .quiz { background:#f7f4ec; border:1px solid var(--rule); border-radius:6px; padding:1rem 1.2rem; margin:1.4rem 0; }
+  .q { margin:1rem 0; padding-bottom:.8rem; border-bottom:1px dotted var(--rule); }
+  .q:last-of-type { border-bottom:none; }
+  .q .prompt { font-weight:600; margin-bottom:.5rem; }
+  .opts { display:flex; flex-direction:column; gap:.4rem; }
+  .opts button { font-family:inherit; font-size:.85rem; cursor:pointer; border:1px solid var(--rule); background:#fff;
+                 padding:.4em .8em; border-radius:4px; color:var(--ink); transition:all .12s; text-align:left; }
+  .opts button:hover { border-color:var(--accent); }
+  .opts button.right { background:var(--ok); color:#fff; border-color:var(--ok); }
+  .opts button.wrong { background:var(--no); color:#fff; border-color:var(--no); }
+  .fb { font-size:.85rem; margin-top:.45rem; min-height:1.1em; font-style:italic; color:var(--muted); }
+  .score { font-weight:600; margin-top:.6rem; }
+  a { color:var(--accent); }
+  footer { margin-top:2.6rem; border-top:1px solid var(--rule); padding-top:.9rem; color:var(--muted); font-size:.82rem; }
+  .ask { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.7rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; }
+  .crux { background:#fbf2ec; border-left:4px solid var(--accent); padding:.6rem 1rem; border-radius:0 4px 4px 0; font-size:.92rem; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 0004 · Shadow Linking</div>
+<h1>The data plane: copying bytes, preserving offsets</h1>
+<p class="sub">The topic exists but it's empty. Now we move records — and keep their offsets identical to the source. This is the "byte-level, offset-preserving" promise, in code.</p>
+
+<div class="recall">
+<b>Recall:</b> the control plane (Lesson 0003) created the mirror topic on every broker, with raft partitions and leaders. The data plane is the <span class="file">replication/</span> bucket — and per Lesson 0002 you already know its <i>shape</i>: <b>start work on the shard that leads the partition, stop on leadership loss.</b> The "work" is one <code>partition_replicator</code>.
+</div>
+
+<div class="win">
+<b>Your win today →</b> Trace one fetch→replicate iteration, and explain the <i>mechanism</i> by which a record at source offset 42 lands at shadow offset 42 — plus the three guards that keep that true under failure.
+</div>
+
+<h2>1 · The loop</h2>
+<p>A <code>partition_replicator</code> (<span class="file">replication/partition_replicator.h:57</span>) is started on the mirror partition's leader shard, fenced by the <code>term_id</code> it was created in (<span class="file">:61,71</span>). Its core is <code>fetch_and_replicate</code> (<span class="file">partition_replicator.cc:251</span>):</p>
+<div class="ascii">while (running):
+  units = get_units(_max_requests, 1)          // ← pipeline gate: max 5 in flight  (.h:118)
+  data  = _source->fetch_next()                // ← Kafka FETCH to the SOURCE cluster (external)
+  maybe_synchronize_start_offset()             // ← prefix-truncate if source head moved
+  if data.batches empty: continue              // ← caught up; loop
+  replicate_and_wait({begin = batches.front().base_offset(),    // ← SOURCE offsets, kept as-is
+                      end   = batches.back().last_offset(), ...})
+     └─▶ _sink->replicate(batches, ...)         // ← append to LOCAL raft  (service.cc:427)
+     └─▶ result handled ASYNC (handle_replication_result)        // ← so the loop keeps fetching</div>
+<p>Two ends, two protocols: <b>fetch</b> talks Kafka to the <i>source</i> (<code>remote_partition_source</code>); <b>replicate</b> is a <i>local</i> raft append (<code>local_partition_sink</code>). No internal RPC in between — the replicator runs <i>at</i> the leader (your RPC-philosophy finding). Up to <b>5 requests pipeline</b> via a semaphore (<span class="file">.h:118-120</span>); <code>last_replicated_offset</code> is bumped eagerly so the next fetch can start before the previous append commits.</p>
+
+<h2>2 · How offset 42 stays offset 42 (the crux)</h2>
+<p>Fetched batches carry their <b>source</b> <code>base_offset</code>/<code>last_offset</code>. The sink does <i>not</i> let raft assign fresh offsets — it passes the source offsets through explicitly (<span class="file">service.cc:449-497</span>):</p>
+<div class="ascii">expected_offsets = [ batch.base_offset() for batch in batches ]   // the SOURCE offsets
+_replicator->replicate(batches, expected_offsets, _last_replicated_offset, ...)
+//                               ▲ "land these batches at EXACTLY these offsets"</div>
+<div class="crux">
+This is the entire meaning of <b>offset-preserving</b>: the local log is <i>told</i> the offsets rather than minting them. That's also why a shadow topic is <b>read-only</b> — any independent local write would mint an offset and break the 1:1 mapping. (Recall the docs: writing to shadow topics is blocked while shadowing is active.)
+</div>
+
+<h2>3 · The three guards that keep it correct</h2>
+<table>
+  <tr><th>Guard</th><th>Protects against</th><th>Mechanism</th><th>Code</th></tr>
+  <tr><td><b>Monotonicity</b></td><td>overlapping / duplicate fetches writing backwards</td>
+      <td>require <code>new_begin &amp; new_end &gt; last_replicated</code>; else throw <code>monotonicity_violation_exception</code> → step down → recover next term</td>
+      <td class="file">service.cc:464; partition_replicator.cc:279</td></tr>
+  <tr><td><b>Producer-ID sync</b></td><td>post-failover idempotency collisions</td>
+      <td>track highest source <code>producer_id</code>, push it into the local id_allocator (<code>maybe_sync_pid</code>) so new local PIDs start <i>above</i> any source PID</td>
+      <td class="file">deps.h:78; service.cc:451</td></tr>
+  <tr><td><b>Start-offset sync</b></td><td>source retention trimming its head out from under us</td>
+      <td>if source start &gt; shadow start, <code>prefix_truncate</code> the shadow to realign</td>
+      <td class="file">partition_replicator.cc:319 (maybe_synchronize_start_offset)</td></tr>
+</table>
+<p>The producer-ID guard is your first glimpse of <b>failover correctness</b> — the data plane is quietly preparing for the day the shadow becomes writable. Hold that thread.</p>
+
+<h2>4 · Failure &amp; recovery</h2>
+<p>Any exception in the loop (a failed append, a monotonicity violation, a dead source connection) is caught (<span class="file">partition_replicator.cc:277-298</span>), the in-flight gate is drained, then: <b>reset the sink, reset the source to <code>next_offset(last_replicated)</code></b> (or the configured start offset if nothing replicated yet), <b>back off, and retry</b>. Start-up itself is resume-aware: if the sink already has data, replication resumes from <code>next_offset(last_replicated_offset)</code> rather than the configured start (<span class="file">partition_replicator.cc:57-70</span>). The replicator is, like everything else here, a convergent retry loop.</p>
+
+<h2>5 · Retrieve it</h2>
+<div class="quiz" id="quiz">
+  <div class="q" data-a="2">
+    <div class="prompt">1. A record at source offset 42 lands at shadow offset 42 because…</div>
+    <div class="opts"
+      data-opts='["raft happens to assign equal offsets","the source rewrites offsets on fetch","the sink passes explicit expected_offsets","a background job renumbers them later"]'
+      data-fb='local_partition_sink builds expected_offsets from each batch base_offset and passes them to replicate — offsets are told, not minted.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="1">
+    <div class="prompt">2. The fetch side and the replicate side speak…</div>
+    <div class="opts"
+      data-opts='["both internal Redpanda RPC calls","Kafka to source, local raft append","both local raft append operations","an internal RPC to a remote leader"]'
+      data-fb='fetch = Kafka protocol to the source cluster; replicate = local raft append on the leader shard. No internal RPC between them.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="0">
+    <div class="prompt">3. A <code>monotonicity_violation_exception</code> causes the replicator to…</div>
+    <div class="opts"
+      data-opts='["step down and recover next term","silently drop the bad batches","permanently fault the whole link","rewrite offsets to be monotonic"]'
+      data-fb='It notifies sink failure for the term and aborts; replication recovers on the next leader term from last_replicated.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="3">
+    <div class="prompt">4. Shadow topics are read-only primarily because…</div>
+    <div class="opts"
+      data-opts='["raft forbids writes on followers","the source holds an exclusive lock","disk space is reserved for mirroring","a local write would mint an offset"]'
+      data-fb='An independent local write would assign a fresh offset and break the byte-for-byte source↔shadow offset mapping.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="0">
+    <div class="prompt">5. Syncing the highest source producer-ID into the local allocator prevents…</div>
+    <div class="opts"
+      data-opts='["idempotency collisions after failover","the source from running out of IDs","duplicate consumer group commits","offsets drifting during normal sync"]'
+      data-fb='After failover a new local producer could be handed a PID already used on the source; maybe_sync_pid keeps local PIDs ahead to avoid false idempotency errors.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="score" id="score"></div>
+</div>
+
+<h2>6 · Chew on this → Lesson 0005 (failover &amp; promotion)</h2>
+<p>You've now seen the data plane quietly prepare for failover (producer-ID sync). Lesson 0005 is the payoff: the <code>mirror_topic_status</code> state machine (<code>active → failing_over → failed_over</code> / <code>promoting → promoted</code>, <span class="file">model/types.h:111</span>), how the <code>link_status_reconciler</code> drives it using the report RPC you found, and where <b>split-brain</b> and the <b>failover-identity</b> questions (topic ID, leader epoch) live. This is the lesson closest to your day-to-day debates.</p>
+
+<div class="ask">
+<b>Ask me anything.</b> Strong probes here: "show me <code>replicate_and_wait</code> and how inflight units are released", "what does <code>data_source::reset</code> actually do on the Kafka client?", or "walk me through <code>maybe_synchronize_start_offset</code> line by line".
+</div>
+
+<h2>Read next</h2>
+<p><b>Primary source (10 min):</b> read <code>partition_replicator.cc</code> <code>fetch_and_replicate</code> (≈251–315) alongside <code>local_partition_sink::replicate</code> in <code>service.cc</code> (≈427–497). The pair is the entire data plane: the loop on one side, the offset-preserving append on the other.</p>
+
+<footer>
+Lesson 0004 · builds on <a href="0002-where-work-runs.html">0002</a> &amp; <a href="0003-how-the-cluster-agrees.html">0003</a> ·
+refs: <a href="../reference/architecture-map.html">architecture map</a> · verified on <code>slsr/schema-replication</code>, 2026-06-15.
+</footer>
+
+<script>
+  let answered = 0, correct = 0, total = document.querySelectorAll('.q').length;
+  document.querySelectorAll('.q').forEach(q => {
+    const ans = parseInt(q.dataset.a, 10);
+    const opts = q.querySelector('.opts');
+    const labels = JSON.parse(opts.dataset.opts);
+    const why = opts.dataset.fb;
+    const fb = q.querySelector('.fb');
+    labels.forEach((label, i) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.onclick = () => {
+        if (q.dataset.done) return;
+        q.dataset.done = "1"; answered++;
+        if (i === ans) { b.classList.add('right'); correct++; fb.textContent = "✓ " + why; }
+        else { b.classList.add('wrong'); opts.children[ans].classList.add('right'); fb.textContent = "✗ " + why; }
+        if (answered === total) {
+          document.getElementById('score').textContent =
+            "Score: " + correct + "/" + total + " — " + (correct===total ? "you own the data plane. Failover (0005) is the finale."
+            : correct>=total-1 ? "strong — reread §2–§3 for the miss." : "revisit §2 (offset preservation) and §3 (the guards).");
+        }
+      };
+      opts.appendChild(b);
+    });
+  });
+</script>
+</body>
+</html>

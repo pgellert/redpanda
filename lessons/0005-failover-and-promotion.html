@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0005 — Failover &amp; promotion</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --data:#7a3b2e;
+          --bg:#fdfcf9; --ok:#2f6b3a; --no:#9a2b2b; --warnc:#9a5b2b; }
+  * { box-sizing:border-box; }
+  body { font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width:46rem; margin:3rem auto; padding:0 1.6rem; line-height:1.58; }
+  h1 { font-size:1.8rem; margin:0 0 .1rem; line-height:1.15; }
+  .kicker { font-variant:small-caps; letter-spacing:.08em; color:var(--accent); font-size:.85rem; }
+  .sub { color:var(--muted); font-style:italic; margin:.2rem 0 1.6rem; }
+  h2 { font-size:1.2rem; margin:2.2rem 0 .5rem; }
+  p { margin:.7rem 0; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  .win { background:#f3efe6; border:1px solid var(--rule); border-left:4px solid var(--accent); padding:.8rem 1rem; margin:1.2rem 0; border-radius:0 4px 4px 0; }
+  .win b { font-variant:small-caps; letter-spacing:.04em; }
+  .recall { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.6rem 1rem; margin:1.1rem 0; border-radius:0 4px 4px 0; font-size:.92rem; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; margin:.5rem 0 1rem; }
+  th,td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--rule); vertical-align:top; }
+  th { font-variant:small-caps; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.8rem; }
+  .ascii { font-family:"SF Mono",Menlo,monospace; font-size:.72rem; line-height:1.4; background:#f5f1e8; border:1px solid var(--rule);
+           padding:1rem; border-radius:4px; overflow-x:auto; white-space:pre; }
+  .quiz { background:#f7f4ec; border:1px solid var(--rule); border-radius:6px; padding:1rem 1.2rem; margin:1.4rem 0; }
+  .q { margin:1rem 0; padding-bottom:.8rem; border-bottom:1px dotted var(--rule); }
+  .q:last-of-type { border-bottom:none; }
+  .q .prompt { font-weight:600; margin-bottom:.5rem; }
+  .opts { display:flex; flex-direction:column; gap:.4rem; }
+  .opts button { font-family:inherit; font-size:.85rem; cursor:pointer; border:1px solid var(--rule); background:#fff;
+                 padding:.4em .8em; border-radius:4px; color:var(--ink); transition:all .12s; text-align:left; }
+  .opts button:hover { border-color:var(--accent); }
+  .opts button.right { background:var(--ok); color:#fff; border-color:var(--ok); }
+  .opts button.wrong { background:var(--no); color:#fff; border-color:var(--no); }
+  .fb { font-size:.85rem; margin-top:.45rem; min-height:1.1em; font-style:italic; color:var(--muted); }
+  .score { font-weight:600; margin-top:.6rem; }
+  a { color:var(--accent); }
+  footer { margin-top:2.6rem; border-top:1px solid var(--rule); padding-top:.9rem; color:var(--muted); font-size:.82rem; }
+  .ask { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.7rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; }
+  .debate { background:#fbf4ec; border-left:4px solid var(--warnc); padding:.7rem 1rem; border-radius:0 4px 4px 0; font-size:.92rem; }
+  .tag { display:inline-block; font-size:.7rem; font-variant:small-caps; letter-spacing:.04em; padding:.02em .5em; border-radius:3px; color:#fff; }
+  .t-fact{background:var(--ok);} .t-inf{background:var(--ctrl);} .t-open{background:var(--warnc);}
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 0005 · Shadow Linking · finale</div>
+<h1>Failover &amp; promotion</h1>
+<p class="sub">The shadow has been read-only this whole time. This is the moment it can become writable — and where the subtle correctness questions live, including the failover-identity debate.</p>
+
+<div class="recall">
+<b>Recall:</b> the data plane (Lesson 0004) preserves offsets and quietly prepares for failover (producer-ID sync). The status RPC (your RPC investigation) gathers per-partition leadership. Failover is where both pay off — driven by the <code>link_status_reconciler</code> on the controller leader.
+</div>
+
+<div class="win">
+<b>Your win today →</b> Narrate the <code>mirror_topic_status</code> state machine, distinguish <i>failover</i> from <i>promotion</i>, explain how the reconciler decides a topic is safely failed over — and state precisely what identity <i>is</i> and <i>isn't</i> preserved.
+</div>
+
+<h2>1 · The state machine</h2>
+<p>Per-topic status lives in <code>mirror_topic_status</code> (<span class="file">model/types.h:111</span>); legal transitions are enforced by <code>is_valid_status_transition</code> (<span class="file">model/types.cc:35-59</span>):</p>
+<div class="ascii">              ┌─ paused ─┐        (paused ⇄ active)
+              ▼          │
+   ┌──────── active ─────┴───────┐
+   │           │                 │
+   ▼           ▼                 ▼
+ failing_over  failed ◀──┐    promoting
+   │        (terminal)   │      │
+   ▼          ▲          ▲      ▼
+ failed_over ─┘          └──── promoted
+   │                              │
+   └── (→ active: TODO, not yet) ─┘</div>
+<table>
+  <tr><th>From</th><th>Allowed to</th></tr>
+  <tr><td><code>active</code></td><td><code>paused</code>, <code>failing_over</code>, <code>promoting</code>, <code>failed</code></td></tr>
+  <tr><td><code>failing_over</code></td><td><code>failed_over</code>, <code>failed</code></td></tr>
+  <tr><td><code>promoting</code></td><td><code>promoted</code>, <code>failed</code></td></tr>
+  <tr><td><code>failed_over</code> / <code>promoted</code></td><td>— (re-activation is an explicit TODO, <span class="file">types.cc:38-43</span>)</td></tr>
+  <tr><td><code>failed</code></td><td>terminal, non-recoverable today (<span class="file">types.h:114</span>)</td></tr>
+</table>
+
+<h2>2 · Failover vs promotion — one word of difference</h2>
+<p>They reach the same place (a writable topic) by different paths. The enum comments say it exactly:</p>
+<table>
+  <tr><th></th><th>failing_over → failed_over</th><th>promoting → promoted</th></tr>
+  <tr><td>Trigger</td><td>disaster — source is gone</td><td>planned migration — source is healthy</td></tr>
+  <tr><td>Replication</td><td>stop now, unblock writes immediately</td><td><b>wait to catch up to source first</b>, then cut over</td></tr>
+  <tr><td>Data loss</td><td>possibly (whatever hadn't replicated)</td><td>none (drains the lag first)</td></tr>
+  <tr><td>Code</td><td colspan="2" class="file">types.h:124-132 — "promoting … additionally waits for the topic to catch up to the source"</td></tr>
+</table>
+
+<h2>3 · How the reconciler finishes a failover</h2>
+<p>Operator triggers it (<code>rpk shadow failover</code> → frontend → <code>batch_update_mirror_topic_status_cmd</code> sets <code>active → failing_over</code> via controller raft). Then on the controller leader, <code>link_status_reconciler</code> (<span class="file">link_status_reconciler.h:28</span>) converges the rest — and it leans on the report RPC you already studied:</p>
+<div class="ascii">try_finish_failover(topic):                                  (link_status_reconciler.cc:107)
+  report = shadow_topic_report(link, topic)        ── the cross-broker status RPC
+  rev    = get_last_update_revision(link)          ── revision the controller has for the link
+  valid  = { partitions whose leader's broker has link_update_revision >= rev }   (:144-152)
+  if valid.size() == report.total_partitions:                                     (:153)
+        update_mirror_topic_state(topic, failed_over)   ── the cut is complete
+  else: defer (not all partition leaders have unblocked writes yet)</div>
+<p>The <b>link-revision check</b> (<span class="file">cc:127-133</span>) is the clever bit: a partition leader only bumps to the link's update revision once it has <i>processed the <code>failing_over</code> command and unblocked the Kafka API</i> for that mirror topic. So "every partition reports a leader at revision ≥ controller's revision" is a proxy for "every partition is actually writable now." The code itself calls this a <i>reasonable heuristic, not foolproof</i> — a phrase worth remembering when you review changes here.</p>
+
+<h2>4 · What identity is — and isn't — preserved</h2>
+<p>This is the heart of the failover-correctness conversation. Be precise about the three layers:</p>
+<table>
+  <tr><th>Property</th><th>Preserved?</th><th>Evidence</th></tr>
+  <tr><td>Record <b>offsets</b> &amp; timestamps</td><td><span class="tag t-fact">yes</span></td><td>explicit <code>expected_offsets</code> append (Lesson 0004; <span class="file">service.cc:449</span>)</td></tr>
+  <tr><td><b>Topic ID</b></td><td><span class="tag t-fact">no</span></td><td><code>mirror_topic_metadata</code> stores <i>both</i> <code>source_topic_id</code> and a separate <code>destination_topic_id</code> (<span class="file">model/types.cc:115,117</span>) — the local topic has its own ID</td></tr>
+  <tr><td><b>Leader epoch</b></td><td><span class="tag t-fact">no</span></td><td>mirrored consumer offsets are committed with <code>committed_leader_epoch = leader_epoch(-1)</code> (<span class="file">group_mirroring_task.cc:310</span>); leader epoch is the shadow's own local raft concept</td></tr>
+</table>
+
+<div class="debate">
+<b>The open debate (your project thread).</b> <span class="tag t-fact">fact</span> the code does not preserve topic ID or leader epoch across the link. <span class="tag t-inf">inference</span> a fresh local topic ID follows from the controller assigning IDs at create time, and <code>destination_topic_id</code> existing as a distinct field. <span class="tag t-open">open</span> whether that <i>matters</i> for a given client depends on whether clients key on topic ID / leader epoch (e.g. producer fencing, metadata caches, idempotent producers) after they're repointed at the shadow — which is exactly the active discussion. This lesson deliberately does <b>not</b> assert a resolution; it gives you the code facts to argue from. Ask me to pull the producer-fencing / metadata paths if you want to push on a specific failure mode.
+</div>
+
+<h2>5 · Split-brain — the operational guardrail</h2>
+<p>Failover makes the shadow writable but <b>cannot</b> make the source stop. If clients keep writing to a still-alive source after you fail over, both clusters accept writes independently → split brain. That's why Shadowing is <b>active-passive, manual failover</b>, with the docs' instruction to repoint <i>all</i> clients before resuming writes, and why <code>failed_over</code>/<code>promoted</code> have no automatic path back to <code>active</code> yet. The system enforces single-writer discipline by <i>process</i>, not by protocol.</p>
+
+<h2>6 · Retrieve it</h2>
+<div class="quiz" id="quiz">
+  <div class="q" data-a="2">
+    <div class="prompt">1. The difference between promoting and failing_over is that promoting…</div>
+    <div class="opts"
+      data-opts='["preserves the source topic ID","skips the reconciler entirely","waits to catch up to source","keeps the topic read-only still"]'
+      data-fb='promoting = failing_over + first draining replication lag so no data is lost; failing_over cuts over immediately.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="1">
+    <div class="prompt">2. <code>try_finish_failover</code> decides the cut is done when…</div>
+    <div class="opts"
+      data-opts='["the source cluster acknowledges it","all partition leaders reached the revision","a fixed timeout has finally elapsed","the data plane reports zero lag left"]'
+      data-fb='Every partition must report a leader whose broker has seen link_update_revision >= the controller revision — a proxy for writes being unblocked.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="0">
+    <div class="prompt">3. Across a shadow link, what is preserved byte-for-byte?</div>
+    <div class="opts"
+      data-opts='["record offsets and timestamps","the source topic ID value","the source leader epoch","the consumer group membership"]'
+      data-fb='Offsets/timestamps are preserved by the offset-preserving append; topic ID and leader epoch are not carried over.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="3">
+    <div class="prompt">4. <code>failed</code> is, in today's code…</div>
+    <div class="opts"
+      data-opts='["a transient retrying status","reachable only from paused","the same as failed_over","a terminal non-recoverable status"]'
+      data-fb='types.h:114 — failed is terminal and non-recoverable today; reachable from active/failing_over/promoting.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="2">
+    <div class="prompt">5. Split-brain after failover is prevented primarily by…</div>
+    <div class="opts"
+      data-opts='["a protocol lock on the source","the reconciler fencing the source","operational process, not protocol","automatic fallback to the source"]'
+      data-fb='Failover cannot stop a live source; safety is active-passive + repoint all clients before resuming writes — enforced by procedure.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="score" id="score"></div>
+</div>
+
+<h2>7 · You've traced the whole subsystem</h2>
+<p>Config → task → command → replicated <code>link_state</code> → reconciler → topic → offset-preserving replicator → failover. That's the full lifecycle of a shadow link, end to end, with the control/data-plane split, the locality rules, the RPC philosophy, and now the failover state machine. That was the mission: a durable ownership model.</p>
+<p><b>One thread remains</b> — and it's <i>your</i> thread: <b>Schema Registry sync</b> (Lesson 0006), topic-mode vs API-mode (<span class="file">model/types.h:519</span>), which connects shadow linking directly to your <code>slsr/schema-replication</code> work.</p>
+
+<div class="ask">
+<b>Ask me anything.</b> Especially here: "show me where a partition leader unblocks the Kafka API on failing_over", "what does <code>failover_link_topics</code> in the frontend actually write?", or "trace the producer-fencing path to argue the topic-ID-identity case." This is your debate — push on it.
+</div>
+
+<h2>Read next</h2>
+<p><b>Primary source:</b> <code>link_status_reconciler.cc</code> <code>try_finish_failover</code> (107–186) + the <code>mirror_topic_status</code> diagram and <code>is_valid_status_transition</code> (<code>model/types.h:82-152</code>, <code>types.cc:35</code>). Also the docs' <a href="https://docs.redpanda.com/streaming/current/manage/disaster-recovery/shadowing/failover-runbook/">Failover Runbook</a> for the operator-side view.</p>
+
+<footer>
+Lesson 0005 (finale) · arc: <a href="0001-two-planes-of-a-shadow-link.html">0001</a> · <a href="0002-where-work-runs.html">0002</a> · <a href="0003-how-the-cluster-agrees.html">0003</a> · <a href="0004-the-data-plane.html">0004</a> ·
+refs: <a href="../reference/failover-state-machine.html">failover state machine</a> · verified on <code>slsr/schema-replication</code>, 2026-06-15.
+</footer>
+
+<script>
+  let answered = 0, correct = 0, total = document.querySelectorAll('.q').length;
+  document.querySelectorAll('.q').forEach(q => {
+    const ans = parseInt(q.dataset.a, 10);
+    const opts = q.querySelector('.opts');
+    const labels = JSON.parse(opts.dataset.opts);
+    const why = opts.dataset.fb;
+    const fb = q.querySelector('.fb');
+    labels.forEach((label, i) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.onclick = () => {
+        if (q.dataset.done) return;
+        q.dataset.done = "1"; answered++;
+        if (i === ans) { b.classList.add('right'); correct++; fb.textContent = "✓ " + why; }
+        else { b.classList.add('wrong'); opts.children[ans].classList.add('right'); fb.textContent = "✗ " + why; }
+        if (answered === total) {
+          document.getElementById('score').textContent =
+            "Score: " + correct + "/" + total + " — " + (correct===total ? "you own the failover model. Schema Registry (0006) is the last thread."
+            : correct>=total-1 ? "strong — reread §3–§4 for the miss." : "revisit §2 (failover vs promote) and §4 (identity).");
+        }
+      };
+      opts.appendChild(b);
+    });
+  });
+</script>
+</body>
+</html>

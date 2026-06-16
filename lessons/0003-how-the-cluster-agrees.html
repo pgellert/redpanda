@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0003 — How the cluster agrees on what to mirror</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --data:#7a3b2e;
+          --bg:#fdfcf9; --ok:#2f6b3a; --no:#9a2b2b; }
+  * { box-sizing:border-box; }
+  body { font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width:46rem; margin:3rem auto; padding:0 1.6rem; line-height:1.58; }
+  h1 { font-size:1.8rem; margin:0 0 .1rem; line-height:1.15; }
+  .kicker { font-variant:small-caps; letter-spacing:.08em; color:var(--accent); font-size:.85rem; }
+  .sub { color:var(--muted); font-style:italic; margin:.2rem 0 1.6rem; }
+  h2 { font-size:1.2rem; margin:2.2rem 0 .5rem; }
+  p { margin:.7rem 0; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  .win { background:#f3efe6; border:1px solid var(--rule); border-left:4px solid var(--accent); padding:.8rem 1rem; margin:1.2rem 0; border-radius:0 4px 4px 0; }
+  .win b { font-variant:small-caps; letter-spacing:.04em; }
+  .recall { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.6rem 1rem; margin:1.1rem 0; border-radius:0 4px 4px 0; font-size:.92rem; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; margin:.5rem 0 1rem; }
+  th,td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--rule); vertical-align:top; }
+  th { font-variant:small-caps; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.8rem; }
+  .ascii { font-family:"SF Mono",Menlo,monospace; font-size:.73rem; line-height:1.4; background:#f5f1e8; border:1px solid var(--rule);
+           padding:1rem; border-radius:4px; overflow-x:auto; white-space:pre; }
+  .quiz { background:#f7f4ec; border:1px solid var(--rule); border-radius:6px; padding:1rem 1.2rem; margin:1.4rem 0; }
+  .q { margin:1rem 0; padding-bottom:.8rem; border-bottom:1px dotted var(--rule); }
+  .q:last-of-type { border-bottom:none; }
+  .q .prompt { font-weight:600; margin-bottom:.5rem; }
+  .opts { display:flex; flex-direction:column; gap:.4rem; }
+  .opts button { font-family:inherit; font-size:.85rem; cursor:pointer; border:1px solid var(--rule); background:#fff;
+                 padding:.4em .8em; border-radius:4px; color:var(--ink); transition:all .12s; text-align:left; }
+  .opts button:hover { border-color:var(--accent); }
+  .opts button.right { background:var(--ok); color:#fff; border-color:var(--ok); }
+  .opts button.wrong { background:var(--no); color:#fff; border-color:var(--no); }
+  .fb { font-size:.85rem; margin-top:.45rem; min-height:1.1em; font-style:italic; color:var(--muted); }
+  .score { font-weight:600; margin-top:.6rem; }
+  a { color:var(--accent); }
+  footer { margin-top:2.6rem; border-top:1px solid var(--rule); padding-top:.9rem; color:var(--muted); font-size:.82rem; }
+  .ask { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.7rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; }
+  .warn { background:#fbf2ec; border-left:4px solid var(--accent); padding:.6rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 0003 · Shadow Linking</div>
+<h1>How the cluster agrees on what to mirror</h1>
+<p class="sub">The control-plane hand-off: a command emitted on <em>one</em> shard becomes topics on <em>every</em> broker — the heart of code ownership.</p>
+
+<div class="recall">
+<b>Recall (Lesson 0002 cliffhanger):</b> <code>source_topic_syncer</code> is a <code>controller_locked_task</code> — it runs on exactly one shard cluster-wide and emits <code>add_mirror_topic_cmd</code>. Today: what happens to that command.
+</div>
+
+<div class="win">
+<b>Your win today →</b> Trace the full path <i>task → command → replicated table → reconciler → real topic</i> with the right types at each hop, and explain the <b>desired-state / reconcile</b> split that makes it safe.
+</div>
+
+<h2>1 · The naming trap: two "cluster_link"s</h2>
+<p>Before the trace, untangle a directory collision that confuses every new owner:</p>
+<table>
+  <tr><th>Path</th><th>Is</th><th>Holds</th></tr>
+  <tr><td><code>src/v/cluster_link/</code></td><td>the <b>engine</b></td><td>tasks, replicators, reconcilers — the runtime work</td></tr>
+  <tr><td><code>src/v/cluster/cluster_link/</code></td><td>the <b>controller state</b></td><td><code>frontend</code> (writes raft) + <code>table</code> (replicated state)</td></tr>
+</table>
+<p>The engine <b>never touches raft directly</b>. It calls the abstract <code>link_registry</code> (<span class="file">cluster_link/deps.h:31</span>, "accessors to cluster link table"); the concrete implementation is the controller-side <code>frontend</code>+<code>table</code>. That seam is dependency inversion — it's why the engine is testable without a real controller, and it's the cleanest mental boundary in the whole subsystem.</p>
+
+<h2>2 · The hand-off, hop by hop</h2>
+<div class="ascii">  ── runs on ONE shard (controller leader) ──────────────────────────────
+  source_topic_syncer::submit_commands                       (source_topic_syncer.cc:572)
+        └─▶ link->add_mirror_topic(cmd)   ── via abstract link_registry (deps.h:31)
+              └─▶ cluster::cluster_link::frontend::add_mirror_topic   (cluster/cluster_link/frontend.h:61)
+                    └─▶ replicate through CONTROLLER RAFT (holds controller_stm*)
+
+  ── applied on EVERY node, when the raft entry commits ──────────────────
+  cluster::cluster_link::table::apply_update(record_batch)   (cluster/cluster_link/table.h:72)
+        └─▶ mutates in-memory link_state: topic → mirror_topic_metadata
+        └─▶ notifies listeners (register_for_updates, table.h:78)
+
+  ── reacts on the CONTROLLER LEADER only ───────────────────────────────
+  manager::on_link_change → if _is_controller_leader:                 (manager.cc:650-653)
+        topic_reconciler::trigger(link_id)
+          └─▶ execute → do_reconcile_topic → maybe_create_mirror_topic (topic_reconciler.h)
+                └─▶ kafka::data::rpc::topic_creator   ── creates the real local topic
+                      └─▶ (topic creation is itself a controller op ⇒ exists cluster-wide)</div>
+
+<p>Read the three bands as <b>three different localities</b>: emitted on one shard, <i>applied</i> on every node, <i>reconciled</i> on the leader. The middle band is just "everyone learns the desired set"; only the bottom band takes action.</p>
+
+<h2>3 · The pattern: desired state vs reconcile</h2>
+<p>This is the Redpanda controller pattern, and naming it is most of the understanding:</p>
+<ul>
+  <li><b>A command records <i>intent</i>, not action.</b> <code>add_mirror_topic_cmd</code> doesn't create anything — it appends "this topic <i>should</i> be mirrored" to replicated state. Same shape as the rest of the controller (topics_table, security, …): a sub-STM (<code>apply_update</code>/<code>apply_snapshot</code>) plugged into the controller log.</li>
+  <li><b>A reconciler converges <i>reality</i> toward intent.</b> <code>topic_reconciler</code> compares desired <code>link_state</code> against actual local topics and makes up the difference (<code>maybe_create_mirror_topic</code> / <code>maybe_update_existing_topic</code>). It is idempotent and re-runnable — exactly like the <i>task</i> reconciler from Lesson 0002. Same shape, different layer.</li>
+</ul>
+
+<div class="warn">
+<b>The subtlety that prevents chaos:</b> the table is applied on <i>every</i> node (so all nodes know the desired set, e.g. for status/snapshots), but the reconciler only <i>acts</i> on the controller leader (<code>manager.cc:652</code>). That's why you don't get N brokers racing to create the same topic — intent is global, action is single-writer. Same "follow the leader" principle as task locality, one layer up.
+</div>
+
+<h2>4 · Retrieve it</h2>
+<div class="quiz" id="quiz">
+  <div class="q" data-a="0">
+    <div class="prompt">1. When <code>add_mirror_topic_cmd</code> is emitted, it immediately…</div>
+    <div class="opts"
+      data-opts='["records intent in replicated state","creates the local topic right away","starts a partition replicator now","sends record bytes to the source"]'
+      data-fb='Commands are declarative intent appended to the controller log — nothing is created until a reconciler acts.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="0">
+    <div class="prompt">2. Once the entry commits to controller raft, <code>table::apply_update</code> runs on…</div>
+    <div class="opts"
+      data-opts='["every node in the cluster","only the controller leader node","only consumer-offsets leader shards","one randomly selected single node"]'
+      data-fb='The table is a controller sub-STM; every node applies committed entries, so all nodes hold the desired link_state.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="1">
+    <div class="prompt">3. The <code>topic_reconciler</code> that creates the real topic acts on…</div>
+    <div class="opts"
+      data-opts='["every node that applied the table","only the controller leader node alone","every partition-leader shard locally","the source cluster controller node"]'
+      data-fb='manager.cc:652 gates trigger() on _is_controller_leader — single-writer action, no N-way create race.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="2">
+    <div class="prompt">4. <code>src/v/cluster/cluster_link/</code> (vs <code>src/v/cluster_link/</code>) holds…</div>
+    <div class="opts"
+      data-opts='["the periodic source-sync tasks","the per-partition data replicators","the replicated link table + frontend","the rpk shadow command definitions"]'
+      data-fb='That dir is the controller state: frontend (writes raft) + table (applied state). The engine is in src/v/cluster_link/.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="0">
+    <div class="prompt">5. Making <code>link_registry</code> an abstract interface lets the engine…</div>
+    <div class="opts"
+      data-opts='["stay decoupled from controller raft","skip the controller entirely now","create topics without any leader","replicate data peer-to-peer fully"]'
+      data-fb='Dependency inversion: the engine codes against link_registry and is testable without a real controller STM.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="score" id="score"></div>
+</div>
+
+<h2>5 · Chew on this → Lesson 0004 (the data plane)</h2>
+<p>The topic now exists on every broker, with raft partitions and leaders. But it's <b>empty</b>. Nothing has copied a single record from the source yet. <b>Who notices the new mirror partition, starts a <code>partition_replicator</code> on its leader shard, and how does that loop preserve source offsets byte-for-byte?</b> That's the data-plane deep dive — and thanks to Lesson 0002 you already know the <i>shape</i> of the answer (start work on the leader, stop on leadership loss).</p>
+
+<div class="ask">
+<b>Ask me anything.</b> Good probes now: "show me <code>table::apply_update</code>'s actual switch over command types", "how does <code>dispatch_mutation_to_remote</code> forward a write when you're not the leader?", or "where exactly does <code>do_reconcile_topic</code> decide create-vs-update?" I'll open the real code.
+</div>
+
+<h2>Read next</h2>
+<p><b>Primary source (10 min):</b> skim <code>src/v/cluster/cluster_link/table.h</code> — the <code>apply_update</code>/<code>apply_snapshot</code>/<code>register_for_updates</code> surface is the entire desired-state store in one header. Then glance at <code>cluster_link/topic_reconciler.h</code> (the <code>maybe_create</code>/<code>maybe_update</code> methods) to see the converge side. The pair <i>is</i> the pattern.</p>
+
+<footer>
+Lesson 0003 · builds on <a href="0002-where-work-runs.html">Lesson 0002</a> · refs:
+<a href="../reference/architecture-map.html">architecture map</a> ·
+verified on branch <code>slsr/schema-replication</code>, 2026-06-15.
+</footer>
+
+<script>
+  let answered = 0, correct = 0, total = document.querySelectorAll('.q').length;
+  document.querySelectorAll('.q').forEach(q => {
+    const ans = parseInt(q.dataset.a, 10);
+    const opts = q.querySelector('.opts');
+    const labels = JSON.parse(opts.dataset.opts);
+    const why = opts.dataset.fb;
+    const fb = q.querySelector('.fb');
+    labels.forEach((label, i) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.onclick = () => {
+        if (q.dataset.done) return;
+        q.dataset.done = "1"; answered++;
+        if (i === ans) { b.classList.add('right'); correct++; fb.textContent = "✓ " + why; }
+        else { b.classList.add('wrong'); opts.children[ans].classList.add('right'); fb.textContent = "✗ " + why; }
+        if (answered === total) {
+          document.getElementById('score').textContent =
+            "Score: " + correct + "/" + total + " — " + (correct===total ? "you own the control plane. Data plane (0004) next."
+            : correct>=total-1 ? "strong — reread §2 for the one you missed." : "revisit §2–§3; the desired-state/reconcile split is the key.");
+        }
+      };
+      opts.appendChild(b);
+    });
+  });
+</script>
+</body>
+</html>

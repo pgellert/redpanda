@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shadow Linking — Failover State Machine (reference)</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --bg:#fdfcf9;
+          --ok:#2f6b3a; --no:#9a2b2b; --warnc:#9a5b2b; }
+  * { box-sizing:border-box; }
+  body { font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width:50rem; margin:3rem auto; padding:0 1.6rem; line-height:1.5; }
+  h1 { font-size:1.7rem; margin:0 0 .2rem; }
+  h2 { font-size:1.15rem; margin:2rem 0 .6rem; border-bottom:1px solid var(--rule); padding-bottom:.25rem; }
+  .sub { color:var(--muted); font-style:italic; margin:0 0 1.2rem; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; margin:.4rem 0 1rem; }
+  th,td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--rule); vertical-align:top; }
+  th { font-variant:small-caps; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.8rem; }
+  .ascii { font-family:"SF Mono",Menlo,monospace; font-size:.75rem; line-height:1.4; background:#f5f1e8; border:1px solid var(--rule);
+           padding:1rem; border-radius:4px; overflow-x:auto; white-space:pre; }
+  .tag { display:inline-block; font-size:.7rem; font-variant:small-caps; letter-spacing:.04em; padding:.02em .5em; border-radius:3px; color:#fff; }
+  .t-fact{background:var(--ok);} .t-inf{background:var(--ctrl);} .t-open{background:var(--warnc);}
+  .note { background:#fbf4ec; border-left:4px solid var(--warnc); padding:.6rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; margin:1rem 0; }
+  a { color:var(--accent); }
+  footer { margin-top:2.5rem; border-top:1px solid var(--rule); padding-top:.8rem; color:var(--muted); font-size:.8rem; }
+  @media print { body{margin:0;max-width:none;} a{color:var(--ink);text-decoration:none;} }
+</style>
+</head>
+<body>
+
+<h1>Failover State Machine</h1>
+<p class="sub">Reference for <code>mirror_topic_status</code> and the failover/promotion flow. Pairs with <a href="../lessons/0005-failover-and-promotion.html">Lesson 0005</a>.</p>
+
+<h2>States &amp; legal transitions</h2>
+<div class="ascii">              ┌─ paused ─┐        paused ⇄ active
+              ▼          │
+   ┌──────── active ─────┴───────┐
+   │           │                 │
+   ▼           ▼                 ▼
+ failing_over  failed         promoting
+   │        (terminal)           │
+   ▼                             ▼
+ failed_over                  promoted
+   │                             │
+   └── → active: TODO (not implemented yet) ──┘</div>
+<table>
+  <tr><th>From</th><th>To (valid)</th><th>Code</th></tr>
+  <tr><td><code>active</code></td><td><code>paused</code> · <code>failing_over</code> · <code>promoting</code> · <code>failed</code></td><td class="file">types.cc:50-53</td></tr>
+  <tr><td><code>failing_over</code></td><td><code>failed_over</code> · <code>failed</code></td><td class="file">types.cc:44-55</td></tr>
+  <tr><td><code>promoting</code></td><td><code>promoted</code> · <code>failed</code></td><td class="file">types.cc:44-57</td></tr>
+  <tr><td><code>failed_over</code> / <code>promoted</code></td><td>(no re-activation yet — TODO)</td><td class="file">types.cc:38-43</td></tr>
+  <tr><td><code>failed</code></td><td>terminal, non-recoverable today</td><td class="file">types.h:114</td></tr>
+</table>
+
+<h2>Failover vs promotion</h2>
+<table>
+  <tr><th></th><th>failover</th><th>promotion</th></tr>
+  <tr><td>Path</td><td><code>active → failing_over → failed_over</code></td><td><code>active → promoting → promoted</code></td></tr>
+  <tr><td>Use case</td><td>disaster, source gone</td><td>planned migration, source healthy</td></tr>
+  <tr><td>Replication</td><td>stop &amp; cut over immediately</td><td><b>drain lag to source first</b>, then cut</td></tr>
+  <tr><td>Data loss</td><td>possible (unreplicated tail)</td><td>none</td></tr>
+</table>
+
+<h2>How <code>failed_over</code> is reached</h2>
+<div class="ascii">rpk shadow failover → frontend → batch_update_mirror_topic_status_cmd (active→failing_over, via raft)
+  ↓ every partition leader applies it, unblocks Kafka API writes, bumps to link update revision
+link_status_reconciler::try_finish_failover (controller leader)        (cc:107)
+  report = shadow_topic_report(link, topic)                  ── cross-broker status RPC
+  valid  = partitions whose leader.broker.link_update_revision >= controller revision  (cc:144)
+  if valid == total_partitions: update_mirror_topic_state(failed_over)  (cc:167)
+  else defer                       ← "reasonable heuristic, not foolproof" (cc:132)</div>
+
+<h2>Identity preservation</h2>
+<table>
+  <tr><th>Property</th><th>Preserved</th><th>Evidence</th></tr>
+  <tr><td>offsets &amp; timestamps</td><td><span class="tag t-fact">yes</span></td><td class="file">service.cc:449 (expected_offsets)</td></tr>
+  <tr><td>topic ID</td><td><span class="tag t-fact">no</span></td><td class="file">source_topic_id + destination_topic_id are separate fields, types.cc:115,117</td></tr>
+  <tr><td>leader epoch</td><td><span class="tag t-fact">no</span></td><td class="file">committed offsets use leader_epoch(-1), group_mirroring_task.cc:310</td></tr>
+</table>
+<div class="note">
+<b>Open debate:</b> <span class="tag t-fact">fact</span> topic ID / leader epoch are not carried. <span class="tag t-inf">inference</span> local topic gets a fresh controller-assigned ID. <span class="tag t-open">open</span> whether this breaks specific clients (producer fencing, idempotent producers, metadata caches) post-repoint — the active discussion. Argue from the code facts, not a foregone conclusion.
+</div>
+
+<h2>Split-brain guardrail</h2>
+<p>Failover makes the shadow writable but cannot stop a live source. Safety is <b>active-passive + manual failover + repoint all clients before resuming writes</b> — enforced by procedure, not protocol. No automatic fallback to source exists.</p>
+
+<footer>
+Reference doc · verified on branch <code>slsr/schema-replication</code>, 2026-06-15 (line numbers approximate to that working tree).
+</footer>
+</body>
+</html>

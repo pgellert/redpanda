@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0001 — The two planes of a shadow link</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --data:#7a3b2e;
+          --disc:#5a6b2e; --rep:#6b4a7a; --bg:#fdfcf9; --ok:#2f6b3a; --no:#9a2b2b; }
+  * { box-sizing:border-box; }
+  body { font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width:46rem; margin:3rem auto; padding:0 1.6rem; line-height:1.58; }
+  h1 { font-size:1.8rem; margin:0 0 .1rem; line-height:1.15; }
+  .kicker { font-variant:small-caps; letter-spacing:.08em; color:var(--accent); font-size:.85rem; }
+  .sub { color:var(--muted); font-style:italic; margin:.2rem 0 1.6rem; }
+  h2 { font-size:1.2rem; margin:2.2rem 0 .5rem; }
+  p { margin:.7rem 0; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  .win { background:#f3efe6; border:1px solid var(--rule); border-left:4px solid var(--accent); padding:.8rem 1rem; margin:1.2rem 0; border-radius:0 4px 4px 0; }
+  .win b { font-variant:small-caps; letter-spacing:.04em; }
+  .planecard { border-left:4px solid; padding:.3rem 0 .3rem 1rem; margin:1rem 0; }
+  .c-ctrl{border-color:var(--ctrl);} .c-data{border-color:var(--data);} .c-disc{border-color:var(--disc);} .c-rep{border-color:var(--rep);}
+  .tag { display:inline-block; font-size:.72rem; font-variant:small-caps; letter-spacing:.05em; padding:.05em .55em; border-radius:3px; color:#fff; }
+  .t-ctrl{background:var(--ctrl);} .t-data{background:var(--data);} .t-disc{background:var(--disc);} .t-rep{background:var(--rep);}
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.82rem; }
+  .ascii { font-family:"SF Mono",Menlo,monospace; font-size:.74rem; line-height:1.35; background:#f5f1e8; border:1px solid var(--rule);
+           padding:1rem; border-radius:4px; overflow-x:auto; white-space:pre; }
+  /* quiz */
+  .quiz { background:#f7f4ec; border:1px solid var(--rule); border-radius:6px; padding:1rem 1.2rem; margin:1.4rem 0; }
+  .q { margin:1rem 0; padding-bottom:.8rem; border-bottom:1px dotted var(--rule); }
+  .q:last-of-type { border-bottom:none; }
+  .q .prompt { font-weight:600; margin-bottom:.5rem; }
+  .opts { display:flex; flex-wrap:wrap; gap:.4rem; }
+  .opts button { font-family:inherit; font-size:.85rem; cursor:pointer; border:1px solid var(--rule); background:#fff;
+                 padding:.35em .8em; border-radius:4px; color:var(--ink); transition:all .12s; }
+  .opts button:hover { border-color:var(--accent); }
+  .opts button.right { background:var(--ok); color:#fff; border-color:var(--ok); }
+  .opts button.wrong { background:var(--no); color:#fff; border-color:var(--no); }
+  .fb { font-size:.85rem; margin-top:.45rem; min-height:1.1em; font-style:italic; color:var(--muted); }
+  .score { font-weight:600; margin-top:.6rem; }
+  a { color:var(--accent); }
+  footer { margin-top:2.6rem; border-top:1px solid var(--rule); padding-top:.9rem; color:var(--muted); font-size:.82rem; }
+  .ask { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.7rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 0001 · Shadow Linking</div>
+<h1>The two planes of a shadow link</h1>
+<p class="sub">Mission: durable code-ownership model of <code>src/v/cluster_link/</code>. This lesson gives you the skeleton everything else hangs on.</p>
+
+<div class="win">
+<b>Your win today →</b> Given any file in <code>cluster_link/</code>, you can name which of <i>four buckets</i> it lives in — and therefore what its job is — without reading it.
+</div>
+
+<h2>1 · What a shadow link <em>is</em></h2>
+<p>"Shadowing" is Redpanda's enterprise disaster-recovery feature (25.3+). It establishes <b>asynchronous, offset-preserving</b>
+replication from a <b>source</b> cluster to a read-only <b>shadow</b> cluster. The shadow continuously pulls data; on disaster you
+<i>fail over</i> and it becomes writable.
+<a href="https://docs.redpanda.com/streaming/current/manage/disaster-recovery/shadowing/overview/">[docs: overview]</a></p>
+<p>Two phrases to internalise, because they explain the whole code shape:</p>
+<ul>
+  <li><b>Active-passive &amp; async</b> → the shadow never writes its own data; it only mirrors. There is always lag. This is why the data plane is a one-directional pull loop, not a consensus protocol.</li>
+  <li><b>Byte-level, offset-preserving</b> → records are <i>copied</i>, not re-produced. Offset 42 on the source is offset 42 on the shadow. This is why replication appends raw batches to raft rather than going through the produce path.</li>
+</ul>
+<p>In the code the feature is the <code>cluster_link</code> module, a link is a <code>link</code>, and a shadow topic is a <b>mirror topic</b>. (Full naming map: <a href="../reference/architecture-map.html">architecture-map reference</a>.)</p>
+
+<h2>2 · The four buckets</h2>
+<p>Every file in <code>cluster_link/</code> serves one of four jobs. This is the load-bearing idea of the whole lesson:</p>
+
+<div class="planecard c-ctrl">
+<p><span class="tag t-ctrl">control plane</span> — <b>decides what should exist.</b> A raft-replicated state machine on the controller: the desired set of mirror topics and their states. Owns commands and reconcilers.
+<br><span class="file">manager.h:38 · link.h:32 · topic_reconciler.h:24 · link_status_reconciler.h:28 · model/types.h:1021 (link_state), :1077 (commands)</span></p>
+</div>
+
+<div class="planecard c-data">
+<p><span class="tag t-data">data plane</span> — <b>moves the bytes.</b> On each shard leading a mirror partition, a loop fetches records from the source over Kafka and appends them to the local raft log, offset-for-offset.
+<br><span class="file">replication/link_replication_mgr.h:27 · replication/partition_replicator.h:57 · replication/deps.h (data_source/data_sink)</span></p>
+</div>
+
+<div class="planecard c-disc">
+<p><span class="tag t-disc">periodic task</span> — <b>bridges source → control plane.</b> Each extends the abstract <code>task</code> (a timer + <code>run_impl()</code> state machine). It polls the remote source and emits control-plane commands. Three of them: topic sync, consumer-group offsets, ACLs.
+<br><span class="file">task.h:33 · source_topic_syncer · group_mirroring_task · security_migrator</span></p>
+</div>
+
+<div class="planecard c-rep">
+<p><span class="tag t-rep">reporting</span> — <b>reads across the others.</b> Aggregates per-partition lag and per-task health from every broker to answer the status API.
+<br><span class="file">service.h:41 · rpc_service.h:21 · shadow_linking_rpc.json</span></p>
+</div>
+
+<p>The crucial distinction beginners miss: <b>tasks discover, the data plane copies.</b> The topic-sync task does <i>not</i> move record bytes — it just tells the control plane "a topic named X exists on the source, please create a mirror for it." Only <code>partition_replicator</code> ever touches records.</p>
+
+<div class="ascii">          SOURCE CLUSTER  (Kafka protocol)
+                 │  ▲
+   fetch records │  │ poll metadata / offsets / ACLs
+                 ▼  │
+   ┌─────────────┴──┴───────────────────────────────┐
+   │  SHADOW (this Redpanda) — cluster_link module   │
+   │                                                 │
+   │  [periodic task] ─ emits cmd ─▶ [control plane] │
+   │   topic_syncer                   link_state     │
+   │   group_mirroring                reconcilers    │
+   │   security_migrator                  │ creates  │
+   │                                      ▼ topics    │
+   │  [data plane] partition_replicator: fetch→append│
+   │                                                 │
+   │  [reporting] service / rpc_service ─ reads all  │
+   └─────────────────────────────────────────────────┘</div>
+
+<h2>3 · Retrieve it (don't just read it)</h2>
+<p>Classify each file into its bucket. Answer from memory — getting one wrong and seeing why is worth more than reading the section again.</p>
+
+<div class="quiz" id="quiz">
+  <div class="q" data-a="data">
+    <div class="prompt">1. <code>replication/partition_replicator.cc</code></div>
+    <div class="opts"></div><div class="fb"></div>
+  </div>
+  <div class="q" data-a="disc">
+    <div class="prompt">2. <code>security_migrator.cc</code> — syncs ACLs from the source</div>
+    <div class="opts"></div><div class="fb"></div>
+  </div>
+  <div class="q" data-a="ctrl">
+    <div class="prompt">3. <code>topic_reconciler.cc</code> — creates local topics to match desired state</div>
+    <div class="opts"></div><div class="fb"></div>
+  </div>
+  <div class="q" data-a="rep">
+    <div class="prompt">4. <code>rpc_service.cc</code> — aggregates partition reports across brokers</div>
+    <div class="opts"></div><div class="fb"></div>
+  </div>
+  <div class="q" data-a="ctrl">
+    <div class="prompt">5. <code>link_status_reconciler.cc</code> — drives failover/promotion transitions</div>
+    <div class="opts"></div><div class="fb"></div>
+  </div>
+  <div class="q" data-a="disc">
+    <div class="prompt">6. <code>source_topic_syncer.cc</code> — discovers source topics, emits add_mirror_topic_cmd</div>
+    <div class="opts"></div><div class="fb"></div>
+  </div>
+  <div class="score" id="score"></div>
+</div>
+
+<h2>4 · A subtlety to chew on</h2>
+<p><code>source_topic_syncer</code> is a <code>controller_locked_task</code> (<span class="file">task.h:148</span>), whereas <code>group_mirroring_task</code>
+is a plain task running on the brokers that host <code>__consumer_offsets</code>. <b>Why would topic discovery be locked to the controller
+but consumer-group offset sync not be?</b> Hold that question — it's the seed of Lesson 0002 (where tasks run, and why).</p>
+
+<div class="ask">
+<b>I'm your teacher — use me.</b> Ask follow-ups any time: "show me where a command gets applied to <code>link_state</code>", "trace one fetch→replicate iteration", or "I got quiz #2 wrong, why isn't ACL sync control-plane?" The next lesson adapts to what you found hard here.
+</div>
+
+<h2>Read next</h2>
+<p><b>Primary source (15 min):</b> the official <a href="https://docs.redpanda.com/streaming/current/manage/disaster-recovery/shadowing/overview/">Shadowing Overview</a> — read the intro + "Shadow link tasks" + "Limitations". It's the highest-trust framing of <i>why</i> the code is shaped this way.</p>
+<p><b>Then skim:</b> <code>src/v/cluster_link/link.h</code> (32–156) — see the four buckets meet: a <code>link</code> holds a map of tasks <i>and</i> a <code>link_replication_manager</code>.</p>
+
+<footer>
+Lesson 0001 · pairs with <a href="../reference/architecture-map.html">architecture-map.html</a> ·
+<code>file:line</code> verified on branch <code>slsr/schema-replication</code>, 2026-06-15.
+</footer>
+
+<script>
+  const LABELS = { ctrl:"Control plane", data:"Data plane", disc:"Periodic task", rep:"Reporting" };
+  const ORDER = ["ctrl","data","disc","rep"];
+  const WHY = {
+    data:"Data plane — the only bucket that touches record bytes (fetch→append).",
+    disc:"Periodic task — it polls the source and emits a command; it never moves records.",
+    ctrl:"Control plane — it reconciles desired vs actual local state on the controller.",
+    rep:"Reporting — it reads across planes to answer the status API."
+  };
+  let answered = 0, correct = 0;
+  document.querySelectorAll('.q').forEach(q => {
+    const ans = q.dataset.a;
+    const opts = q.querySelector('.opts');
+    const fb = q.querySelector('.fb');
+    ORDER.forEach(k => {
+      const b = document.createElement('button');
+      b.textContent = LABELS[k];
+      b.onclick = () => {
+        if (q.dataset.done) return;
+        q.dataset.done = "1"; answered++;
+        if (k === ans) { b.classList.add('right'); correct++; fb.textContent = "✓ " + WHY[ans]; }
+        else {
+          b.classList.add('wrong');
+          [...opts.children].find(x => x.textContent === LABELS[ans]).classList.add('right');
+          fb.textContent = "✗ It's " + LABELS[ans] + ". " + WHY[ans];
+        }
+        if (answered === 6) {
+          document.getElementById('score').textContent =
+            "Score: " + correct + "/6 — " + (correct===6 ? "you own the skeleton. On to Lesson 0002."
+            : correct>=4 ? "solid; revisit the ones you missed." : "reread §2 and retry — this map is worth nailing.");
+        }
+      };
+      opts.appendChild(b);
+    });
+  });
+</script>
+</body>
+</html>

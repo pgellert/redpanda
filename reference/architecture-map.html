@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shadow Linking — Architecture Map (reference)</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --data:#7a3b2e; --bg:#fdfcf9; }
+  * { box-sizing: border-box; }
+  body { font-family: "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width: 50rem; margin: 3rem auto; padding: 0 1.6rem; line-height: 1.5; }
+  h1 { font-size: 1.7rem; margin:0 0 .2rem; }
+  h2 { font-size: 1.15rem; margin: 2rem 0 .6rem; border-bottom:1px solid var(--rule); padding-bottom:.25rem; }
+  .sub { color:var(--muted); font-style: italic; margin:0 0 1.2rem; }
+  code { font-family: "SF Mono",Menlo,Consolas,monospace; font-size: .85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  table { border-collapse: collapse; width:100%; font-size:.9rem; margin:.4rem 0 1rem; }
+  th,td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--rule); vertical-align: top; }
+  th { font-variant: small-caps; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  .plane { display:inline-block; font-size:.72rem; font-variant:small-caps; letter-spacing:.05em; padding:.05em .5em;
+           border-radius:3px; color:#fff; }
+  .ctrl { background:var(--ctrl); } .data { background:var(--data); } .disc{ background:#5a6b2e;} .rep{background:#6b4a7a;}
+  .planebox { border-left:4px solid; padding:.2rem 0 .2rem 1rem; margin:1rem 0; }
+  .planebox.controlp { border-color:var(--ctrl); }
+  .planebox.datap { border-color:var(--data); }
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.82rem; }
+  footer { margin-top:2.5rem; border-top:1px solid var(--rule); padding-top:.8rem; color:var(--muted); font-size:.8rem; }
+  a { color: var(--accent); }
+  @media print { body{margin:0;max-width:none;} a{color:var(--ink);text-decoration:none;} }
+</style>
+</head>
+<body>
+
+<h1>Shadow Linking — Architecture Map</h1>
+<p class="sub">A one-page reference for <code>src/v/cluster_link/</code>. Compressed essence of Lesson 0001.</p>
+
+<h2>Naming map (read this first)</h2>
+<table>
+  <tr><th>Product / docs term</th><th>Code term</th><th>Where</th></tr>
+  <tr><td>Shadowing (the DR feature)</td><td>cluster linking</td><td>module <code>cluster_link/</code></td></tr>
+  <tr><td>shadow link</td><td>link / cluster link</td><td><code>link.h</code>, <code>model::metadata</code></td></tr>
+  <tr><td>shadow topic</td><td>mirror topic</td><td><code>model::mirror_topic_metadata</code></td></tr>
+  <tr><td>source cluster</td><td>source (remote, Kafka-protocol)</td><td><code>connection_config</code></td></tr>
+  <tr><td>shadow cluster</td><td>target / local cluster</td><td>this Redpanda</td></tr>
+</table>
+
+<h2>The mental model: two planes + a clock</h2>
+<p>Everything in <code>cluster_link/</code> is one of: <b>control plane</b> (what should exist — replicated, raft-backed),
+<b>data plane</b> (move the bytes — per-partition, leader-driven), or a <b>periodic task</b> that bridges the remote
+source into the control plane. Status <b>reporting</b> reads across both.</p>
+
+<div class="planebox controlp">
+<p><span class="plane ctrl">control plane</span> &nbsp;<i>Replicated state machine. Runs on the controller. Answers "which topics should be mirrored, in what state?"</i></p>
+<table>
+  <tr><th>Component</th><th>Role</th><th>File</th></tr>
+  <tr><td><code>manager</code></td><td>Creates/destroys links on config change; hosts global reconcilers</td><td class="file">manager.h:38</td></tr>
+  <tr><td><code>link</code></td><td>Per-link coordinator: owns the task map + replication mgr + a reconciler timer</td><td class="file">link.h:32</td></tr>
+  <tr><td>commands</td><td>Raft log entries: <code>add_mirror_topic_cmd</code>, <code>update_mirror_topic_status_cmd</code>, …</td><td class="file">model/types.h:1077</td></tr>
+  <tr><td><code>link_state</code></td><td>The replicated table: topic → <code>mirror_topic_metadata</code></td><td class="file">model/types.h:1021</td></tr>
+  <tr><td><code>topic_reconciler</code></td><td>Turns desired mirror topics into real local topics</td><td class="file">topic_reconciler.h:24</td></tr>
+  <tr><td><code>link_status_reconciler</code></td><td>Drives failover / promotion state transitions</td><td class="file">link_status_reconciler.h:28</td></tr>
+</table>
+</div>
+
+<div class="planebox datap">
+<p><span class="plane data">data plane</span> &nbsp;<i>Leader-driven byte movement. Runs on every shard that leads a mirror partition. Answers "pull records from source, append locally."</i></p>
+<table>
+  <tr><th>Component</th><th>Role</th><th>File</th></tr>
+  <tr><td><code>link_replication_manager</code></td><td>Per-shard: starts/stops a replicator per led partition</td><td class="file">replication/link_replication_mgr.h:27</td></tr>
+  <tr><td><code>partition_replicator</code></td><td>Per-partition fetch→replicate loop (pipelined, offset-preserving)</td><td class="file">replication/partition_replicator.h:57</td></tr>
+  <tr><td><code>data_source</code> / <code>data_sink</code></td><td>Abstractions: fetch from remote Kafka / append to local raft</td><td class="file">replication/deps.h:90 / :31</td></tr>
+</table>
+</div>
+
+<h2>Periodic tasks — the source→control-plane bridge</h2>
+<p>All extend the abstract <code>task</code> (<span class="file">task.h:33</span>), a periodic state machine with <code>run_impl()</code>.
+Each maps 1:1 to a docs "shadow link task". They <i>discover</i> remote state and emit control-plane commands; they do not move record bytes.</p>
+<table>
+  <tr><th>Docs task</th><th>Code class</th><th>What it syncs</th><th>File</th></tr>
+  <tr><td>Source Topic Sync</td><td><code>source_topic_syncer</code> <span class="plane disc">controller-locked</span></td><td>Topic discovery + metadata/config</td><td class="file">source_topic_syncer.h</td></tr>
+  <tr><td>Consumer Group Shadowing</td><td><code>group_mirroring_task</code></td><td>Committed consumer offsets</td><td class="file">group_mirroring_task.h</td></tr>
+  <tr><td>Security Migrator</td><td><code>security_migrator</code></td><td>ACLs</td><td class="file">security_migrator.h</td></tr>
+</table>
+<p>Schema Registry is mirrored two ways: <b>topic mode</b> (replicate the <code>_schemas</code> topic via the data plane) or
+<b>API mode</b> (call the source SR HTTP API). Config in <code>model/types.h:519</code>.</p>
+
+<h2>Reporting</h2>
+<p><code>service</code> (<span class="file">service.h:41</span>) + <code>rpc_service</code> (<span class="file">rpc_service.h:21</span>) aggregate
+per-partition lag and per-task health across brokers for the status API. RPC surface defined in <code>shadow_linking_rpc.json</code>.</p>
+
+<h2>Three facts that anchor everything</h2>
+<ol>
+  <li><b>Active-passive, asynchronous.</b> Source serves traffic; shadow is read-only until failover. Always some lag. <a href="https://docs.redpanda.com/streaming/current/manage/disaster-recovery/shadowing/overview/">[docs]</a></li>
+  <li><b>Byte-level, offset-preserving.</b> Records are copied, not re-produced — offsets &amp; timestamps are identical to source.</li>
+  <li><b>Control plane decides, data plane copies, tasks discover.</b> If you can place a file in one of those three buckets, you understand its job.</li>
+</ol>
+
+<footer>
+Reference doc · pairs with <a href="../lessons/0001-two-planes-of-a-shadow-link.html">Lesson 0001</a> ·
+line numbers verified against the tree on branch <code>slsr/schema-replication</code>, 2026-06-15. Ask your teacher (this agent) if any reference has drifted.
+</footer>
+</body>
+</html>

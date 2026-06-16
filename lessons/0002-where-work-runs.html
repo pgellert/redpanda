@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0002 — Where the work runs</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --data:#7a3b2e;
+          --disc:#5a6b2e; --bg:#fdfcf9; --ok:#2f6b3a; --no:#9a2b2b; }
+  * { box-sizing:border-box; }
+  body { font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width:46rem; margin:3rem auto; padding:0 1.6rem; line-height:1.58; }
+  h1 { font-size:1.8rem; margin:0 0 .1rem; line-height:1.15; }
+  .kicker { font-variant:small-caps; letter-spacing:.08em; color:var(--accent); font-size:.85rem; }
+  .sub { color:var(--muted); font-style:italic; margin:.2rem 0 1.6rem; }
+  h2 { font-size:1.2rem; margin:2.2rem 0 .5rem; }
+  p { margin:.7rem 0; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  .win { background:#f3efe6; border:1px solid var(--rule); border-left:4px solid var(--accent); padding:.8rem 1rem; margin:1.2rem 0; border-radius:0 4px 4px 0; }
+  .win b { font-variant:small-caps; letter-spacing:.04em; }
+  .recall { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.6rem 1rem; margin:1.1rem 0; border-radius:0 4px 4px 0; font-size:.92rem; }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; margin:.5rem 0 1rem; }
+  th,td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--rule); vertical-align:top; }
+  th { font-variant:small-caps; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.82rem; }
+  .ascii { font-family:"SF Mono",Menlo,monospace; font-size:.76rem; line-height:1.4; background:#f5f1e8; border:1px solid var(--rule);
+           padding:1rem; border-radius:4px; overflow-x:auto; white-space:pre; }
+  .quiz { background:#f7f4ec; border:1px solid var(--rule); border-radius:6px; padding:1rem 1.2rem; margin:1.4rem 0; }
+  .q { margin:1rem 0; padding-bottom:.8rem; border-bottom:1px dotted var(--rule); }
+  .q:last-of-type { border-bottom:none; }
+  .q .prompt { font-weight:600; margin-bottom:.5rem; }
+  .opts { display:flex; flex-direction:column; gap:.4rem; }
+  .opts button { font-family:inherit; font-size:.85rem; cursor:pointer; border:1px solid var(--rule); background:#fff;
+                 padding:.4em .8em; border-radius:4px; color:var(--ink); transition:all .12s; text-align:left; }
+  .opts button:hover { border-color:var(--accent); }
+  .opts button.right { background:var(--ok); color:#fff; border-color:var(--ok); }
+  .opts button.wrong { background:var(--no); color:#fff; border-color:var(--no); }
+  .fb { font-size:.85rem; margin-top:.45rem; min-height:1.1em; font-style:italic; color:var(--muted); }
+  .score { font-weight:600; margin-top:.6rem; }
+  a { color:var(--accent); }
+  footer { margin-top:2.6rem; border-top:1px solid var(--rule); padding-top:.9rem; color:var(--muted); font-size:.82rem; }
+  .ask { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.7rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 0002 · Shadow Linking</div>
+<h1>Where the work runs</h1>
+<p class="sub">You derived the rule last time — <a href="../learning-records/0001-task-locality-follows-state-locality.html">task locality follows state locality</a>. Now: the one predicate that enforces it, and the pattern it shares with the data plane.</p>
+
+<div class="recall">
+<b>Recall first (no scrolling):</b> consumer-offset sync runs on every shard that leads a <code>__consumer_offsets</code> partition; topic-sync runs on a single shard cluster-wide. State <i>says</i> where work runs. This lesson is <i>how</i> the code asks the question.
+</div>
+
+<div class="win">
+<b>Your win today →</b> Read any task's <code>should_start_impl</code> and state exactly where in the cluster it runs — and explain how it follows leadership as it moves, using the same machinery the data-plane replicators use.
+</div>
+
+<h2>1 · One predicate, asked on every shard</h2>
+<p>A <code>link</code> is a sharded object — it exists on every shard of every broker. On a timer, each shard's copy runs the
+<b>task reconciler</b> (<span class="file">link.h:134 run_task_reconciler</span>), which asks, for each task it knows about, a single question:</p>
+<div class="ascii">should_start(shard, node) = is_enabled() && should_start_impl(shard, node)   // task.cc:216
+should_stop (shard, node) =                 should_stop_impl (shard, node)   // task.cc:225</div>
+<p>That's the entire location mechanism. The base <code>task</code> handles the timer, the state machine, retries; subclasses
+answer only <i>"should I be running on this particular (shard, node)?"</i> Because every shard asks independently and
+continuously, the set of places a task runs is always reconciled toward the truth — no central dispatcher hands out assignments.</p>
+
+<h2>2 · The two answers</h2>
+<table>
+  <tr><th>Subclass</th><th><code>should_start_impl</code> returns true when…</th><th>So it runs on…</th></tr>
+  <tr><td><code>controller_locked_task</code></td>
+      <td>this is the <code>controller_stm_shard</code> <b>and</b> this node leads <code>controller_ntp</code> <span class="file">(task.cc:260)</span></td>
+      <td><b>one shard, cluster-wide</b> (the controller leader)</td></tr>
+  <tr><td>plain <code>task</code> <br>(<code>group_mirroring_task</code>)</td>
+      <td>this shard leads ≥1 <code>__consumer_offsets</code> partition <span class="file">(group_mirroring_task.cc:34–48)</span></td>
+      <td><b>many shards</b> — each offsets-partition leader</td></tr>
+</table>
+<p>Notice the symmetry with <code>should_stop_impl</code>: <code>controller_locked_task</code> stops itself precisely when it is
+<i>no longer</i> the controller leader (<span class="file">task.cc:255</span>). Start and stop are the same predicate, negated — which is what makes the task <b>chase leadership</b>.</p>
+
+<h2>3 · Predict, then check</h2>
+<p>You know <code>group_mirroring_task</code> is a plain task and <code>source_topic_syncer</code> is controller-locked. Before the quiz: <b>ACLs.</b> Are they controller-global state or partition-local? Decide — then answer Q1, which reveals what <code>security_migrator</code> actually subclasses.</p>
+
+<div class="quiz" id="quiz">
+  <div class="q" data-a="0">
+    <div class="prompt">1. <code>security_migrator</code> (ACL sync) runs on…</div>
+    <div class="opts"
+      data-opts='["the single controller-leader shard","each consumer-offsets partition leader","every single shard in cluster","one arbitrary broker shard chosen"]'
+      data-fb='ACLs are controller-global state, so security_migrator IS a controller_locked_task (security_migrator.h:27) — one writer, like topic-sync.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="1">
+    <div class="prompt">2. <code>group_mirroring_task</code> commits offsets and runs on…</div>
+    <div class="opts"
+      data-opts='["the single controller-leader shard once","each consumer-offsets partition leader shard","every single shard in the cluster","one arbitrary broker shard per link"]'
+      data-fb='Offsets are partitioned state; the group coordinator is the offsets-partition leader, so the task co-locates there.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="0">
+    <div class="prompt">3. When controller leadership moves to another node, the reconciler…</div>
+    <div class="opts"
+      data-opts='["stops it here and starts there","keeps running it unchanged right here","faults it until a manual restart","spawns one copy on every node"]'
+      data-fb='should_stop_impl flips true on the old leader, should_start_impl flips true on the new one. The task chases leadership automatically.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="2">
+    <div class="prompt">4. The data-plane <code>partition_replicator</code> is started/stopped using…</div>
+    <div class="opts"
+      data-opts='["a totally unrelated scheduling model","a permanent pin to shard zero","the same start-on-leadership pattern","the controller-locked predicate also"]'
+      data-fb='Same idea: a replicator starts on the shard that leads its mirror partition and stops on leadership loss. Tasks and data plane share one pattern.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="score" id="score"></div>
+</div>
+
+<h2>4 · The pattern under all of it</h2>
+<p>Step back and the whole module is one shape: <b>reconcile running work to current leadership.</b> A controller-locked task,
+a per-partition offset syncer, and a per-partition <code>partition_replicator</code> are three instances of "start work on the
+shard that leads the relevant raft group; stop it when leadership moves." Once you see that, the data-plane lesson (0004) will
+feel like a special case you already understand — the "work" is just a fetch→append loop instead of a task.</p>
+
+<h2>5 · Chew on this → Lesson 0003</h2>
+<p>The controller-locked tasks <i>emit commands</i> (<code>add_mirror_topic_cmd</code>, …) that mutate <code>link_state</code>. But
+those commands go through controller raft and are applied on <b>every</b> node, while the task that emitted them ran on <b>one</b>.
+<b>How does a command produced on the controller leader become local topics on every broker?</b> That hand-off — task → command →
+replicated state → reconciler → real topics — is the control-plane deep dive.</p>
+
+<div class="ask">
+<b>Ask me anything.</b> Good follow-ups for right now: "show me <code>run_task_reconciler</code>'s actual loop", "what are the task <i>states</i> (active/paused/faulted) and who sets them?", or "where does <code>partition_replicator</code> get start/stopped on leadership change?" I'll trace the real code.
+</div>
+
+<h2>Read next</h2>
+<p><b>Primary source (10 min):</b> read <code>src/v/cluster_link/task.h</code> lines 30–160 end-to-end — the base <code>task</code>, the <code>state</code> enum, and the two <code>should_*_impl</code> hooks. It's short and it's the contract every background job in the module obeys. Pair with the docs' <a href="https://docs.redpanda.com/streaming/current/manage/disaster-recovery/shadowing/overview/#shadow-link-tasks">task states</a> (ACTIVE / PAUSED / FAULTED / NOT_RUNNING / LINK_UNAVAILABLE) for the externally-visible vocabulary.</p>
+
+<footer>
+Lesson 0002 · builds on <a href="0001-two-planes-of-a-shadow-link.html">Lesson 0001</a> &amp; <a href="../reference/architecture-map.html">architecture map</a> ·
+<code>file:line</code> verified on branch <code>slsr/schema-replication</code>, 2026-06-15.
+</footer>
+
+<script>
+  let answered = 0, correct = 0, total = document.querySelectorAll('.q').length;
+  document.querySelectorAll('.q').forEach(q => {
+    const ans = parseInt(q.dataset.a, 10);
+    const opts = q.querySelector('.opts');
+    const labels = JSON.parse(opts.dataset.opts);
+    const why = opts.dataset.fb;
+    const fb = q.querySelector('.fb');
+    labels.forEach((label, i) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.onclick = () => {
+        if (q.dataset.done) return;
+        q.dataset.done = "1"; answered++;
+        if (i === ans) { b.classList.add('right'); correct++; fb.textContent = "✓ " + why; }
+        else {
+          b.classList.add('wrong');
+          opts.children[ans].classList.add('right');
+          fb.textContent = "✗ " + why;
+        }
+        if (answered === total) {
+          document.getElementById('score').textContent =
+            "Score: " + correct + "/" + total + " — " + (correct===total ? "you can place any task in the cluster. Lesson 0003 next."
+            : correct>=total-1 ? "strong. Skim §2 for the one you missed." : "reread §1–§2; the predicate is the whole mechanism.");
+        }
+      };
+      opts.appendChild(b);
+    });
+  });
+</script>
+</body>
+</html>

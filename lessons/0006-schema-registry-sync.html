@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0006 — Schema Registry sync (capstone)</title>
+<style>
+  :root { --ink:#1a1a1a; --muted:#6b6b6b; --rule:#d8d4cc; --accent:#7a3b2e; --ctrl:#2e5a7a; --data:#7a3b2e;
+          --disc:#5a6b2e; --bg:#fdfcf9; --ok:#2f6b3a; --no:#9a2b2b; }
+  * { box-sizing:border-box; }
+  body { font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; color:var(--ink);
+         background:var(--bg); max-width:46rem; margin:3rem auto; padding:0 1.6rem; line-height:1.58; }
+  h1 { font-size:1.8rem; margin:0 0 .1rem; line-height:1.15; }
+  .kicker { font-variant:small-caps; letter-spacing:.08em; color:var(--accent); font-size:.85rem; }
+  .sub { color:var(--muted); font-style:italic; margin:.2rem 0 1.6rem; }
+  h2 { font-size:1.2rem; margin:2.2rem 0 .5rem; }
+  p { margin:.7rem 0; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.85em; background:#f0ece3; padding:.05em .35em; border-radius:3px; }
+  .win { background:#f3efe6; border:1px solid var(--rule); border-left:4px solid var(--accent); padding:.8rem 1rem; margin:1.2rem 0; border-radius:0 4px 4px 0; }
+  .win b { font-variant:small-caps; letter-spacing:.04em; }
+  .recall { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.6rem 1rem; margin:1.1rem 0; border-radius:0 4px 4px 0; font-size:.92rem; }
+  table { border-collapse:collapse; width:100%; font-size:.87rem; margin:.5rem 0 1rem; }
+  th,td { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--rule); vertical-align:top; }
+  th { font-variant:small-caps; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  .file { font-family:"SF Mono",Menlo,monospace; font-size:.8rem; }
+  .ascii { font-family:"SF Mono",Menlo,monospace; font-size:.73rem; line-height:1.4; background:#f5f1e8; border:1px solid var(--rule);
+           padding:1rem; border-radius:4px; overflow-x:auto; white-space:pre; }
+  .quiz { background:#f7f4ec; border:1px solid var(--rule); border-radius:6px; padding:1rem 1.2rem; margin:1.4rem 0; }
+  .q { margin:1rem 0; padding-bottom:.8rem; border-bottom:1px dotted var(--rule); }
+  .q:last-of-type { border-bottom:none; }
+  .q .prompt { font-weight:600; margin-bottom:.5rem; }
+  .opts { display:flex; flex-direction:column; gap:.4rem; }
+  .opts button { font-family:inherit; font-size:.85rem; cursor:pointer; border:1px solid var(--rule); background:#fff;
+                 padding:.4em .8em; border-radius:4px; color:var(--ink); transition:all .12s; text-align:left; }
+  .opts button:hover { border-color:var(--accent); }
+  .opts button.right { background:var(--ok); color:#fff; border-color:var(--ok); }
+  .opts button.wrong { background:var(--no); color:#fff; border-color:var(--no); }
+  .fb { font-size:.85rem; margin-top:.45rem; min-height:1.1em; font-style:italic; color:var(--muted); }
+  .score { font-weight:600; margin-top:.6rem; }
+  a { color:var(--accent); }
+  footer { margin-top:2.6rem; border-top:1px solid var(--rule); padding-top:.9rem; color:var(--muted); font-size:.82rem; }
+  .ask { background:#eef2f5; border-left:4px solid var(--ctrl); padding:.7rem 1rem; border-radius:0 4px 4px 0; font-size:.9rem; }
+  .cap { background:#eef3ee; border-left:4px solid var(--ok); padding:.7rem 1rem; border-radius:0 4px 4px 0; }
+  .lessonref { font-variant:small-caps; font-size:.72rem; letter-spacing:.04em; color:#fff; background:var(--disc); padding:.02em .5em; border-radius:3px; }
+</style>
+</head>
+<body>
+
+<div class="kicker">Lesson 0006 · Shadow Linking · capstone</div>
+<h1>Schema Registry sync — your feature, as the whole course</h1>
+<p class="sub">The last bucket of state to mirror is the Schema Registry. This lesson is also a mirror: your SR-sync work turns out to be every pattern from Lessons 0001–0005, recombined.</p>
+
+<div class="recall">
+<b>Recall:</b> shadowing mirrors topic data, consumer offsets, ACLs — and Schema Registry. You own the SR piece. The win here isn't new machinery; it's seeing that you already understand it.
+</div>
+
+<div class="win">
+<b>Your win today →</b> Explain the two SR-sync modes and the <code>client</code>-vs-<code>sync</code> write gate, and map every part of <code>schema_registry_mirroring_task</code> back to a pattern you already own.
+</div>
+
+<h2>1 · Two modes, one config</h2>
+<p><code>schema_registry_sync_config</code> (<span class="file">model/types.h:519</span>) is a per-link config (Lesson 0003) with two mutually exclusive modes:</p>
+<table>
+  <tr><th>Mode</th><th>How schemas reach the shadow</th><th>Reuses</th></tr>
+  <tr><td><b>Topic mode</b><br><code>shadow_entire_schema_registry</code></td>
+      <td>The internal <code>_schemas</code> topic is mirrored as an ordinary mirror topic — byte-for-byte, offset-preserving, via the data plane. The local SR just reads its own replicated <code>_schemas</code>.</td>
+      <td><span class="lessonref">Lesson 0004</span> the data plane</td></tr>
+  <tr><td><b>API mode</b><br><code>shadow_schema_registry_api</code></td>
+      <td>A task calls the <i>source</i> SR's HTTP API, reads subjects/versions/schemas, and imports them into the local SR through the internal sync write path.</td>
+      <td><span class="lessonref">Lesson 0002</span> a task</td></tr>
+</table>
+
+<h2>2 · The write gate — <code>is_topic_mutable</code>'s schema-registry sibling</h2>
+<p>Just as a mirror topic blocks client produce while shadowing (Lesson 0005), a shadowed SR blocks client schema writes. The seq_writer checks it on every <code>sequenced_write</code> (<span class="file">pandaproxy/schema_registry/seq_writer.h:174</span>), and the rule has <b>two dimensions</b> — the source of the write × the mode (<span class="file">cluster/cluster_link/frontend.cc:336-344</span>):</p>
+<table>
+  <tr><th>write_source \ mode</th><th>Topic mode</th><th>API mode</th></tr>
+  <tr><td><code>client</code> (a normal SR API user)</td><td><b>blocked</b></td><td><b>blocked</b></td></tr>
+  <tr><td><code>schema_registry_sync</code> (the shadow importer)</td><td><b>blocked</b></td><td><b>allowed</b></td></tr>
+</table>
+<p>Read the one asymmetric cell: in <b>topic mode</b> even the sync importer is blocked, because the data plane owns <code>_schemas</code> — writing schemas through the SR path would collide with the byte replicator (the same single-writer discipline that makes shadow topics read-only). In <b>API mode</b>, the sync importer is precisely <i>how</i> schemas arrive, so it's the one writer allowed through.</p>
+<div class="cap">
+<b>This is your foundation commits, in one table.</b> "distinguish sync writes from client writes" + "expose internal Schema Registry writes" + "internal sequencer write paths" exist to create the <code>schema_registry_sync</code> write source — the lane that's open in API mode while the <code>client</code> lane is shut. It's the exact analogue of the produce gate: <code>is_topic_mutable</code> for topics, <code>link_disables_schema_registry_writes(md, source)</code> for schemas.
+</div>
+
+<h2>3 · Anatomy of <code>schema_registry_mirroring_task</code> (API mode) — all five patterns</h2>
+<p>Your task (<span class="file">cluster_link/schema_registry_sync/schema_registry_mirroring_task.h</span>) is a recombination, not an invention:</p>
+<table>
+  <tr><th>Part of your task</th><th>Pattern you already own</th></tr>
+  <tr><td>It's a <code>task</code> that <b>leads <code>_schemas/0</code></b> (<code>leads_schema_registry_partition</code>) — "mirroring how the consumer-group task follows <code>__consumer_offsets</code> leaders"</td>
+      <td><span class="lessonref">Lesson 0002 · LR-0001</span> locality follows the state it writes</td></tr>
+  <tr><td>Reads source via an abstract <code>source_reader</code>; <code>unavailable_source_reader</code> is the null-object when the source isn't configured</td>
+      <td><span class="lessonref">Lesson 0003</span> the <code>link_registry</code> dependency-inversion seam</td></tr>
+  <tr><td><code>run_impl</code> returns <code>state_transition</code>: source-unavailable → <code>link_unavailable</code> (retries), per-item error → stay active + count, internal fault → <code>faulted</code></td>
+      <td><span class="lessonref">Lesson 0002 · ref</span> live vs dormant task states</td></tr>
+  <tr><td>Writes imported schemas through the internal sync path (<code>write_source::schema_registry_sync</code>)</td>
+      <td><span class="lessonref">Lesson 0005</span> the write gate, sync lane open</td></tr>
+  <tr><td>Each run: list subjects → list versions → import the <code>(subject, version)</code> pairs the destination is missing</td>
+      <td><span class="lessonref">Lesson 0003</span> reconcile desired (source) vs actual (local)</td></tr>
+</table>
+<p>The loop is itself a reconciler: <code>target_has_version(subject, version)</code> is the "is reality already converged?" check, and importing the missing pairs is the convergence — idempotent and re-runnable, like every reconciler in this subsystem.</p>
+
+<div class="recall">
+<b>Honest scope note:</b> per the header, the current increment is <i>PR0: default context only — no filtering, references, compat/mode, deletes, or unsupported-feature handling yet</i>. The <code>source_reader</code> already carries the vocabulary for the rest (<code>unsupported_feature</code>, <code>source_filter</code> contexts/subjects), so the shape is laid for those increments.
+</div>
+
+<h2>4 · Retrieve it</h2>
+<div class="quiz" id="quiz">
+  <div class="q" data-a="2">
+    <div class="prompt">1. In topic mode, schemas reach the shadow by…</div>
+    <div class="opts"
+      data-opts='["calling the source SR HTTP API","a controller-locked import task","byte-replicating the _schemas topic","an internal sequencer broadcast"]'
+      data-fb='Topic mode mirrors _schemas as an ordinary mirror topic through the data plane; the local SR reads its own replicated copy.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="1">
+    <div class="prompt">2. In API mode, which write source is allowed through the gate?</div>
+    <div class="opts"
+      data-opts='["client (normal SR API users)","schema_registry_sync (the importer)","both client and sync sources","neither — SR is fully frozen"]'
+      data-fb='API mode blocks client writes but allows the sync importer — that lane is exactly how schemas arrive.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="0">
+    <div class="prompt">3. The SR mirroring task runs on the shard that…</div>
+    <div class="opts"
+      data-opts='["leads the _schemas/0 partition","is the controller leader shard","leads any __consumer_offsets part","was assigned at link creation"]'
+      data-fb='Locality follows the state it writes: it leads _schemas/0, just as group_mirroring follows __consumer_offsets leaders.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="3">
+    <div class="prompt">4. A source SR being unreachable parks the task in…</div>
+    <div class="opts"
+      data-opts='["faulted, needing manual restart","stopped until the next config","paused by the reconciler loop","link_unavailable, retrying on timer"]'
+      data-fb='source_unavailable maps to link_unavailable — a live state that retries each interval; only internal faults become faulted.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="q" data-a="1">
+    <div class="prompt">5. Why is even the sync importer blocked in topic mode?</div>
+    <div class="opts"
+      data-opts='["sync writes are never allowed","the data plane owns _schemas","topic mode has no importer task","the controller forbids SR writes"]'
+      data-fb='In topic mode the byte replicator owns _schemas; an SR-path write would collide — single-writer discipline, same as read-only shadow topics.'></div>
+    <div class="fb"></div>
+  </div>
+  <div class="score" id="score"></div>
+</div>
+
+<h2>5 · Mission accomplished</h2>
+<div class="cap">
+You set out for a <b>durable code-ownership model of <code>cluster_link/</code></b>. You now hold the full lifecycle — control vs data plane, task locality, the desired-state/reconcile pattern, the RPC philosophy, offset preservation, failover, and the write gates — and you've watched your own Schema Registry feature fall out of those same patterns. That's ownership: new code in this subsystem is now <i>recognition</i>, not study.
+</div>
+
+<div class="ask">
+<b>Your teacher remains on call.</b> Natural next moves as you build out SR sync: "review my <code>run_impl</code> against the task-state contract", "should the SR task be controller-locked instead of <code>_schemas/0</code>-local?", "trace a <code>schema_registry_sync</code> write through seq_writer to the log", or "what breaks at PR1 when contexts/filtering land?" Ask away.
+</div>
+
+<h2>Read next</h2>
+<p><b>Primary source:</b> your own <code>schema_registry_sync/schema_registry_mirroring_task.h</code> doc comment (the cleanest spec of the task) + the gate in <code>cluster/cluster_link/frontend.cc:336-344</code> + <code>seq_writer.h:174</code>. For the wider feature framing, the docs' <a href="https://docs.redpanda.com/streaming/current/manage/disaster-recovery/shadowing/overview/">Shadowing overview</a> (Schema Registry data is listed among what's replicated).</p>
+
+<footer>
+Lesson 0006 (capstone) · full arc:
+<a href="0001-two-planes-of-a-shadow-link.html">0001</a> ·
+<a href="0002-where-work-runs.html">0002</a> ·
+<a href="0003-how-the-cluster-agrees.html">0003</a> ·
+<a href="0004-the-data-plane.html">0004</a> ·
+<a href="0005-failover-and-promotion.html">0005</a> ·
+refs: <a href="../reference/architecture-map.html">map</a> · <a href="../reference/task-state-machine.html">task states</a> · <a href="../reference/failover-state-machine.html">failover</a> ·
+verified on <code>slsr/schema-replication</code>, 2026-06-16.
+</footer>
+
+<script>
+  let answered = 0, correct = 0, total = document.querySelectorAll('.q').length;
+  document.querySelectorAll('.q').forEach(q => {
+    const ans = parseInt(q.dataset.a, 10);
+    const opts = q.querySelector('.opts');
+    const labels = JSON.parse(opts.dataset.opts);
+    const why = opts.dataset.fb;
+    const fb = q.querySelector('.fb');
+    labels.forEach((label, i) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.onclick = () => {
+        if (q.dataset.done) return;
+        q.dataset.done = "1"; answered++;
+        if (i === ans) { b.classList.add('right'); correct++; fb.textContent = "✓ " + why; }
+        else { b.classList.add('wrong'); opts.children[ans].classList.add('right'); fb.textContent = "✗ " + why; }
+        if (answered === total) {
+          document.getElementById('score').textContent =
+            "Score: " + correct + "/" + total + " — " + (correct===total ? "full marks. You own cluster_link end to end."
+            : correct>=total-1 ? "strong finish — reread §2 (the gate matrix)." : "revisit §2–§3; the modes and the gate are the crux.");
+        }
+      };
+      opts.appendChild(b);
+    });
+  });
+</script>
+</body>
+</html>
