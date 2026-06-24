@@ -39,3 +39,28 @@ redpanda_cc_library(
         "@seastar",
     ],
 )
+
+redpanda_cc_library(
+    name = "reconciler",
+    srcs = [
+        "reconciler.cc",
+    ],
+    hdrs = [
+        "reconciler.h",
+    ],
+    implementation_deps = [
+        "//src/v/cluster_link:logger",
+        "//src/v/pandaproxy/schema_registry:exceptions",
+        "//src/v/ssx:future_util",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":scope",
+        ":source_reader",
+        "//src/v/container:chunked_hash_map",
+        "//src/v/container:chunked_vector",
+        "//src/v/pandaproxy/schema_registry:types",
+        "//src/v/schema:registry",
+        "@seastar",
+    ],
+)
