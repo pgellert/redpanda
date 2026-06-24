@@ -1,6 +1,22 @@
 load("//bazel:test.bzl", "redpanda_cc_gtest")
 
 redpanda_cc_gtest(
+    name = "scope_test",
+    timeout = "short",
+    srcs = [
+        "scope_test.cc",
+    ],
+    cpu = 1,
+    deps = [
+        "//src/v/cluster_link/schema_registry_sync:scope",
+        "//src/v/pandaproxy/schema_registry:types",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "mirroring_task_test",
     timeout = "short",
     srcs = [
