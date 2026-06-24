@@ -11,6 +11,7 @@
 
 #include "cluster_link/schema_registry_sync/reconciler.h"
 
+#include "base/units.h"
 #include "cluster_link/logger.h"
 #include "cluster_link/schema_registry_sync/scope.h"
 #include "pandaproxy/schema_registry/error.h"
@@ -19,7 +20,9 @@
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/gate.hh>
+#include <seastar/core/semaphore.hh>
 #include <seastar/coroutine/as_future.hh>
+#include <seastar/util/defer.hh>
 
 #include <algorithm>
 #include <utility>
@@ -27,6 +30,11 @@
 namespace cluster_link::schema_registry_sync {
 
 namespace {
+
+// Units reserved against the memory budget before a body is fetched, gating
+// fetch entry on memory before the body size is known. After the read the
+// reservation is topped up to the real body size.
+constexpr size_t reconcile_reserve_bytes = 20_KiB;
 
 bool is_import_conflict(const ppsr::exception& e) {
     const auto& code = e.code();
@@ -36,6 +44,12 @@ bool is_import_conflict(const ppsr::exception& e) {
            || code
                 == make_error_code(
                   ppsr::error_code::subject_version_operation_not_permitted);
+}
+
+// Byte-size proxy for a schema body: the canonical definition's length. This
+// is what the byte-semaphore budgets, and what tests control via the fake.
+size_t body_size(const ppsr::stored_schema& s) {
+    return s.schema.def().raw()().size_bytes();
 }
 
 } // namespace
@@ -48,7 +62,12 @@ reconciler::reconciler(
   : _source(source)
   , _destination(destination)
   , _in_scope(std::move(in_scope))
-  , _limits(lim) {}
+  , _limits(lim)
+  , _mem(std::max<size_t>(1, lim.memory_bytes), "schema_registry_sync/memory") {
+    // Floor the budget so the clamp `min(body_size, memory_bytes)` and the
+    // semaphore agree; a degenerate 0 admits one over-budget body at a time.
+    _limits.memory_bytes = std::max<size_t>(1, _limits.memory_bytes);
+}
 
 reconciler::node_data& reconciler::data(const ppsr::subject_version& n) {
     return _nodes.try_emplace(n).first->second;
@@ -191,6 +210,24 @@ ss::future<> reconciler::worker(ss::abort_source& as) {
 
 ss::future<source_result<void>>
 reconciler::discover(const ppsr::subject_version& n, ss::abort_source& as) {
+    // Gate fetch entry on memory: take a small reservation before the read,
+    // clamped to the budget so a tiny budget still admits one fetch. A worker
+    // blocked here holds nothing (no hold-and-wait), preserving deadlock
+    // freedom. After the read the reservation is topped up to the real body
+    // size with consume() (which may drive the semaphore negative, naturally
+    // throttling subsequent fetches until large bodies drain). All units are
+    // released before this invocation returns -- in particular before a
+    // missing-refs node is deferred -- so nothing is held across a wait on
+    // another node.
+    auto units = co_await ss::get_units(
+      _mem, std::min(reconcile_reserve_bytes, _limits.memory_bytes), as);
+    size_t consumed = 0;
+    auto release_consumed = ss::defer([this, &consumed] {
+        if (consumed > 0) {
+            _mem.signal(consumed);
+        }
+    });
+
     auto fetched = co_await _source->read_subject_version(n.sub, n.version, as);
     if (!fetched.has_value()) {
         if (fetched.error().kind == source_error_kind::source_unavailable) {
@@ -198,6 +235,12 @@ reconciler::discover(const ppsr::subject_version& n, ss::abort_source& as) {
         }
         fail(n);
         co_return source_result<void>{};
+    }
+
+    auto reserved = units.count();
+    if (auto size = body_size(fetched.value()); size > reserved) {
+        consumed = size - reserved;
+        _mem.consume(consumed);
     }
 
     auto refs = resolve_refs(fetched.value());
@@ -256,6 +299,18 @@ reconciler::discover(const ppsr::subject_version& n, ss::abort_source& as) {
 
 ss::future<source_result<void>>
 reconciler::do_import(const ppsr::subject_version& n, ss::abort_source& as) {
+    // Same reserve-then-consume model as discover. An import node has no unmet
+    // deps: it waits on nothing while holding these units, so the byte
+    // semaphore cannot hold-and-wait (deadlock-free).
+    auto units = co_await ss::get_units(
+      _mem, std::min(reconcile_reserve_bytes, _limits.memory_bytes), as);
+    size_t consumed = 0;
+    auto release_consumed = ss::defer([this, &consumed] {
+        if (consumed > 0) {
+            _mem.signal(consumed);
+        }
+    });
+
     auto fetched = co_await _source->read_subject_version(n.sub, n.version, as);
     if (!fetched.has_value()) {
         if (fetched.error().kind == source_error_kind::source_unavailable) {
@@ -263,6 +318,12 @@ reconciler::do_import(const ppsr::subject_version& n, ss::abort_source& as) {
         }
         fail(n);
         co_return source_result<void>{};
+    }
+
+    auto reserved = units.count();
+    if (auto size = body_size(fetched.value()); size > reserved) {
+        consumed = size - reserved;
+        _mem.consume(consumed);
     }
 
     co_await import_body(n, std::move(fetched.value()));

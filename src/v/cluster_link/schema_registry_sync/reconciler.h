@@ -16,11 +16,13 @@
 #include "container/chunked_vector.h"
 #include "pandaproxy/schema_registry/types.h"
 #include "schema/registry.h"
+#include "ssx/semaphore.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
+#include <seastar/core/semaphore.hh>
 
 #include <cstdint>
 #include <functional>
@@ -55,7 +57,9 @@ struct work_set {
 ///
 /// A node whose references are all already satisfied is imported on its first
 /// fetch (1-fetch path). A node discovered before its dependencies releases its
-/// body and is re-fetched once they complete (2-fetch path).
+/// body and is re-fetched once they complete (2-fetch path); this keeps a body
+/// in memory only while it is being imported, so a byte-budgeted driver cannot
+/// deadlock on a held body.
 ///
 /// Not re-entrant: a single reconcile runs at a time. Per-run state is reset at
 /// the start of each `reconcile` call.
@@ -63,6 +67,20 @@ class reconciler {
 public:
     /// Resource bounds for a reconcile run.
     struct limits {
+        /// Byte budget for schema bodies held in memory concurrently. Each
+        /// fetch reserves a small fixed amount before reading, then tops up to
+        /// the real body size with a non-blocking consume() that may drive the
+        /// budget negative; the next fetch then blocks until in-flight bodies
+        /// drain. A single body larger than the whole budget is admitted alone
+        /// (its reservation is clamped to the budget) so it still makes
+        /// progress. Floored to 1, so a degenerate 0 admits one body at a time.
+        ///
+        /// This bound is backpressure, not a hard per-fetch ceiling: the
+        /// reservation gates fetch entry and the post-read consume() throttles
+        /// subsequent fetches once a large body lands. A hard per-fetch byte
+        /// cap would need Content-Length from the real client up front and is
+        /// deferred.
+        size_t memory_bytes;
         /// Number of worker fibers draining the discover/import queues.
         size_t parallelism;
     };
@@ -94,6 +112,11 @@ public:
       chunked_hash_set<ppsr::subject_version> seed_replicated,
       reconcile_stats& stats,
       ss::abort_source& as);
+
+    /// Byte-semaphore units currently available. After a reconcile returns,
+    /// this equals the configured budget iff every held unit was released
+    /// (no leak). Exposed for tests.
+    size_t available_memory_units() const { return _mem.available_units(); }
 
 private:
     /// Lifecycle of a node in the reconcile graph. Every enqueue is gated on
@@ -173,6 +196,7 @@ private:
     /// any worker; rethrown after the pool drains to fault the whole sync.
     std::exception_ptr _exn;
 
+    ssx::semaphore _mem;
     ss::condition_variable _cv;
 };
 
