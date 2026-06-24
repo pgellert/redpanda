@@ -30,6 +30,12 @@ namespace cluster_link::schema_registry_sync {
 
 namespace {
 
+// When the source is unreachable, retry sooner than the (longer) full-sync
+// interval so the link recovers promptly once the source comes back, without
+// an exponential backoff. Capped at the tail interval by make_unavailable.
+constexpr ss::lowres_clock::duration sr_sync_unavailable_retry
+  = std::chrono::seconds{30};
+
 ss::lowres_clock::duration
 tail_interval(const model::schema_registry_sync_config& cfg) {
     if (const auto* api = cfg.api_mode(); api != nullptr) {
@@ -441,11 +447,21 @@ mirroring_task::make_unavailable(const ss::sstring& reason) {
     vlog(
       logger().warn, "Schema Registry shadowing task unavailable: {}", reason);
     _status.last_error_message = reason;
+    // The base runner re-arms on the (just-updated) run interval after this
+    // run, so shortening it here makes the next attempt fire soon. Cap at the
+    // tail interval so the unavailable cadence is never slower than the normal
+    // one (the configured tail can be shorter than the 30s retry). make_active
+    // restores the tail interval.
+    set_run_interval(
+      std::min(sr_sync_unavailable_retry, tail_interval(_config)));
     return state_transition{
       .desired_state = model::task_state::link_unavailable, .reason = reason};
 }
 
 task::state_transition mirroring_task::make_active() {
+    // Restore the normal tail cadence after a successful run (in case the
+    // previous run shortened it for an unavailable source).
+    set_run_interval(tail_interval(_config));
     return state_transition{
       .desired_state = model::task_state::active,
       .reason = "Schema Registry shadowing task finished a sync"};
