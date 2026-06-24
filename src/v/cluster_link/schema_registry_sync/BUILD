@@ -66,3 +66,20 @@ redpanda_cc_library(
         "@seastar",
     ],
 )
+
+redpanda_cc_library(
+    name = "inventory",
+    srcs = [
+        "inventory.cc",
+    ],
+    hdrs = [
+        "inventory.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/container:chunked_hash_map",
+        "//src/v/pandaproxy/schema_registry:types",
+        "//src/v/schema:registry",
+        "@seastar",
+    ],
+)
