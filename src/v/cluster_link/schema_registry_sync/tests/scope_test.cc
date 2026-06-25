@@ -95,4 +95,61 @@ TEST(scope, in_scope_filter_union_semantics) {
     }
 }
 
+TEST(scope, preconditions_reject_exact_mapping) {
+    model::schema_registry_sync_config config;
+    model::schema_registry_sync_config::shadow_schema_registry_api api;
+    api.destination
+      = model::schema_registry_sync_config::exact_context_mapping{};
+    config.sync_mode = std::move(api);
+
+    chunked_hash_set<ppsr::context> in_scope;
+    in_scope.insert(ppsr::default_context);
+
+    EXPECT_TRUE(srs::check_preconditions(config, in_scope, true).has_value());
+}
+
+TEST(scope, preconditions_require_qualified_subjects_for_nondefault) {
+    model::schema_registry_sync_config config;
+    config.sync_mode
+      = model::schema_registry_sync_config::shadow_schema_registry_api{};
+
+    chunked_hash_set<ppsr::context> nondefault;
+    nondefault.insert(ppsr::context{".b"});
+    EXPECT_TRUE(
+      srs::check_preconditions(config, nondefault, false).has_value());
+    EXPECT_FALSE(
+      srs::check_preconditions(config, nondefault, true).has_value());
+
+    chunked_hash_set<ppsr::context> default_only;
+    default_only.insert(ppsr::default_context);
+    EXPECT_FALSE(
+      srs::check_preconditions(config, default_only, false).has_value());
+}
+
+TEST(scope, preconditions_allow_configured_source_filter) {
+    chunked_hash_set<ppsr::context> in_scope;
+    in_scope.insert(ppsr::default_context);
+
+    // A configured context filter is honoured (it scopes discovery and the
+    // in_scope predicate), so it does not fault.
+    {
+        model::schema_registry_sync_config config;
+        model::schema_registry_sync_config::shadow_schema_registry_api api;
+        api.filter.contexts.push_back(".prod");
+        config.sync_mode = std::move(api);
+        EXPECT_FALSE(
+          srs::check_preconditions(config, in_scope, true).has_value());
+    }
+
+    // Likewise for a subject filter.
+    {
+        model::schema_registry_sync_config config;
+        model::schema_registry_sync_config::shadow_schema_registry_api api;
+        api.filter.subjects.push_back("orders-value");
+        config.sync_mode = std::move(api);
+        EXPECT_FALSE(
+          srs::check_preconditions(config, in_scope, true).has_value());
+    }
+}
+
 } // namespace cluster_link::tests

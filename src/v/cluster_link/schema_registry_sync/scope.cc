@@ -11,6 +11,10 @@
 
 #include "cluster_link/schema_registry_sync/scope.h"
 
+#include "ssx/sformat.h"
+
+#include <seastar/core/sstring.hh>
+
 #include <absl/container/flat_hash_set.h>
 
 #include <iterator>
@@ -37,6 +41,37 @@ std::function<bool(const ppsr::context_subject&)> make_in_scope(
             sub_set = std::move(sub_set)](const ppsr::context_subject& sub) {
         return unfiltered || ctx_set.contains(sub.ctx) || sub_set.contains(sub);
     };
+}
+
+std::optional<ss::sstring> check_preconditions(
+  const model::schema_registry_sync_config& config,
+  const chunked_hash_set<ppsr::context>& in_scope_contexts,
+  bool qualified_subjects_enabled) {
+    const auto* api = config.api_mode();
+    if (api != nullptr && api->destination.has_value()) {
+        if (
+          std::holds_alternative<
+            model::schema_registry_sync_config::exact_context_mapping>(
+            *api->destination)) {
+            return ss::sstring{
+              "context remapping is not supported: the shadowing engine "
+              "requires identity context mapping"};
+        }
+    }
+
+    if (!qualified_subjects_enabled) {
+        for (const auto& ctx : in_scope_contexts) {
+            if (ctx != ppsr::default_context) {
+                return ssx::sformat(
+                  "replicating non-default context '{}' requires the "
+                  "schema_registry_enable_qualified_subjects cluster config "
+                  "to be enabled",
+                  ctx);
+            }
+        }
+    }
+
+    return std::nullopt;
 }
 
 } // namespace cluster_link::schema_registry_sync

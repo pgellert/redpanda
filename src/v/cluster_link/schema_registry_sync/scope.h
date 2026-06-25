@@ -11,10 +11,12 @@
 
 #pragma once
 
+#include "cluster_link/model/types.h"
 #include "container/chunked_hash_map.h"
 #include "pandaproxy/schema_registry/types.h"
 
 #include <functional>
+#include <optional>
 
 namespace cluster_link::schema_registry_sync {
 
@@ -33,5 +35,14 @@ namespace ppsr = pandaproxy::schema_registry;
 std::function<bool(const ppsr::context_subject&)> make_in_scope(
   chunked_hash_set<ppsr::context> contexts,
   chunked_hash_set<ppsr::context_subject> subjects);
+
+/// Returns a human-readable fault reason if the config combined with the
+/// discovered in-scope contexts describes a configuration this engine cannot
+/// replicate, else std::nullopt. `qualified_subjects_enabled` reflects the
+/// cluster config and is injected so this check stays pure and testable.
+std::optional<ss::sstring> check_preconditions(
+  const model::schema_registry_sync_config& config,
+  const chunked_hash_set<ppsr::context>& in_scope_contexts,
+  bool qualified_subjects_enabled);
 
 } // namespace cluster_link::schema_registry_sync
