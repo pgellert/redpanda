@@ -18,16 +18,21 @@ redpanda_cc_library(
     name = "mirroring_task",
     srcs = [
         "mirroring_task.cc",
+        "reconciler.cc",
         "scope.cc",
     ],
     hdrs = [
         "mirroring_task.h",
+        "reconciler.h",
         "scope.h",
     ],
     implementation_deps = [
         "//src/v/cluster_link:logger",
         "//src/v/config",
         "//src/v/model",
+        "//src/v/base",
+        "//src/v/pandaproxy/schema_registry:exceptions",
+        "//src/v/ssx:future_util",
         "//src/v/ssx:sformat",
         "@abseil-cpp//absl/container:flat_hash_set",
     ],
@@ -40,6 +45,7 @@ redpanda_cc_library(
         "//src/v/container:chunked_vector",
         "//src/v/pandaproxy/schema_registry:types",
         "//src/v/schema:registry",
+        "//src/v/ssx:semaphore",
         "@seastar",
     ],
 )
