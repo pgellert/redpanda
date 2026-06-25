@@ -1,11 +1,9 @@
-load("//bazel:test.bzl", "redpanda_cc_gtest")
+load("//bazel:test.bzl", "redpanda_cc_gtest", "redpanda_test_cc_library")
 
 redpanda_cc_gtest(
     name = "mirroring_task_test",
     timeout = "short",
-    srcs = [
-        "mirroring_task_test.cc",
-    ],
+    srcs = ["mirroring_task_test.cc"],
     cpu = 1,
     deps = [
         "//src/v/cluster:cluster_link_table",
@@ -21,6 +19,20 @@ redpanda_cc_gtest(
         "//src/v/pandaproxy/schema_registry:types",
         "//src/v/schema:registry",
         "//src/v/schema/tests:fake_registry",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
+    name = "scope_test",
+    timeout = "short",
+    srcs = ["scope_test.cc"],
+    cpu = 1,
+    deps = [
+        "//src/v/cluster_link/schema_registry_sync:mirroring_task",
+        "//src/v/pandaproxy/schema_registry:types",
         "//src/v/test_utils:gtest",
         "@googletest//:gtest",
         "@seastar",
