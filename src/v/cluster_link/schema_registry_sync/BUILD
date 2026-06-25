@@ -1,7 +1,10 @@
 load("//bazel:build.bzl", "redpanda_cc_library")
+
 redpanda_cc_library(
     name = "source_reader",
-    srcs = ["unavailable_source_reader.cc"],
+    srcs = [
+        "unavailable_source_reader.cc",
+    ],
     hdrs = [
         "source_reader.h",
         "unavailable_source_reader.h",
@@ -14,23 +17,26 @@ redpanda_cc_library(
         "@seastar",
     ],
 )
+
 redpanda_cc_library(
     name = "mirroring_task",
     srcs = [
+        "inventory.cc",
         "mirroring_task.cc",
         "reconciler.cc",
         "scope.cc",
     ],
     hdrs = [
+        "inventory.h",
         "mirroring_task.h",
         "reconciler.h",
         "scope.h",
     ],
     implementation_deps = [
+        "//src/v/base",
         "//src/v/cluster_link:logger",
         "//src/v/config",
         "//src/v/model",
-        "//src/v/base",
         "//src/v/pandaproxy/schema_registry:exceptions",
         "//src/v/ssx:future_util",
         "//src/v/ssx:sformat",
