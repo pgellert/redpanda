@@ -664,3 +664,28 @@ redpanda_test_cc_library(
         "//src/v/random:generators",
     ],
 )
+
+redpanda_cc_btest(
+    name = "replay_bench",
+    timeout = "moderate",
+    srcs = [
+        "replay_bench.cc",
+    ],
+    cpu = 4,
+    tags = ["manual"],
+    deps = [
+        ":utils",
+        "//src/v/bytes",
+        "//src/v/bytes:iobuf",
+        "//src/v/model",
+        "//src/v/pandaproxy/schema_registry:seq_writer",
+        "//src/v/pandaproxy/schema_registry:store",
+        "//src/v/pandaproxy/schema_registry:types",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/test_utils:seastar_boost",
+        "@boost//:test",
+        "@fmt",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
