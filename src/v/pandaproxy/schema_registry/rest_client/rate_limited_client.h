@@ -63,6 +63,8 @@ public:
 
     ss::future<> shutdown_and_stop() final;
 
+    void request_abort() noexcept final;
+
     /// Retune the request-rate cap; nullopt disables proactive limiting.
     /// Fibers already waiting for a token are re-paced at the new rate (a
     /// disable releases them promptly).

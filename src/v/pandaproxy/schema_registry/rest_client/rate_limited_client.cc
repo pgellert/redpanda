@@ -173,6 +173,13 @@ rate_limited_client::request_and_collect_response(
     co_return std::move(value);
 }
 
+void rate_limited_client::request_abort() noexcept {
+    // Wakes pause sleepers (sleep_aborted) and token waiters
+    // (semaphore_aborted) without draining; shutdown_and_stop() drains.
+    _as.request_abort();
+    _inner->request_abort();
+}
+
 ss::future<> rate_limited_client::shutdown_and_stop() {
     auto drained = _gate.close();
     // Wakes pause sleepers (sleep_aborted) and token waiters

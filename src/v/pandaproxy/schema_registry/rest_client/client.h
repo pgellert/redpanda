@@ -243,6 +243,12 @@ public:
     /// destroying the client.
     ss::future<> shutdown();
 
+    /// Synchronous signal that promptly fails in-flight and queued requests
+    /// (transport aborts fired, sockets shut) without draining them. For stop
+    /// paths that must deliver the wake-up before joining fibers still parked
+    /// in a request; shutdown() must still follow to drain.
+    void request_abort() noexcept;
+
 private:
     std::expected<ss::gate::holder, domain_error> maybe_gate();
     void maybe_add_basic_auth(http::request_builder& request);

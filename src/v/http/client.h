@@ -90,6 +90,15 @@ public:
 
     virtual ss::future<> shutdown_and_stop() = 0;
 
+    /// Best-effort synchronous signal that promptly fails in-flight and queued
+    /// requests without waiting for them: fire internal abort sources and shut
+    /// sockets, but do not drain. Lets a caller that must not block (e.g. a
+    /// stop path that still has fibers parked inside this client) deliver the
+    /// wake-up before it joins them; shutdown_and_stop() must still be called
+    /// before destruction. Default is a no-op for implementations (mocks) with
+    /// nothing to signal.
+    virtual void request_abort() noexcept {}
+
     virtual ~abstract_client() = default;
 };
 
@@ -156,6 +165,11 @@ public:
 
     // close the connect gate and fail_outstanding_futures which calls shutdown
     ss::future<> shutdown_and_stop() final { co_return co_await stop(); }
+
+    // abort the in-flight dial and shut the socket, failing any request this
+    // transport is servicing (including an unbounded response-body drain,
+    // which no timeout covers)
+    void request_abort() noexcept final { shutdown_now(); }
 
     /// Make a single connection attempt bounded by \p timeout, dialing
     /// every resolved address in sequence. Failures to connect surface

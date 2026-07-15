@@ -54,6 +54,8 @@ public:
 
     ss::future<> shutdown_and_stop() final;
 
+    void request_abort() noexcept final;
+
 private:
     std::vector<std::unique_ptr<http::abstract_client>> _transports;
     // Transports not currently leased to a request. Borrows from _transports:

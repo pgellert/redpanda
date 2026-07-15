@@ -305,6 +305,27 @@ TEST(rate_limited_client, pause_armed_while_waiting_for_token_is_honored) {
     fx.limiter->shutdown_and_stop().get();
 }
 
+TEST(rate_limited_client, request_abort_wakes_paused_request_without_drain) {
+    limiter_fixture fx(1);
+    fx.transport->respond_once_with(bh::status::too_many_requests, "60");
+    fx.issue("/a").get();
+    EXPECT_GT(fx.limiter->pause_remaining(), 30s);
+
+    // Parked sleeping out the pause.
+    auto paused = fx.issue("/b");
+    ss::yield().get();
+    EXPECT_EQ(fx.transport->dispatch_times.size(), 1);
+
+    // The signal wakes the sleeper promptly but does not stop the transport
+    // or close the gate; the draining shutdown still does that.
+    fx.limiter->request_abort();
+    EXPECT_THROW(paused.get(), ss::sleep_aborted);
+    EXPECT_FALSE(fx.transport->stopped);
+
+    fx.limiter->shutdown_and_stop().get();
+    EXPECT_TRUE(fx.transport->stopped);
+}
+
 TEST(rate_limited_client, shutdown_wakes_paused_and_waiting_requests) {
     limiter_fixture fx(1);
     fx.transport->respond_once_with(bh::status::too_many_requests, "60");

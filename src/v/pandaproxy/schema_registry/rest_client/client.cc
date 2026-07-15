@@ -225,6 +225,8 @@ client::client(
       retry_policy ? std::move(retry_policy)
                    : std::make_unique<default_retry_policy>()) {}
 
+void client::request_abort() noexcept { _http_client->request_abort(); }
+
 ss::future<> client::shutdown() {
     auto gate_closed = _gate.close();
     co_await _http_client->shutdown_and_stop();

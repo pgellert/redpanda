@@ -53,6 +53,15 @@ pooled_client::request_and_collect_response(
     co_return co_await std::move(response);
 }
 
+void pooled_client::request_abort() noexcept {
+    // Eject queued slot waiters, then signal every transport so mid-flight
+    // requests fail promptly. No draining here; shutdown_and_stop() drains.
+    _as.request_abort();
+    for (const auto& transport : _transports) {
+        transport->request_abort();
+    }
+}
+
 ss::future<> pooled_client::shutdown_and_stop() {
     auto drained = _gate.close();
     _as.request_abort();
