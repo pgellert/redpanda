@@ -85,7 +85,7 @@ ss::future<inventory> scan_destination_inventory(
     };
     // list_subject_versions reads the store as-is; sync first so the scan
     // isn't stale (e.g. on a freshly-elected _schemas/0 leader).
-    co_await destination.sync();
+    co_await destination.sync(as);
     auto versions = co_await destination.list_subject_versions(
       std::move(dest_in_scope), ppsr::include_deleted::yes);
     inventory inv;
@@ -266,11 +266,12 @@ ss::future<> mirroring_task::refresh_destination_inventory(
 ss::future<> mirroring_task::hard_delete_target(
   const ppsr::context_subject& dest_sub,
   ppsr::schema_version version,
-  bool was_active) {
+  bool was_active,
+  ss::abort_source& as) {
     if (was_active) {
-        co_await _destination->soft_delete_schema(dest_sub, version);
+        co_await _destination->soft_delete_schema(dest_sub, version, as);
     }
-    co_await _destination->permanent_delete_schema(dest_sub, version);
+    co_await _destination->permanent_delete_schema(dest_sub, version, as);
 }
 
 ss::future<> mirroring_task::purge_one(
@@ -293,7 +294,7 @@ ss::future<> mirroring_task::purge_one(
     }
     const auto dest_sub = ppsr::context_subject{*dest_ctx, target.node.sub.sub};
     auto fut = co_await ss::coroutine::as_future(
-      hard_delete_target(dest_sub, target.node.version, target.was_active));
+      hard_delete_target(dest_sub, target.node.version, target.was_active, as));
     if (fut.failed()) {
         auto ex = fut.get_exception();
         if (ssx::is_shutdown_exception(ex)) {
@@ -431,8 +432,8 @@ ss::future<> mirroring_task::sync_mode_and_config(
         // override
         auto write = co_await ss::coroutine::as_future(
           mode.value().has_value()
-            ? _destination->write_mode(dest_target, *mode.value())
-            : _destination->delete_mode(dest_target));
+            ? _destination->write_mode(dest_target, *mode.value(), as)
+            : _destination->delete_mode(dest_target, as));
         if (write.failed()) {
             auto ex = write.get_exception();
             if (ssx::is_shutdown_exception(ex)) {
@@ -470,8 +471,8 @@ ss::future<> mirroring_task::sync_mode_and_config(
 
     auto write = co_await ss::coroutine::as_future(
       cfg.compatibility.has_value()
-        ? _destination->write_config(dest_target, *cfg.compatibility)
-        : _destination->delete_config(dest_target));
+        ? _destination->write_config(dest_target, *cfg.compatibility, as)
+        : _destination->delete_config(dest_target, as));
     if (write.failed()) {
         auto ex = write.get_exception();
         if (ssx::is_shutdown_exception(ex)) {

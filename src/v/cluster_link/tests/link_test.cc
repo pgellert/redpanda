@@ -683,13 +683,15 @@ ss::future<> seed_subject(
   ppsr::context ctx,
   ss::sstring sub,
   ppsr::is_deleted deleted = ppsr::is_deleted::no) {
+    auto as = ss::abort_source{};
     co_await reg.import_schema(
       ppsr::stored_schema{
         .schema = ppsr::
           subject_schema{ppsr::context_subject{std::move(ctx), ppsr::subject{std::move(sub)}}, ppsr::schema_definition{ppsr::schema_definition::raw_string{R"({"type":"string"})"}, ppsr::schema_type::avro}},
         .version = ppsr::schema_version{1},
         .id = ppsr::schema_id{1},
-        .deleted = deleted});
+        .deleted = deleted},
+      as);
 }
 } // namespace
 

@@ -95,11 +95,14 @@ public:
 
     // Seeds the destination registry with one (subject, version).
     void seed_destination(std::string_view subject, int32_t version) {
+        ss::abort_source as;
         _registry
-          .import_schema(make_schema(
-            ppsr::context_subject::unqualified(subject),
-            version,
-            fmt::format("{{\"v\":{}}}", version)))
+          .import_schema(
+            make_schema(
+              ppsr::context_subject::unqualified(subject),
+              version,
+              fmt::format("{{\"v\":{}}}", version)),
+            as)
           .get();
     }
 
@@ -788,9 +791,10 @@ TEST_F(mirroring_task_test, hard_deletes_already_soft_deleted_version) {
     auto orders = ppsr::context_subject::unqualified("orders-value");
     // The destination holds orders-value:v1 already soft-deleted; the source no
     // longer has it at all, so it is purged (directly, no re-soft-delete).
+    ss::abort_source seed_as;
     _registry
       .import_schema(
-        make_schema(orders, 1, R"({"v":1})", ppsr::is_deleted::yes))
+        make_schema(orders, 1, R"({"v":1})", ppsr::is_deleted::yes), seed_as)
       .get();
 
     lead_schema_registry();
@@ -952,8 +956,10 @@ TEST_F(mirroring_task_test, removes_destination_override_absent_at_source) {
     // source subject exists but has no explicit override. The sync must remove
     // the stale destination overrides.
     seed_destination("orders-value", 1);
-    _registry.write_mode(orders, ppsr::mode::read_only).get();
-    _registry.write_config(orders, ppsr::compatibility_level::full).get();
+    ss::abort_source seed_as;
+    _registry.write_mode(orders, ppsr::mode::read_only, seed_as).get();
+    _registry.write_config(orders, ppsr::compatibility_level::full, seed_as)
+      .get();
     _source_state.add(orders, 1);
 
     lead_schema_registry();
@@ -1244,13 +1250,13 @@ TEST_F(mirroring_task_test, destination_inventory_spans_contexts_and_deleted) {
     // Default-context "a": v1 active, v2 soft-deleted. Context ".b" subject
     // "c": v1 active. The scan must span both contexts and separate active from
     // soft-deleted.
-    _registry.import_schema(make_schema(a, 1, R"({"v":1})")).get();
-    _registry
-      .import_schema(make_schema(a, 2, R"({"v":2})", ppsr::is_deleted::yes))
-      .get();
-    _registry.import_schema(make_schema(c, 1, R"({"v":1})")).get();
-
     ss::abort_source as;
+    _registry.import_schema(make_schema(a, 1, R"({"v":1})"), as).get();
+    _registry
+      .import_schema(make_schema(a, 2, R"({"v":2})", ppsr::is_deleted::yes), as)
+      .get();
+    _registry.import_schema(make_schema(c, 1, R"({"v":1})"), as).get();
+
     srs::context_mapper identity;
     auto inv = srs::scan_destination_inventory(
                  _registry,

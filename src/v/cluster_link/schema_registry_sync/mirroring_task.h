@@ -187,7 +187,8 @@ private:
     ss::future<> hard_delete_target(
       const ppsr::context_subject& dest_sub,
       ppsr::schema_version version,
-      bool was_active);
+      bool was_active,
+      ss::abort_source& as);
 
     /// Replicates one target's (subject or context-only) source mode and
     /// compatibility config onto the destination: writes the source's own

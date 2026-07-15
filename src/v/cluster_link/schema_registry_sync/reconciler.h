@@ -180,8 +180,10 @@ private:
     /// source_schema_read (not just the schema) so the unsupported-feature
     /// policy can act on `read.unsupported` at the authoritative per-node
     /// import point (FAIL rejection and REMOVE accounting both happen here).
-    ss::future<bool>
-    import_body(const ppsr::subject_version& n, ppsr::source_schema_read read);
+    ss::future<bool> import_body(
+      const ppsr::subject_version& n,
+      ppsr::source_schema_read read,
+      ss::abort_source& as);
 
     /// Under the FAIL policy, treats a schema carrying `unsupported` fields as
     /// a per-item failure: logs the offending fields, marks the node (and its

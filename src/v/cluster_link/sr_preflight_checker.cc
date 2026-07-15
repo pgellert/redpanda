@@ -185,7 +185,7 @@ public:
             // empty: the reads below hit unsynced local shard state, so on a
             // lagging replica a populated context could otherwise read empty
             // and let a colliding link through.
-            co_await _destination.sync();
+            co_await _destination.sync(as);
             const auto offending = co_await collect_offending_target_contexts(
               *api);
             if (!offending.empty()) {

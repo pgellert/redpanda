@@ -318,7 +318,7 @@ reconciler::discover(const ppsr::subject_version& n, ss::abort_source& as) {
     }
 
     if (missing.empty()) {
-        co_await import_body(n, std::move(fetched.value()));
+        co_await import_body(n, std::move(fetched.value()), as);
         co_return source_result<void>{};
     }
 
@@ -383,7 +383,7 @@ reconciler::do_import(const ppsr::subject_version& n, ss::abort_source& as) {
 
     adjust_units(_mem, units, body_size(fetched.value().schema));
 
-    co_await import_body(n, std::move(fetched.value()));
+    co_await import_body(n, std::move(fetched.value()), as);
     co_return source_result<void>{};
 }
 
@@ -432,7 +432,9 @@ void reconciler::count_if_contains_unsupported_removed(
 }
 
 ss::future<bool> reconciler::import_body(
-  const ppsr::subject_version& n, ppsr::source_schema_read read) {
+  const ppsr::subject_version& n,
+  ppsr::source_schema_read read,
+  ss::abort_source& as) {
     // Authoritative policy gate, next to the REMOVE handling below: every
     // import path funnels through here (discover also rejects early, before
     // queuing refs).
@@ -464,7 +466,7 @@ ss::future<bool> reconciler::import_body(
         co_return false;
     }
     auto fut = co_await ss::coroutine::as_future(
-      _destination->import_schema(std::move(*remapped)));
+      _destination->import_schema(std::move(*remapped), as));
     if (fut.failed()) {
         auto eptr = fut.get_exception();
         if (ssx::is_shutdown_exception(eptr)) {

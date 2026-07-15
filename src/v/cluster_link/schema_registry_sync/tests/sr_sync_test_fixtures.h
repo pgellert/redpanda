@@ -427,8 +427,8 @@ public:
       : _inner(inner) {}
 
     ss::future<ppsr::context_schema_id>
-    import_schema(ppsr::stored_schema schema) override {
-        return _inner->import_schema(std::move(schema));
+    import_schema(ppsr::stored_schema schema, ss::abort_source& as) override {
+        return _inner->import_schema(std::move(schema), as);
     }
     bool is_enabled() const override { return _inner->is_enabled(); }
     ss::future<> ensure_internal_topic() override {
@@ -441,8 +441,8 @@ public:
         return _inner->synced_getter();
     }
     ss::future<ss::lowres_clock::time_point>
-    sync(ss::lowres_clock::duration max_age) override {
-        return _inner->sync(max_age);
+    sync(ss::abort_source& as, ss::lowres_clock::duration max_age) override {
+        return _inner->sync(as, max_age);
     }
     ss::future<ppsr::schema_definition>
     get_schema_definition(ppsr::context_schema_id id) const override {
@@ -472,27 +472,34 @@ public:
         return _inner->create_schema(std::move(s));
     }
     ss::future<bool> soft_delete_schema(
-      ppsr::context_subject sub, ppsr::schema_version v) override {
-        return _inner->soft_delete_schema(std::move(sub), v);
+      ppsr::context_subject sub,
+      ppsr::schema_version v,
+      ss::abort_source& as) override {
+        return _inner->soft_delete_schema(std::move(sub), v, as);
     }
     ss::future<chunked_vector<ppsr::schema_version>> permanent_delete_schema(
       ppsr::context_subject sub,
-      std::optional<ppsr::schema_version> v) override {
-        return _inner->permanent_delete_schema(std::move(sub), v);
+      std::optional<ppsr::schema_version> v,
+      ss::abort_source& as) override {
+        return _inner->permanent_delete_schema(std::move(sub), v, as);
+    }
+    ss::future<bool> write_mode(
+      ppsr::context_subject sub, ppsr::mode m, ss::abort_source& as) override {
+        return _inner->write_mode(std::move(sub), m, as);
     }
     ss::future<bool>
-    write_mode(ppsr::context_subject sub, ppsr::mode m) override {
-        return _inner->write_mode(std::move(sub), m);
-    }
-    ss::future<bool> delete_mode(ppsr::context_subject sub) override {
-        return _inner->delete_mode(std::move(sub));
+    delete_mode(ppsr::context_subject sub, ss::abort_source& as) override {
+        return _inner->delete_mode(std::move(sub), as);
     }
     ss::future<bool> write_config(
-      ppsr::context_subject sub, ppsr::compatibility_level c) override {
-        return _inner->write_config(std::move(sub), c);
+      ppsr::context_subject sub,
+      ppsr::compatibility_level c,
+      ss::abort_source& as) override {
+        return _inner->write_config(std::move(sub), c, as);
     }
-    ss::future<bool> delete_config(ppsr::context_subject sub) override {
-        return _inner->delete_config(std::move(sub));
+    ss::future<bool>
+    delete_config(ppsr::context_subject sub, ss::abort_source& as) override {
+        return _inner->delete_config(std::move(sub), as);
     }
 
 protected:
@@ -513,9 +520,9 @@ public:
       , _block_after(block_after) {}
 
     ss::future<ppsr::context_schema_id>
-    import_schema(ppsr::stored_schema schema) override {
+    import_schema(ppsr::stored_schema schema, ss::abort_source& as) override {
         if (_imports_seen++ < _block_after) {
-            co_return co_await _inner->import_schema(std::move(schema));
+            co_return co_await _inner->import_schema(std::move(schema), as);
         }
         if (!_entered_set) {
             _entered_set = true;
@@ -524,7 +531,7 @@ public:
         // Park until the test releases (clean completion) or aborts (the wait
         // resolves with abort_requested).
         co_await _release.get_future();
-        co_return co_await _inner->import_schema(std::move(schema));
+        co_return co_await _inner->import_schema(std::move(schema), as);
     }
 
     ss::future<> entered() { return _entered.get_future(); }
@@ -562,13 +569,13 @@ public:
     }
 
     ss::future<ppsr::context_schema_id>
-    import_schema(ppsr::stored_schema schema) override {
+    import_schema(ppsr::stored_schema schema, ss::abort_source& as) override {
         ppsr::subject_version key{schema.schema.sub(), schema.version};
         if (auto it = _failures.find(key); it != _failures.end()) {
             return ss::make_exception_future<ppsr::context_schema_id>(
               ppsr::as_exception(it->second));
         }
-        return _inner->import_schema(std::move(schema));
+        return _inner->import_schema(std::move(schema), as);
     }
 
 private:
@@ -590,12 +597,14 @@ public:
     }
 
     ss::future<bool> write_config(
-      ppsr::context_subject sub, ppsr::compatibility_level c) override {
+      ppsr::context_subject sub,
+      ppsr::compatibility_level c,
+      ss::abort_source& as) override {
         if (auto it = _failures.find(sub); it != _failures.end()) {
             return ss::make_exception_future<bool>(
               ppsr::as_exception(it->second));
         }
-        return _inner->write_config(std::move(sub), c);
+        return _inner->write_config(std::move(sub), c, as);
     }
 
 private:
@@ -639,7 +648,8 @@ public:
 
     ss::future<chunked_vector<ppsr::schema_version>> permanent_delete_schema(
       ppsr::context_subject sub,
-      std::optional<ppsr::schema_version> v) override {
+      std::optional<ppsr::schema_version> v,
+      ss::abort_source& as) override {
         ++_attempts[sub];
         if (auto f = _fail_with.find(sub); f != _fail_with.end()) {
             return ss::make_exception_future<
@@ -658,7 +668,7 @@ public:
                 "referenced by a live schema"}));
         }
         _purged.insert(sub);
-        return _inner->permanent_delete_schema(std::move(sub), v);
+        return _inner->permanent_delete_schema(std::move(sub), v, as);
     }
 
 private:

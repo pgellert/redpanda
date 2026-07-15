@@ -30,12 +30,12 @@ public:
     }
 
     pps::context_schema_id import(pps::stored_schema schema) {
-        return registry->import_schema(std::move(schema)).get();
+        return registry->import_schema(std::move(schema), as).get();
     }
 
     std::error_code import_error_code(pps::stored_schema schema) {
         try {
-            registry->import_schema(std::move(schema)).get();
+            registry->import_schema(std::move(schema), as).get();
         } catch (const pps::exception& e) {
             return e.code();
         }
@@ -55,6 +55,7 @@ public:
     }
 
     std::unique_ptr<schema::registry> registry;
+    ss::abort_source as;
 };
 
 TEST_F(internal_writes_fixture, imports_id_and_version) {
@@ -63,7 +64,7 @@ TEST_F(internal_writes_fixture, imports_id_and_version) {
       R"({"type":"record","name":"r1","fields":[{"name":"f1","type":"string"}]})",
       pps::schema_type::avro);
 
-    ASSERT_TRUE(registry->write_mode(subject, pps::mode::read_only).get());
+    ASSERT_TRUE(registry->write_mode(subject, pps::mode::read_only, as).get());
 
     auto ctx_id = registry
                     ->import_schema(
@@ -71,7 +72,8 @@ TEST_F(internal_writes_fixture, imports_id_and_version) {
                         .schema = {subject, schema_def.share()},
                         .version = pps::schema_version{7},
                         .id = pps::schema_id{42},
-                        .deleted = pps::is_deleted::no})
+                        .deleted = pps::is_deleted::no},
+                      as)
                     .get();
     ASSERT_TRUE(ctx_id.ctx == pps::default_context);
     ASSERT_EQ(ctx_id.id, pps::schema_id{42});
@@ -88,7 +90,8 @@ TEST_F(internal_writes_fixture, imports_id_and_version) {
                            .schema = {subject, schema_def.share()},
                            .version = pps::schema_version{7},
                            .id = pps::schema_id{42},
-                           .deleted = pps::is_deleted::no})
+                           .deleted = pps::is_deleted::no},
+                         as)
                        .get();
     ASSERT_EQ(duplicate.id, pps::schema_id{42});
 }
@@ -106,7 +109,8 @@ TEST_F(internal_writes_fixture, import_rejects_conflicts) {
           .schema = {subject, schema_def.share()},
           .version = pps::schema_version{1},
           .id = pps::schema_id{9},
-          .deleted = pps::is_deleted::no})
+          .deleted = pps::is_deleted::no},
+        as)
       .get();
 
     ASSERT_EQ(
@@ -187,7 +191,8 @@ TEST_F(internal_writes_fixture, import_rejects_invalid_ids) {
                         .schema = {boundary_subject, schema_def.share()},
                         .version = max_version,
                         .id = max_id,
-                        .deleted = pps::is_deleted::no})
+                        .deleted = pps::is_deleted::no},
+                      as)
                     .get();
     ASSERT_EQ(ctx_id.id, max_id);
     auto stored
@@ -206,15 +211,16 @@ TEST_F(internal_writes_fixture, deletes_bypass_readonly) {
           .schema = {subject, schema_def.share()},
           .version = pps::schema_version{1},
           .id = pps::schema_id{77},
-          .deleted = pps::is_deleted::no})
+          .deleted = pps::is_deleted::no},
+        as)
       .get();
-    registry->write_mode(subject, pps::mode::read_only).get();
+    registry->write_mode(subject, pps::mode::read_only, as).get();
 
     ASSERT_TRUE(
-      registry->soft_delete_schema(subject, pps::schema_version{1}).get());
-    auto deleted = registry
-                     ->permanent_delete_schema(subject, pps::schema_version{1})
-                     .get();
+      registry->soft_delete_schema(subject, pps::schema_version{1}, as).get());
+    auto deleted
+      = registry->permanent_delete_schema(subject, pps::schema_version{1}, as)
+          .get();
     ASSERT_EQ(deleted.size(), 1);
     ASSERT_EQ(deleted.front(), pps::schema_version{1});
 
@@ -325,4 +331,34 @@ TEST_F(internal_writes_fixture, imports_preserve_deleted_state) {
     ASSERT_EQ(
       get_subject_schema_error(subject, pps::schema_version{1}),
       pps::error_code::subject_not_found);
+}
+
+TEST_F(internal_writes_fixture, writes_fail_fast_when_caller_aborted) {
+    // The shadow-link sync calls these while its runner is being stopped; an
+    // already-aborted caller must fail promptly instead of queueing behind the
+    // sequenced-write machinery (whose waits a caller-shard abort source
+    // cannot reach directly).
+    auto subject = pps::context_subject::unqualified("internal-aborted");
+    auto schema_def = pps::schema_definition(
+      R"("int")", pps::schema_type::avro);
+
+    ss::abort_source aborted;
+    aborted.request_abort();
+    ASSERT_THROW(
+      registry
+        ->import_schema(
+          pps::stored_schema{
+            .schema = {subject, schema_def.share()},
+            .version = pps::schema_version{1},
+            .id = pps::schema_id{1},
+            .deleted = pps::is_deleted::no},
+          aborted)
+        .get(),
+      ss::abort_requested_exception);
+    ASSERT_THROW(
+      registry->write_mode(subject, pps::mode::read_write, aborted).get(),
+      ss::abort_requested_exception);
+    ASSERT_THROW(
+      registry->delete_config(subject, aborted).get(),
+      ss::abort_requested_exception);
 }

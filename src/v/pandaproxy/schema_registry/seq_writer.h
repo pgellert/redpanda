@@ -21,7 +21,17 @@
 #include "ssx/semaphore.h"
 #include "utils/retry.h"
 
+#include <atomic>
+#include <memory>
+
 namespace pandaproxy::schema_registry {
+
+/// Cross-shard cancellation for seq_writer's shard-0 hops: an ss::abort_source
+/// is shard-local and cannot cross invoke_on, so a caller that must abandon a
+/// write promptly (the shadow-link SR sync's stop path) passes this token —
+/// set from an abort-source subscription on its own shard — and the shard-0
+/// waits poll it. A null token (the REST paths) keeps today's unbounded waits.
+using cancel_token = std::shared_ptr<std::atomic<bool>>;
 
 class sequence_state_checker {
 public:
@@ -61,7 +71,7 @@ public:
       , _node_id(node_id)
       , _state_checker(std::move(state_checker)) {}
 
-    ss::future<> read_sync();
+    ss::future<> read_sync(cancel_token cancel = nullptr);
 
     // Throws 42205 if the subject cannot be modified
     ss::future<> check_mutable(
@@ -78,16 +88,19 @@ public:
     /// Internal sync path for importing a subject version with caller-supplied
     /// schema ID, version, and deleted state. Bypasses client write guards
     /// such as read-only mode and mode_mutability.
-    ss::future<sharded_store::insert_result>
-    write_subject_version_imported(stored_schema schema);
+    ss::future<sharded_store::insert_result> write_subject_version_imported(
+      stored_schema schema, cancel_token cancel = nullptr);
 
     ss::future<bool> write_config(
       context_subject ctx_sub,
       compatibility_level compat,
-      write_source src = write_source::client);
+      write_source src = write_source::client,
+      cancel_token cancel = nullptr);
 
     ss::future<bool> delete_config(
-      context_subject ctx_sub, write_source src = write_source::client);
+      context_subject ctx_sub,
+      write_source src = write_source::client,
+      cancel_token cancel = nullptr);
 
     /// \param f bypasses only the import-mode emptiness check, never
     /// mode_mutability.
@@ -95,17 +108,21 @@ public:
       context_subject ctx_sub,
       mode m,
       force f,
-      write_source src = write_source::client);
+      write_source src = write_source::client,
+      cancel_token cancel = nullptr);
 
     ss::future<bool> delete_mode(
-      context_subject ctx_sub, write_source src = write_source::client);
+      context_subject ctx_sub,
+      write_source src = write_source::client,
+      cancel_token cancel = nullptr);
 
     ss::future<> delete_context(context ctx);
 
     ss::future<bool> delete_subject_version(
       context_subject sub,
       schema_version version,
-      write_source src = write_source::client);
+      write_source src = write_source::client,
+      cancel_token cancel = nullptr);
 
     ss::future<chunked_vector<schema_version>> delete_subject_impermanent(
       context_subject sub, write_source src = write_source::client);
@@ -113,7 +130,8 @@ public:
     ss::future<chunked_vector<schema_version>> delete_subject_permanent(
       context_subject sub,
       std::optional<schema_version> version,
-      write_source src = write_source::client);
+      write_source src = write_source::client,
+      cancel_token cancel = nullptr);
 
 private:
     ss::smp_submit_to_options _smp_opts;
@@ -175,39 +193,52 @@ private:
     /// Helper for write paths that use sequence+retry logic to synchronize
     /// multiple writing nodes.
     template<typename F>
-    auto
-    sequenced_write(F f, context ctx, write_source src = write_source::client) {
+    auto sequenced_write(
+      F f,
+      context ctx,
+      write_source src = write_source::client,
+      cancel_token cancel = nullptr) {
         if (_state_checker->writes_disabled(src, ctx)) [[unlikely]] {
             throw as_exception(writes_disabled());
         }
         auto base_backoff = _jitter.next_duration();
-        auto remote = [base_backoff, f](seq_writer& seq) {
-            if (auto waiters = seq._write_sem.waiters(); waiters != 0) {
-                vlog(
-                  srlog.trace,
-                  "sequenced_write waiting for {} waiters",
-                  waiters);
-            }
-            return ss::with_semaphore(
-              seq._write_sem, 1, [&seq, f, base_backoff]() {
-                  if (
-                    auto waiters = seq._wait_for_sem.waiters(); waiters != 0) {
-                      vlog(
-                        srlog.debug,
-                        "sequenced_write acquired write_sem with {} "
-                        "wait_for_sem waiters",
-                        waiters);
-                  }
-                  return retry_with_backoff(
-                    max_retries,
-                    [f, &seq]() { return seq.sequenced_write_inner(f); },
-                    base_backoff);
-              });
+        auto remote = [base_backoff, f, cancel](seq_writer& seq) {
+            return seq.do_sequenced_write(f, base_backoff, cancel);
         };
 
         return container()
           .invoke_on(reader_shard, _smp_opts, remote)
           .then([](auto res) { return std::move(res).value(); });
+    }
+
+    /// The shard-zero part of sequenced_write: serialize on _write_sem, then
+    /// drive the write with retries. Declared as a separate member function
+    /// rather than inline in sequenced_write for the same compiler-issue
+    /// reason as sequenced_write_inner.
+    template<
+      typename F,
+      typename DurationType,
+      typename invoke_result_t = typename std::
+        invoke_result_t<F, model::offset, seq_writer&>::value_type::value_type>
+    ss::future<
+      outcome::outcome<invoke_result_t, std::error_code, std::exception_ptr>>
+    do_sequenced_write(F f, DurationType base_backoff, cancel_token cancel) {
+        if (auto waiters = _write_sem.waiters(); waiters != 0) {
+            vlog(
+              srlog.trace, "sequenced_write waiting for {} waiters", waiters);
+        }
+        auto units = co_await acquire_units_cancellable(_write_sem, cancel);
+        if (auto waiters = _wait_for_sem.waiters(); waiters != 0) {
+            vlog(
+              srlog.debug,
+              "sequenced_write acquired write_sem with {} "
+              "wait_for_sem waiters",
+              waiters);
+        }
+        co_return co_await retry_with_backoff(
+          max_retries,
+          [this, f, cancel]() { return sequenced_write_inner(f, cancel); },
+          base_backoff);
     }
 
     /// The part of sequenced_write that runs on shard zero
@@ -224,10 +255,17 @@ private:
         invoke_result_t<F, model::offset, seq_writer&>::value_type::value_type>
     ss::future<
       outcome::outcome<invoke_result_t, std::error_code, std::exception_ptr>>
-    sequenced_write_inner(F f) {
+    sequenced_write_inner(F f, const cancel_token& cancel) {
+        // A cancelled write is transported as an exception outcome rather
+        // than thrown, so it is not retried.
+        if (cancel && cancel->load(std::memory_order_relaxed)) {
+            co_return std::make_exception_ptr(exception(
+              error_code::internal_server_error,
+              "schema registry write cancelled: caller is shutting down"));
+        }
         // If we run concurrently with them, redundant replays to the store
         // will be safely dropped based on offset.
-        co_await read_sync();
+        co_await read_sync(cancel);
 
         auto next_offset = _loaded_offset + model::offset{1};
         std::optional<invoke_result_t> r;
@@ -249,7 +287,14 @@ private:
       std::optional<model::offset> write_at, model::record_batch batch);
 
     /// Block until this offset is available, fetching if necessary
-    ss::future<> wait_for(model::offset offset);
+    ss::future<> wait_for(model::offset offset, cancel_token cancel);
+    /// The shard-zero part of wait_for.
+    ss::future<> do_wait_for(model::offset offset, cancel_token cancel);
+
+    /// Acquire one unit, waiting unboundedly when \p cancel is null; with a
+    /// token, poll it between short timed waits and fail once it is set.
+    static ss::future<ssx::semaphore_units>
+    acquire_units_cancellable(ssx::semaphore& sem, cancel_token cancel);
 
     std::unique_ptr<sequence_state_checker> _state_checker;
 

@@ -107,10 +107,34 @@ struct batch_builder : public storage::record_batch_builder {
 /// Call this before reading from the store, if servicing
 /// a REST API endpoint that requires global knowledge of latest
 /// data (i.e. any listings)
-ss::future<> seq_writer::read_sync() {
+ss::future<> seq_writer::read_sync(cancel_token cancel) {
     auto max_offset = co_await _transport->get_high_watermark();
-    co_await wait_for(max_offset - model::offset{1});
+    co_await wait_for(max_offset - model::offset{1}, std::move(cancel));
     co_await _store.process_marked_schemas();
+}
+
+ss::future<ssx::semaphore_units> seq_writer::acquire_units_cancellable(
+  ssx::semaphore& sem, cancel_token cancel) {
+    if (!cancel) {
+        co_return co_await ss::get_units(sem, 1);
+    }
+    // Poll rather than deadline: the holder may legitimately be slow (a fresh
+    // leader replaying a large _schemas), so a queued waiter must only fail
+    // when its caller has actually given up.
+    constexpr auto poll_interval = 1s;
+    for (;;) {
+        if (cancel->load(std::memory_order_relaxed)) {
+            throw exception(
+              error_code::internal_server_error,
+              "semaphore wait cancelled: caller is shutting down");
+        }
+        try {
+            co_return co_await ss::get_units(
+              sem, 1, ssx::semaphore::clock::now() + poll_interval);
+        } catch (const ss::semaphore_timed_out&) {
+            // Re-check the token and keep waiting.
+        }
+    }
 }
 
 ss::future<> seq_writer::check_mutable(
@@ -127,29 +151,33 @@ ss::future<> seq_writer::check_mutable(
     co_return;
 }
 
-ss::future<> seq_writer::wait_for(model::offset offset) {
+ss::future<> seq_writer::wait_for(model::offset offset, cancel_token cancel) {
     return container().invoke_on(
-      reader_shard, _smp_opts, [offset](seq_writer& seq) {
-          if (auto waiters = seq._wait_for_sem.waiters(); waiters != 0) {
-              vlog(srlog.trace, "wait_for waiting for {} waiters", waiters);
-          }
-          return ss::with_semaphore(seq._wait_for_sem, 1, [&seq, offset]() {
-              if (offset > seq._loaded_offset) {
-                  vlog(
-                    srlog.debug,
-                    "wait_for dirty!  Reading {}..{}",
-                    seq._loaded_offset,
-                    offset);
-                  return seq._transport->consume_range(
-                    seq._loaded_offset + model::offset{1},
-                    offset + model::offset{1},
-                    consume_to_store{seq._store, seq});
-              } else {
-                  vlog(srlog.trace, "wait_for clean (offset  {})", offset);
-                  return ss::make_ready_future<>();
-              }
-          });
+      reader_shard, _smp_opts, [offset, cancel](seq_writer& seq) {
+          return seq.do_wait_for(offset, cancel);
       });
+}
+
+ss::future<>
+seq_writer::do_wait_for(model::offset offset, cancel_token cancel) {
+    if (auto waiters = _wait_for_sem.waiters(); waiters != 0) {
+        vlog(srlog.trace, "wait_for waiting for {} waiters", waiters);
+    }
+    auto units = co_await acquire_units_cancellable(
+      _wait_for_sem, std::move(cancel));
+    if (offset > _loaded_offset) {
+        vlog(
+          srlog.debug,
+          "wait_for dirty!  Reading {}..{}",
+          _loaded_offset,
+          offset);
+        co_await _transport->consume_range(
+          _loaded_offset + model::offset{1},
+          offset + model::offset{1},
+          consume_to_store{_store, *this});
+    } else {
+        vlog(srlog.trace, "wait_for clean (offset  {})", offset);
+    }
 }
 
 /// Helper for write methods that need to check + retry if their
@@ -397,14 +425,16 @@ seq_writer::do_write_subject_version_imported(
 }
 
 ss::future<sharded_store::insert_result>
-seq_writer::write_subject_version_imported(stored_schema schema) {
+seq_writer::write_subject_version_imported(
+  stored_schema schema, cancel_token cancel) {
     co_return co_await sequenced_write(
       [&schema](model::offset write_at, seq_writer& seq) {
           return seq.do_write_subject_version_imported(
             schema.share(), write_at);
       },
       schema.schema.sub().ctx,
-      write_source::schema_registry_sync);
+      write_source::schema_registry_sync,
+      std::move(cancel));
 }
 
 ss::future<std::optional<bool>> seq_writer::do_write_config(
@@ -455,7 +485,10 @@ ss::future<std::optional<bool>> seq_writer::do_write_config(
 }
 
 ss::future<bool> seq_writer::write_config(
-  context_subject ctx_sub, compatibility_level compat, write_source src) {
+  context_subject ctx_sub,
+  compatibility_level compat,
+  write_source src,
+  cancel_token cancel) {
     auto ctx = ctx_sub.ctx;
     return sequenced_write(
       [ctx_sub{std::move(ctx_sub)}, compat, src](
@@ -463,7 +496,8 @@ ss::future<bool> seq_writer::write_config(
           return seq.do_write_config(ctx_sub, compat, write_at, src);
       },
       std::move(ctx),
-      src);
+      src,
+      std::move(cancel));
 }
 
 ss::future<std::optional<bool>>
@@ -499,15 +533,16 @@ seq_writer::do_delete_config(context_subject ctx_sub, write_source src) {
     }
 }
 
-ss::future<bool>
-seq_writer::delete_config(context_subject ctx_sub, write_source src) {
+ss::future<bool> seq_writer::delete_config(
+  context_subject ctx_sub, write_source src, cancel_token cancel) {
     auto ctx = ctx_sub.ctx;
     return sequenced_write(
       [ctx_sub{std::move(ctx_sub)}, src](model::offset, seq_writer& seq) {
           return seq.do_delete_config(ctx_sub, src);
       },
       std::move(ctx),
-      src);
+      src,
+      std::move(cancel));
 }
 
 ss::future<std::optional<bool>> seq_writer::do_write_mode(
@@ -591,7 +626,11 @@ ss::future<std::optional<bool>> seq_writer::do_write_mode(
 }
 
 ss::future<bool> seq_writer::write_mode(
-  context_subject ctx_sub, mode mode, force f, write_source src) {
+  context_subject ctx_sub,
+  mode mode,
+  force f,
+  write_source src,
+  cancel_token cancel) {
     auto ctx = ctx_sub.ctx;
     return sequenced_write(
       [ctx_sub{std::move(ctx_sub)}, mode, f, src](
@@ -599,7 +638,8 @@ ss::future<bool> seq_writer::write_mode(
           return seq.do_write_mode(ctx_sub, mode, f, write_at, src);
       },
       std::move(ctx),
-      src);
+      src,
+      std::move(cancel));
 }
 
 ss::future<std::optional<bool>> seq_writer::do_delete_mode(
@@ -631,8 +671,8 @@ ss::future<std::optional<bool>> seq_writer::do_delete_mode(
     }
 }
 
-ss::future<bool>
-seq_writer::delete_mode(context_subject ctx_sub, write_source src) {
+ss::future<bool> seq_writer::delete_mode(
+  context_subject ctx_sub, write_source src, cancel_token cancel) {
     auto ctx = ctx_sub.ctx;
     return sequenced_write(
       [ctx_sub{std::move(ctx_sub)},
@@ -640,7 +680,8 @@ seq_writer::delete_mode(context_subject ctx_sub, write_source src) {
           return seq.do_delete_mode(ctx_sub, write_at, src);
       },
       std::move(ctx),
-      src);
+      src,
+      std::move(cancel));
 }
 
 ss::future<std::optional<bool>>
@@ -725,7 +766,10 @@ ss::future<std::optional<bool>> seq_writer::do_delete_subject_version(
 }
 
 ss::future<bool> seq_writer::delete_subject_version(
-  context_subject sub, schema_version version, write_source src) {
+  context_subject sub,
+  schema_version version,
+  write_source src,
+  cancel_token cancel) {
     auto ctx = sub.ctx;
     return sequenced_write(
       [sub{std::move(sub)}, version, src](
@@ -733,7 +777,8 @@ ss::future<bool> seq_writer::delete_subject_version(
           return seq.do_delete_subject_version(sub, version, write_at, src);
       },
       std::move(ctx),
-      src);
+      src,
+      std::move(cancel));
 }
 
 ss::future<std::optional<chunked_vector<schema_version>>>
@@ -805,14 +850,16 @@ seq_writer::delete_subject_impermanent(context_subject sub, write_source src) {
 ss::future<chunked_vector<schema_version>> seq_writer::delete_subject_permanent(
   context_subject sub,
   std::optional<schema_version> version,
-  write_source src) {
+  write_source src,
+  cancel_token cancel) {
     auto ctx = sub.ctx;
     return sequenced_write(
       [sub{std::move(sub)}, version, src](model::offset, seq_writer& seq) {
           return seq.delete_subject_permanent_inner(sub, version, src);
       },
       std::move(ctx),
-      src);
+      src,
+      std::move(cancel));
 }
 
 ss::future<std::optional<chunked_vector<schema_version>>>

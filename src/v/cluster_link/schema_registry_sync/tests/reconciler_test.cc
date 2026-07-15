@@ -378,7 +378,8 @@ TEST(reconciler, propagates_soft_delete_over_active_destination) {
     auto a = ppsr::context_subject::unqualified("a");
     // Destination already holds a:v1 active; the source has soft-deleted it but
     // does not echo the flag, so only the listing-derived set conveys it.
-    h.destination.import_schema(make_schema(a, 1, R"({"v":1})")).get();
+    ss::abort_source seed_as;
+    h.destination.import_schema(make_schema(a, 1, R"({"v":1})"), seed_as).get();
     h.source.reports_deleted_flag = false;
     h.source.add(a, 1, ppsr::is_deleted::yes);
 
@@ -516,7 +517,8 @@ TEST(reconciler, import_conflict_counts_as_error) {
     {
         auto conflicting = make_schema(b, 1, R"({"conflict":true})");
         conflicting.id = ppsr::schema_id{99};
-        h.destination.import_schema(std::move(conflicting)).get();
+        ss::abort_source seed_as;
+        h.destination.import_schema(std::move(conflicting), seed_as).get();
     }
 
     srs::work_set work;

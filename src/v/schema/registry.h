@@ -15,6 +15,8 @@
 #include "pandaproxy/schema_registry/schema_getter.h"
 #include "pandaproxy/schema_registry/types.h"
 
+#include <seastar/core/abort_source.hh>
+#include <seastar/core/do_with.hh>
 #include <seastar/util/noncopyable_function.hh>
 
 namespace schema {
@@ -60,12 +62,24 @@ public:
     /// Synchronizes the underlying store if the time since the last sync
     /// exceeds the specified threshold.
     ///
+    /// \param as aborts waiting for the sync (the underlying reads hop
+    ///           shards, so cancellation is delivered via a polled token
+    ///           derived from this source)
     /// \param max_age maximum duration allowed since last sync before forcing
     ///                a new sync. If zero (default), always forces a sync.
     /// \return time point of the last sync (either current time if sync was
     ///         performed, or the previous sync time if no sync was needed).
     virtual ss::future<ss::lowres_clock::time_point>
-    sync(ss::lowres_clock::duration max_age = {}) = 0;
+    sync(ss::abort_source& as, ss::lowres_clock::duration max_age = {}) = 0;
+
+    /// As above, for callers with no cancellation context: the wait is not
+    /// abortable, matching the pre-abort-source behavior.
+    ss::future<ss::lowres_clock::time_point>
+    sync(ss::lowres_clock::duration max_age = {}) {
+        return ss::do_with(
+          ss::abort_source{},
+          [this, max_age](ss::abort_source& as) { return sync(as, max_age); });
+    }
 
     ss::future<std::optional<pandaproxy::schema_registry::valid_schema>>
     get_valid_schema(
@@ -123,31 +137,36 @@ public:
     /// Import a schema with source id/version. Identical imports are no-ops;
     /// conflicts throw.
     virtual ss::future<pandaproxy::schema_registry::context_schema_id>
-      import_schema(pandaproxy::schema_registry::stored_schema) = 0;
+    import_schema(pandaproxy::schema_registry::stored_schema, ss::abort_source&)
+      = 0;
 
     virtual ss::future<bool> soft_delete_schema(
       pandaproxy::schema_registry::context_subject,
-      pandaproxy::schema_registry::schema_version) = 0;
+      pandaproxy::schema_registry::schema_version,
+      ss::abort_source&) = 0;
 
     virtual ss::future<
       chunked_vector<pandaproxy::schema_registry::schema_version>>
-      permanent_delete_schema(
-        pandaproxy::schema_registry::context_subject,
-        std::optional<pandaproxy::schema_registry::schema_version>) = 0;
+    permanent_delete_schema(
+      pandaproxy::schema_registry::context_subject,
+      std::optional<pandaproxy::schema_registry::schema_version>,
+      ss::abort_source&) = 0;
 
     virtual ss::future<bool> write_mode(
       pandaproxy::schema_registry::context_subject,
-      pandaproxy::schema_registry::mode) = 0;
+      pandaproxy::schema_registry::mode,
+      ss::abort_source&) = 0;
 
-    virtual ss::future<bool>
-      delete_mode(pandaproxy::schema_registry::context_subject) = 0;
+    virtual ss::future<bool> delete_mode(
+      pandaproxy::schema_registry::context_subject, ss::abort_source&) = 0;
 
     virtual ss::future<bool> write_config(
       pandaproxy::schema_registry::context_subject,
-      pandaproxy::schema_registry::compatibility_level) = 0;
+      pandaproxy::schema_registry::compatibility_level,
+      ss::abort_source&) = 0;
 
-    virtual ss::future<bool>
-      delete_config(pandaproxy::schema_registry::context_subject) = 0;
+    virtual ss::future<bool> delete_config(
+      pandaproxy::schema_registry::context_subject, ss::abort_source&) = 0;
 
     ///@}
 };
