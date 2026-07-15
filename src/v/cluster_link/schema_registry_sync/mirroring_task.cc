@@ -139,6 +139,17 @@ void mirroring_task::reset_sync_state() {
     _last_full_sync.reset();
 }
 
+void mirroring_task::request_stop_impl() noexcept {
+    // Delivered before task::stop()/pause() join the run fiber: wake any wait
+    // internal to the reader's transport (token/pause/pool/socket) that the
+    // runner's abort source cannot reach. The signalled transport is one-shot,
+    // so flag the reader for a rebuild on the next run (pause/resume).
+    _reader_signalled = true;
+    if (_reader) {
+        _reader->request_stop();
+    }
+}
+
 ss::future<cl_result<void>> mirroring_task::stop() noexcept {
     auto res = co_await task::stop();
     // task::stop() closed the runner's gate, so no run_impl is in flight and it
@@ -813,8 +824,10 @@ mirroring_task::run_impl(ss::abort_source& as) {
     const bool long_sync = config_changed || should_long_sync();
 
     // A config change may have altered the source connection (URL, auth, TLS),
-    // so rebuild the reader before this run reads from the source.
-    if (config_changed) {
+    // and a stop/pause signal leaves the reader's transport unusable (its
+    // aborts are one-shot); either way, rebuild the reader before this run
+    // reads from the source.
+    if (config_changed || std::exchange(_reader_signalled, false)) {
         co_await reset_reader();
     }
 

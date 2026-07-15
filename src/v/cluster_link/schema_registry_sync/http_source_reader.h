@@ -95,6 +95,8 @@ public:
     ss::future<source_result<source_config_read>>
     read_config(ppsr::context_subject, ss::abort_source&) override;
 
+    void request_stop() noexcept override;
+
     ss::future<> stop() override;
 
 private:

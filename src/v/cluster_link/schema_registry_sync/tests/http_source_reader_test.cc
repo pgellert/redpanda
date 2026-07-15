@@ -48,6 +48,7 @@ public:
        ss::lowres_clock::duration),
       (override));
     MOCK_METHOD(ss::future<>, shutdown_and_stop, (), (override));
+    MOCK_METHOD(void, request_abort, (), (noexcept, override));
 };
 
 // Builds a rest_client over a mocked transport; the reader takes ownership and
@@ -173,6 +174,47 @@ TEST(http_source_reader, requests_run_concurrently) {
     }
     ASSERT_TRUE(first.get().has_value());
     ASSERT_TRUE(second.get().has_value());
+    reader.stop().get();
+}
+
+// request_stop() forwards the signal-only abort to the transport, waking a
+// read parked inside it. The stop path delivers this signal before joining
+// the fiber that issued the read (which the runner abort, fired right after,
+// then bounces out of the retry loop), so a park must break promptly rather
+// than wait out the transport.
+TEST(http_source_reader, request_stop_wakes_parked_read) {
+    std::deque<ss::promise<http::downloaded_response>> parked;
+    auto reader = reader_over([&](mock_client& m) {
+        EXPECT_CALL(m, request_and_collect_response(_, _, _))
+          .WillRepeatedly([&](
+                            bh::request_header<>&&,
+                            std::optional<iobuf>,
+                            ss::lowres_clock::duration) {
+              parked.emplace_back();
+              return parked.back().get_future();
+          });
+        EXPECT_CALL(m, request_abort()).WillOnce([&]() noexcept {
+            for (auto& request : parked) {
+                request.set_exception(
+                  std::make_exception_ptr(ss::abort_requested_exception{}));
+            }
+            parked.clear();
+        });
+    });
+    ss::abort_source as;
+    auto read = reader.list_contexts(as);
+    RPTEST_REQUIRE_EVENTUALLY(5s, [&] { return parked.size() == 1; });
+
+    reader.request_stop();
+    // Production ordering: the runner's abort source fires immediately after
+    // the signal, so the retry scaffolding exits instead of re-dispatching.
+    as.request_abort();
+    try {
+        auto res = read.get();
+        EXPECT_FALSE(res.has_value());
+    } catch (...) {
+        // A propagated shutdown exception is an equally valid prompt exit.
+    }
     reader.stop().get();
 }
 

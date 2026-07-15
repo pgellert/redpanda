@@ -75,6 +75,8 @@ public:
 
     ss::future<cl_result<void>> stop() noexcept override;
 
+    void request_stop_impl() noexcept override;
+
     model::enabled_t is_enabled() const final;
 
     model::task_status_report get_status_report() const override;
@@ -242,6 +244,10 @@ private:
     // (rather than mutating _status/_last_full_sync in update_config) avoids
     // racing an in-flight run_impl across its co_await suspension points.
     bool _config_changed{false};
+    /// Set by request_stop_impl(): the reader's transport was signalled and is
+    /// no longer usable; the next run rebuilds it before reading. Matters for
+    /// pause/resume, where stop()'s reader teardown never runs.
+    bool _reader_signalled{false};
 };
 
 class mirroring_task_factory : public task_factory {

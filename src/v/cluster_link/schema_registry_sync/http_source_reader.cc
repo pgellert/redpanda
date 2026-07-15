@@ -391,6 +391,16 @@ ss::future<source_result<source_config_read>> http_source_reader::read_config(
       .unsupported = std::move(res.value().unsupported)};
 }
 
+void http_source_reader::request_stop() noexcept {
+    // Signal only, no drain: fibers may still be parked inside the client and
+    // the draining stop() is sequenced after their join. A client built after
+    // this signal (the lazy build racing a stop) is not covered here; the
+    // caller's abort source catches that fiber at its next retry checkpoint.
+    if (_client) {
+        _client->request_abort();
+    }
+}
+
 ss::future<> http_source_reader::stop() {
     // Idempotent: the reader can be stopped more than once (e.g. an in-flight
     // reconciler stopping the task before link teardown stops it again). The

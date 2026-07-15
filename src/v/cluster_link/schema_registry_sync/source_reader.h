@@ -103,6 +103,14 @@ public:
     virtual ss::future<source_result<source_config_read>>
     read_config(ppsr::context_subject, ss::abort_source&) = 0;
 
+    /// Synchronous signal that promptly fails reads in flight, including waits
+    /// internal to the reader's transport that the per-call abort source does
+    /// not reach. For stop paths that must deliver the wake-up before joining
+    /// the fiber running those reads. The reader is not reusable afterwards
+    /// until it is reset; the default is a no-op for readers with nothing to
+    /// signal.
+    virtual void request_stop() noexcept {}
+
     /// Releases any resources the reader holds (e.g. an HTTP transport). Called
     /// once before the reader is destroyed; the default is a no-op for readers
     /// that hold nothing. After stop() no other method may be called.
