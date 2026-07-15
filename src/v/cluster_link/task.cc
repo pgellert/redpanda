@@ -171,6 +171,12 @@ ss::future<cl_result<void>> task::start() {
         vlog(logger().debug, "task already started");
         co_return err_info(errc::task_already_running);
     }
+    if (_runner_stopped.has_value()) {
+        // A previous stop()/pause() may still be joining the old runner; the
+        // new run must not overlap fibers that are still draining.
+        co_await _runner_stopped->get_future();
+        _runner_stopped.reset();
+    }
     BOOST_OUTCOME_CO_TRYX(change_state(
       model::task_state::active, ssx::sformat("{} has started", name())));
 
@@ -185,11 +191,8 @@ ss::future<cl_result<void>> task::stop() noexcept {
     auto res = change_state(
       model::task_state::stopped, ssx::sformat("{} has stopped", name()));
     vassert(res.has_value(), "Failed to change state to stopped");
-    if (_task_runner) {
-        auto runner = std::move(_task_runner);
-        _task_runner.reset();
-        co_await runner->stop();
-    }
+    request_stop_impl();
+    co_await stop_runner();
     co_return outcome::success();
 }
 
@@ -197,12 +200,23 @@ ss::future<cl_result<void>> task::pause() {
     vlog(logger().trace, "pause called");
     BOOST_OUTCOME_CO_TRYX(change_state(
       model::task_state::paused, ssx::sformat("{} has paused", name())));
+    request_stop_impl();
+    co_await stop_runner();
+    co_return outcome::success();
+}
+
+ss::future<> task::stop_runner() noexcept {
     if (_task_runner) {
         auto runner = std::move(_task_runner);
-        _task_runner.reset();
-        co_await runner->stop();
+        auto* raw = runner.get();
+        // Keep the runner alive until its stop resolves; every caller then
+        // awaits the shared join below.
+        _runner_stopped.emplace(
+          raw->stop().finally([runner = std::move(runner)] {}));
     }
-    co_return outcome::success();
+    if (_runner_stopped.has_value()) {
+        co_await _runner_stopped->get_future();
+    }
 }
 
 /// Returns true if the task should be started on the current node shard

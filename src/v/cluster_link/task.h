@@ -21,6 +21,7 @@
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
+#include <seastar/core/shared_future.hh>
 #include <seastar/util/bool_class.hh>
 
 #include <fmt/format.h>
@@ -114,10 +115,20 @@ protected:
     /// duration of the run.  This abort source allows for stopping the run
     /// early in case the task has stopped or paused.
     virtual ss::future<state_transition> run_impl(ss::abort_source&) = 0;
+    /// Synchronous, idempotent signal delivered by stop() and pause() before
+    /// they join the in-flight run: fire aborts on any waits run_impl may be
+    /// parked on that the runner's abort source does not reach (e.g. an HTTP
+    /// client's internal token/pause waits). Must not block; the join follows
+    /// immediately after.
+    virtual void request_stop_impl() noexcept {}
     /// Returns the owning link
     link* get_link() const noexcept;
 
 private:
+    /// Initiates the runner stop on the first call and joins it; concurrent
+    /// and subsequent callers await the same join, so returning from
+    /// stop()/pause() always means the runner's fibers have exited.
+    ss::future<> stop_runner() noexcept;
     /// Executes all callbacks on state change
     void run_callbacks(const state_change&);
     /// Validates that the state change is valid
@@ -140,6 +151,11 @@ private:
     prefix_logger _logger;
 
     std::unique_ptr<runner> _task_runner{nullptr};
+    /// Join of the most recent runner stop. Kept so a stop()/pause() racing an
+    /// in-flight stop waits for actual quiescence instead of early-returning
+    /// on the moved-out _task_runner, and so start() cannot overlap a still
+    /// draining run. Engaged by the first stop; reset by the next start.
+    std::optional<ss::shared_future<>> _runner_stopped;
 };
 /**
  * Task that is locked to the controller shard. Runs only when the current node

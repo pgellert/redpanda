@@ -332,4 +332,110 @@ TEST_F_CORO(link_unavailable_fixture, test_link_unavailable_task) {
     ASSERT_TRUE_CORO(res.has_value())
       << "Failed to stop task: " << res.assume_error().message();
 }
+
+/// A run parked on a wait the runner's abort source does not reach (modeling
+/// e.g. an HTTP client's internal token/pause waits). With release_on_signal
+/// the park is released by request_stop_impl(); otherwise only release().
+class parked_task : public task {
+public:
+    static constexpr auto name = "parked_task";
+    explicit parked_task(bool release_on_signal)
+      : task(nullptr, initial_run_interval, name)
+      , _release_on_signal(release_on_signal) {}
+
+    bool should_start_impl(ss::shard_id, ::model::node_id) const override {
+        return true;
+    }
+    bool should_stop_impl(ss::shard_id, ::model::node_id) const override {
+        return false;
+    }
+    void update_config(const model::metadata&) override {}
+    model::enabled_t is_enabled() const final { return model::enabled_t::yes; }
+
+    ss::future<state_transition> run_impl(ss::abort_source&) override {
+        _running = true;
+        try {
+            co_await ss::sleep_abortable(1h, _park);
+        } catch (const ss::sleep_aborted&) {
+        }
+        _run_exited = true;
+        co_return state_transition{
+          .desired_state = model::task_state::active, .reason = "released"};
+    }
+
+    void request_stop_impl() noexcept override {
+        if (_release_on_signal) {
+            release();
+        }
+    }
+
+    void release() noexcept {
+        if (!_park.abort_requested()) {
+            _park.request_abort();
+        }
+    }
+
+    bool running() const noexcept { return _running; }
+    bool run_exited() const noexcept { return _run_exited; }
+
+private:
+    ss::abort_source _park;
+    bool _release_on_signal;
+    bool _running{false};
+    bool _run_exited{false};
+};
+
+class parked_task_fixture : public seastar_test {};
+
+TEST_F_CORO(parked_task_fixture, stop_signals_before_joining_parked_run) {
+    parked_task task(/*release_on_signal=*/true);
+    auto res = co_await task.start();
+    ASSERT_TRUE_CORO(res.has_value());
+    RPTEST_REQUIRE_EVENTUALLY_CORO(5s, [&task] { return task.running(); });
+
+    // Without the pre-join signal, stop() would wait out the 1h park (the
+    // test would time out here).
+    res = co_await task.stop();
+    ASSERT_TRUE_CORO(res.has_value());
+    ASSERT_TRUE_CORO(task.run_exited());
+}
+
+TEST_F_CORO(parked_task_fixture, pause_signals_before_joining_parked_run) {
+    parked_task task(/*release_on_signal=*/true);
+    auto res = co_await task.start();
+    ASSERT_TRUE_CORO(res.has_value());
+    RPTEST_REQUIRE_EVENTUALLY_CORO(5s, [&task] { return task.running(); });
+
+    res = co_await task.pause();
+    ASSERT_TRUE_CORO(res.has_value());
+    ASSERT_TRUE_CORO(task.run_exited());
+    ASSERT_EQ_CORO(task.get_state(), model::task_state::paused);
+}
+
+TEST_F_CORO(parked_task_fixture, concurrent_stop_joins_the_same_runner) {
+    parked_task task(/*release_on_signal=*/false);
+    auto res = co_await task.start();
+    ASSERT_TRUE_CORO(res.has_value());
+    RPTEST_REQUIRE_EVENTUALLY_CORO(5s, [&task] { return task.running(); });
+
+    // First stop takes ownership of the runner and blocks joining the parked
+    // run; a concurrent second stop must wait for the same join rather than
+    // early-return on the moved-out runner.
+    auto first = task.stop();
+    bool second_done = false;
+    auto second = task.stop().then([&second_done](auto r) {
+        second_done = true;
+        return r;
+    });
+    co_await ss::sleep(100ms);
+    ASSERT_FALSE_CORO(second_done);
+    ASSERT_FALSE_CORO(task.run_exited());
+
+    task.release();
+    auto second_res = co_await std::move(second);
+    ASSERT_TRUE_CORO(second_res.has_value());
+    ASSERT_TRUE_CORO(task.run_exited());
+    auto first_res = co_await std::move(first);
+    ASSERT_TRUE_CORO(first_res.has_value());
+}
 } // namespace cluster_link
