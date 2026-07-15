@@ -153,5 +153,8 @@ private:
     std::unique_ptr<link_probe> _probe;
     ss::gate _gate;
     ss::abort_source _as;
+    // stop() is called by both the link-removal handler and manager shutdown,
+    // which can race; only the first call does the work.
+    bool _stopped{false};
 };
 } // namespace cluster_link

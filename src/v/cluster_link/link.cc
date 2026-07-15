@@ -136,6 +136,11 @@ ss::future<> link::start() {
 }
 
 ss::future<> link::stop() noexcept {
+    // Idempotent: the removal handler and manager shutdown both stop links
+    // and can race during teardown; only the first call does the work.
+    if (std::exchange(_stopped, true)) {
+        co_return;
+    }
     vlog(
       cllog.info,
       "Stopping cluster link {} ({})",
