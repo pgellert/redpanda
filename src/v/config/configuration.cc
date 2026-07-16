@@ -3962,6 +3962,15 @@ configuration::configuration()
       "context.",
       {.needs_restart = needs_restart::yes, .visibility = visibility::user},
       true)
+  , schema_registry_enable_staged_replay(
+      *this,
+      "schema_registry_enable_staged_replay",
+      "Replay the schemas topic at startup by staging raw schemas and "
+      "parsing each distinct schema once at the end of the topic, instead "
+      "of parsing once per record. Disable to fall back to per-record "
+      "processing.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::tunable},
+      true)
   , schema_registry_sync_memory_bytes(
       *this,
       "schema_registry_sync_memory_bytes",

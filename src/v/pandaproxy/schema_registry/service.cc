@@ -752,8 +752,20 @@ ss::future<> service::fetch_internal_topic() {
     auto max_offset = co_await _transport->get_high_watermark();
     vlog(srlog.debug, "Schema registry: _schemas max_offset: {}", max_offset);
 
+    auto stage = stage_defs{
+      config::shard_local_cfg().schema_registry_enable_staged_replay()};
     co_await _transport->consume_range(
-      model::offset{0}, max_offset, consume_to_store{_store, writer()});
+      model::offset{0}, max_offset, consume_to_store{_store, writer(), stage});
+
+    // Canonicalize the staged definitions, once per distinct schema id,
+    // now that the whole topic (and so every reference target) has been
+    // read. If consuming failed above, do_start retries this whole
+    // function: staging is idempotent under re-consumption from offset 0,
+    // and until a retry succeeds any staged definition is served raw via
+    // the staging-area fallback in store::get_schema_definition.
+    if (stage) {
+        co_await _store.finalize_staged();
+    }
 
     // If a schema failed to be compiled, it will be marked. We attempt to
     // reprocess them once now that the whole topic has been read, in case

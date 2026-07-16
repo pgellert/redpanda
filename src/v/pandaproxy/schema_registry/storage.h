@@ -1697,9 +1697,14 @@ model::record_batch as_record_batch(Key key, Value val) {
 }
 
 struct consume_to_store {
-    explicit consume_to_store(sharded_store& s, seq_writer& seq)
+    ///\brief With stage = stage_defs::yes (startup replay), schema
+    /// definitions are staged instead of canonicalized; the caller must
+    /// call sharded_store::finalize_staged() after consuming.
+    explicit consume_to_store(
+      sharded_store& s, seq_writer& seq, stage_defs stage = stage_defs::no)
       : _store{s}
-      , _sequencer(seq) {}
+      , _sequencer(seq)
+      , _stage(stage) {}
 
     ss::future<ss::stop_iteration> operator()(model::record_batch b) {
         if (!b.header().attrs.is_control()) {
@@ -1861,7 +1866,8 @@ struct consume_to_store {
                   std::move(val->schema),
                   val->id,
                   val->version,
-                  val->deleted);
+                  val->deleted,
+                  _stage);
             }
         } catch (const exception& e) {
             vlog(srlog.debug, "Error replaying: {}: {}", key, e.what());
@@ -2068,6 +2074,7 @@ struct consume_to_store {
     void end_of_stream() {}
     sharded_store& _store;
     seq_writer& _sequencer;
+    stage_defs _stage{stage_defs::no};
 };
 
 } // namespace pandaproxy::schema_registry

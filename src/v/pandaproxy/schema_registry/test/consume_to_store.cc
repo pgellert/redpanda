@@ -525,6 +525,175 @@ SEASTAR_THREAD_TEST_CASE(test_imported_write_keys_carry_subject) {
     BOOST_REQUIRE(key.find("subject0") != std::string::npos);
 }
 
+// Unsanitized on purpose (whitespace): staged replay must serve it raw
+// until finalize_staged() canonicalizes it into int_def0's form.
+const pps::schema_definition int_def0_unsanitized{
+  R"({"type": "int" })", pps::schema_type::avro};
+
+SEASTAR_THREAD_TEST_CASE(test_consume_to_store_staged) {
+    pps::sharded_store s;
+    s.start(pps::is_mutable::yes, ss::default_smp_service_group()).get();
+    auto stop_store = ss::defer([&s]() { s.stop().get(); });
+
+    noop_transport dummy_transport;
+
+    ss::sharded<pps::seq_writer> seq;
+    seq
+      .start(
+        model::node_id{0},
+        ss::default_smp_service_group(),
+        std::ref(dummy_transport),
+        std::reference_wrapper(s),
+        ss::sharded_parameter(
+          [] { return std::make_unique<sequence_state_checker_test>(); }))
+      .get();
+    auto stop_seq = ss::defer([&seq]() { seq.stop().get(); });
+
+    auto c = pps::consume_to_store(s, seq.local(), pps::stage_defs::yes);
+
+    auto sequence = model::offset{0};
+    const auto node_id = model::node_id{123};
+
+    // Two versions of subject0, then a permanent delete of v1, all staged.
+    auto schema_v0 = pps::as_record_batch(
+      pps::schema_key{sequence, node_id, subject0, version0, magic1},
+      pps::schema_value{
+        {subject0, int_def0_unsanitized.share()}, version0, id0});
+    BOOST_REQUIRE_NO_THROW(c(schema_v0.copy()).get());
+
+    auto schema_v1 = pps::as_record_batch(
+      pps::schema_key{sequence, node_id, subject0, version1, magic1},
+      pps::schema_value{{subject0, string_def0.share()}, version1, id1});
+    BOOST_REQUIRE_NO_THROW(c(schema_v1.copy()).get());
+
+    // Until finalize, the staged definition is served raw by id.
+    auto raw = s.get_schema_definition({subject0.ctx, id0}).get();
+    BOOST_REQUIRE_EQUAL(raw, int_def0_unsanitized);
+
+    // Tombstoning v1 during replay must also drop its staged definition.
+    chunked_vector<pps::schema_version> v1_only;
+    v1_only.push_back(version1);
+    BOOST_REQUIRE_NO_THROW(
+      c(make_delete_subject_permanently_batch(subject0, v1_only)).get());
+
+    s.finalize_staged().get();
+
+    // v0 is canonicalized and served.
+    auto res = s.get_subject_schema(
+                  subject0, version0, pps::include_deleted::no)
+                 .get();
+    BOOST_REQUIRE_EQUAL(res.schema.def(), int_def0);
+    BOOST_REQUIRE_EQUAL(res.id, id0);
+
+    // v1 stays deleted; its definition was not resurrected by finalize.
+    BOOST_REQUIRE_THROW(
+      s.get_subject_schema(subject0, version1, pps::include_deleted::yes).get(),
+      pps::exception);
+    BOOST_REQUIRE_THROW(
+      s.get_schema_definition({subject0.ctx, id1}).get(), pps::exception);
+
+    // A live write after finalize goes through the eager path unchanged.
+    auto live = pps::consume_to_store(s, seq.local());
+    auto schema_v1_again = pps::as_record_batch(
+      pps::schema_key{sequence, node_id, subject0, version1, magic1},
+      pps::schema_value{{subject0, int_def0.share()}, version1, id1});
+    BOOST_REQUIRE_NO_THROW(live(schema_v1_again.copy()).get());
+    auto res1 = s.get_subject_schema(
+                   subject0, version1, pps::include_deleted::no)
+                  .get();
+    BOOST_REQUIRE_EQUAL(res1.schema.def(), int_def0);
+}
+
+const auto subject_a = pps::context_subject::unqualified("subject_a");
+const auto subject_b = pps::context_subject::unqualified("subject_b");
+
+// subject_a references subject_b ("b.proto") and appears earlier in the
+// topic: protobuf canonicalization must resolve the reference through the
+// store, exercising the staging-area fallback at finalize time.
+const pps::schema_definition dep_proto{
+  R"(syntax = "proto3";
+message Dep {
+  int32 x = 1;
+})",
+  pps::schema_type::protobuf};
+const pps::schema_definition test_proto{
+  R"(syntax = "proto3";
+import "b.proto";
+message Test {
+  Dep d = 1;
+})",
+  pps::schema_type::protobuf,
+  {{.name{"b.proto"}, .sub{subject_b}, .version{version0}}},
+  {}};
+
+SEASTAR_THREAD_TEST_CASE(test_consume_to_store_staged_matches_eager) {
+    auto sequence = model::offset{0};
+    const auto node_id = model::node_id{123};
+
+    auto record_a = pps::as_record_batch(
+      pps::schema_key{sequence, node_id, subject_a, version0, magic1},
+      pps::schema_value{{subject_a, test_proto.share()}, version0, id0});
+    auto record_b = pps::as_record_batch(
+      pps::schema_key{sequence, node_id, subject_b, version0, magic1},
+      pps::schema_value{{subject_b, dep_proto.share()}, version0, id1});
+
+    // Two stores cannot coexist (metrics double-registration), so replay
+    // into each in turn and collect the results for comparison.
+    auto run_replay = [&](pps::stage_defs stage) {
+        pps::sharded_store s;
+        s.start(pps::is_mutable::yes, ss::default_smp_service_group()).get();
+        auto stop_store = ss::defer([&s]() { s.stop().get(); });
+
+        noop_transport dummy_transport;
+
+        ss::sharded<pps::seq_writer> seq;
+        seq
+          .start(
+            model::node_id{0},
+            ss::default_smp_service_group(),
+            std::ref(dummy_transport),
+            std::reference_wrapper(s),
+            ss::sharded_parameter(
+              [] { return std::make_unique<sequence_state_checker_test>(); }))
+          .get();
+        auto stop_seq = ss::defer([&seq]() { seq.stop().get(); });
+
+        // Mirrors service::fetch_internal_topic: in the eager mode,
+        // subject_a fails to parse at its offset (forward reference), is
+        // marked, and is repaired by process_marked_schemas; in the staged
+        // mode, finalize_staged resolves the reference from the staging
+        // area.
+        auto c = pps::consume_to_store(s, seq.local(), stage);
+        BOOST_REQUIRE_NO_THROW(c(record_a.copy()).get());
+        BOOST_REQUIRE_NO_THROW(c(record_b.copy()).get());
+        if (stage) {
+            s.finalize_staged().get();
+        }
+        s.process_marked_schemas().get();
+
+        std::vector<pps::stored_schema> out;
+        for (const auto& sub : {subject_a, subject_b}) {
+            out.push_back(
+              s.get_subject_schema(sub, version0, pps::include_deleted::no)
+                .get());
+        }
+        return out;
+    };
+
+    auto staged_res = run_replay(pps::stage_defs::yes);
+    auto eager_res = run_replay(pps::stage_defs::no);
+
+    // Both paths must end with an identical, canonicalized store.
+    BOOST_REQUIRE_EQUAL(staged_res.size(), eager_res.size());
+    for (size_t i = 0; i != staged_res.size(); ++i) {
+        BOOST_REQUIRE_EQUAL(
+          staged_res[i].schema.def(), eager_res[i].schema.def());
+        BOOST_REQUIRE_EQUAL(staged_res[i].id, eager_res[i].id);
+    }
+    BOOST_REQUIRE_EQUAL(staged_res[0].id, id0);
+    BOOST_REQUIRE_EQUAL(staged_res[1].id, id1);
+}
+
 SEASTAR_THREAD_TEST_CASE(test_sync_writes_disabled) {
     pps::sharded_store s;
     s.start(pps::is_mutable::no, ss::default_smp_service_group()).get();
