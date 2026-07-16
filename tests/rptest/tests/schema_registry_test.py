@@ -8255,6 +8255,167 @@ class SchemaRegistryAutoAuthTest(SchemaRegistryTestMethods):
         )
 
 
+class SchemaRegistryStagedReplayTest(SchemaRegistryEndpoints):
+    """
+    Test startup replay of an uncompacted _schemas topic: many records but
+    few distinct schemas, replayed through the staged
+    (parse-once-per-schema) path and through the eager fallback
+    (schema_registry_enable_staged_replay=false). Both must rebuild
+    exactly the state the registry served before the restart.
+    """
+
+    def __init__(self, context: TestContext, **kwargs: Any):
+        super().__init__(
+            context,
+            num_brokers=1,
+            extra_rp_conf={"schema_registry_use_rpc": True},
+            **kwargs,
+        )
+
+    def _snapshot_state(self) -> dict[str, Any]:
+        """Capture everything the registry serves: subjects and versions
+        (including soft-deleted ones), per-version schemas and references,
+        and schemas by id."""
+        state: dict[str, Any] = {}
+        result_raw = self.sr_client.get_subjects(deleted=True)
+        assert result_raw.status_code == requests.codes.ok
+        all_subjects = sorted(result_raw.json())
+        state["subjects_with_deleted"] = all_subjects
+        result_raw = self.sr_client.get_subjects()
+        assert result_raw.status_code == requests.codes.ok
+        state["subjects"] = sorted(result_raw.json())
+
+        ids: set[int] = set()
+        versions_by_subject: dict[str, Any] = {}
+        for subject in all_subjects:
+            result_raw = self.sr_client.get_subjects_subject_versions(
+                subject=subject, deleted=True
+            )
+            assert result_raw.status_code == requests.codes.ok
+            all_versions = result_raw.json()
+            result_raw = self.sr_client.get_subjects_subject_versions(subject=subject)
+            live_versions = (
+                result_raw.json() if result_raw.status_code == requests.codes.ok else []
+            )
+            schemas = []
+            for version in live_versions:
+                result_raw = self.sr_client.get_subjects_subject_versions_version(
+                    subject=subject, version=version
+                )
+                assert result_raw.status_code == requests.codes.ok
+                res = result_raw.json()
+                ids.add(res["id"])
+                schemas.append(
+                    (version, res["id"], res["schema"], res.get("references"))
+                )
+            versions_by_subject[subject] = {
+                "all_versions": all_versions,
+                "schemas": schemas,
+            }
+        state["versions"] = versions_by_subject
+
+        state["schemas_by_id"] = {}
+        for schema_id in sorted(ids):
+            result_raw = self.sr_client.get_schemas_ids_id(id=schema_id)
+            assert result_raw.status_code == requests.codes.ok
+            state["schemas_by_id"][schema_id] = result_raw.json()["schema"]
+        return state
+
+    def _restart_schema_registry(self, admin: Admin):
+        result_raw = admin.restart_service(rp_service="schema-registry")
+        assert result_raw.status_code == requests.codes.ok
+        search_logs_with_timeout(self.redpanda, "Restarting the schema registry")
+        wait_until(
+            lambda: self.sr_client.get_subjects().status_code == requests.codes.ok,
+            timeout_sec=30,
+            backoff_sec=1,
+            retry_on_exc=True,
+            err_msg="schema registry did not become ready after restart",
+        )
+
+    @cluster(num_nodes=1)
+    def test_uncompacted_topic_replay(self):
+        admin = Admin(self.redpanda)
+        self.sr_client.set_config(data=json.dumps({"compatibility": "NONE"}))
+
+        # A schema with a reference, so replay exercises reference
+        # resolution between schemas that are both being replayed.
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject="simple",
+            data=json.dumps({"schema": simple_proto_def, "schemaType": "PROTOBUF"}),
+        )
+        assert result_raw.status_code == requests.codes.ok
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject="imported",
+            data=json.dumps(
+                {
+                    "schema": imported_proto_def,
+                    "schemaType": "PROTOBUF",
+                    "references": [
+                        {"name": "simple", "subject": "simple", "version": 1}
+                    ],
+                }
+            ),
+        )
+        assert result_raw.status_code == requests.codes.ok
+
+        # Uncompacted churn: repeatedly soft-delete and re-register the
+        # same schema, leaving many records for few distinct schemas, with
+        # the last delete left in place.
+        churn_subject = "churn-value"
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject=churn_subject, data=json.dumps({"schema": schema1_def})
+        )
+        assert result_raw.status_code == requests.codes.ok
+        for _ in range(40):
+            result_raw = self.sr_client.post_subjects_subject_versions(
+                subject=churn_subject, data=json.dumps({"schema": schema2_def})
+            )
+            assert result_raw.status_code == requests.codes.ok
+            result_raw = self.sr_client.get_subjects_subject_versions(
+                subject=churn_subject
+            )
+            assert result_raw.status_code == requests.codes.ok
+            result_raw = self.sr_client.delete_subject_version(
+                subject=churn_subject, version=max(result_raw.json())
+            )
+            assert result_raw.status_code == requests.codes.ok
+
+        # A permanently deleted subject: replay must not resurrect it from
+        # the records that precede its tombstones.
+        tombstone_subject = "tombstone-value"
+        result_raw = self.sr_client.post_subjects_subject_versions(
+            subject=tombstone_subject, data=json.dumps({"schema": schema3_def})
+        )
+        assert result_raw.status_code == requests.codes.ok
+        result_raw = self.sr_client.delete_subject(subject=tombstone_subject)
+        assert result_raw.status_code == requests.codes.ok
+        result_raw = self.sr_client.delete_subject(
+            subject=tombstone_subject, permanent=True
+        )
+        assert result_raw.status_code == requests.codes.ok
+
+        before = self._snapshot_state()
+        assert tombstone_subject not in before["subjects_with_deleted"]
+
+        # Staged replay (the default).
+        self._restart_schema_registry(admin)
+        staged_state = self._snapshot_state()
+        assert staged_state == before, (
+            f"staged replay diverged: {staged_state} != {before}"
+        )
+
+        # Eager fallback path.
+        self.redpanda.set_cluster_config(
+            {"schema_registry_enable_staged_replay": False}, expect_restart=True
+        )
+        self._restart_schema_registry(admin)
+        eager_state = self._snapshot_state()
+        assert eager_state == before, (
+            f"eager replay diverged: {eager_state} != {before}"
+        )
+
+
 class SchemaRegistryMTLSBase(SchemaRegistryEndpoints):
     topics = [
         TopicSpec(),
