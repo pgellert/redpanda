@@ -204,7 +204,20 @@ ss::future<bool> sharded_store::upsert(
   subject_schema schema,
   schema_id id,
   schema_version version,
-  is_deleted deleted) {
+  is_deleted deleted,
+  stage_defs stage) {
+    if (stage) {
+        auto [sub, def] = std::move(schema).destructure();
+        auto ctx_id = context_schema_id{sub.ctx, id};
+        co_await _store.invoke_on(
+          shard_for(ctx_id),
+          _smp_opts,
+          [ctx_id, def{std::move(def)}](store& s) mutable {
+              s.stage_schema(ctx_id, std::move(def));
+          });
+        co_return co_await upsert_subject(
+          marker, std::move(sub), version, id, deleted);
+    }
     auto canonical_fut = co_await ss::coroutine::as_future(
       make_canonical_schema(schema.share(), normalize::no, false));
     bool processing_failed = canonical_fut.failed();
@@ -221,6 +234,53 @@ ss::future<bool> sharded_store::upsert(
       context_schema_id{sub.ctx, id}, std::move(def), processing_failed);
     co_return co_await upsert_subject(
       marker, std::move(sub), version, id, deleted);
+}
+
+ss::future<> sharded_store::finalize_staged() {
+    for (ss::shard_id shard = 0; shard != ss::this_smp_shard_count(); ++shard) {
+        co_await _store.invoke_on(shard, _smp_opts, [this](store& s) {
+            return finalize_staged_local(s);
+        });
+    }
+}
+
+ss::future<> sharded_store::finalize_staged_local(store& s) {
+    // Deliberately sequential: one canonicalization at a time, exactly like
+    // the eager replay path, just once per distinct schema id instead of
+    // once per record.
+    for (const auto& ctx_id : s.staged_schema_ids()) {
+        auto staged = s.staged_schema(ctx_id);
+        if (!staged.has_value()) {
+            continue;
+        }
+        auto canonical_fut = co_await ss::coroutine::as_future(
+          make_canonical_schema(
+            {context_subject{ctx_id.ctx, subject{}}, staged->share()},
+            normalize::no,
+            false));
+        if (!s.erase_staged(ctx_id)) {
+            // A tombstone landed while parsing; do not resurrect the
+            // schema.
+            continue;
+        }
+        if (canonical_fut.failed()) {
+            // Keep the raw definition and mark it so that
+            // process_marked_schemas retries it, matching the eager replay
+            // path's tolerance of unparseable schemas.
+            auto ep = canonical_fut.get_exception();
+            vlog(
+              srlog.debug,
+              "finalize_staged: keeping raw definition for ctx={} id={}: {}",
+              ctx_id.ctx,
+              ctx_id.id,
+              ep);
+            s.upsert_schema(ctx_id, std::move(*staged), true);
+        } else {
+            auto [sub, canonical_def]
+              = std::move(canonical_fut.get()).destructure();
+            s.upsert_schema(ctx_id, std::move(canonical_def), false);
+        }
+    }
 }
 
 ss::future<> sharded_store::process_marked_schemas() {

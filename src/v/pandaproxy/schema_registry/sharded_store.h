@@ -54,12 +54,30 @@ public:
     };
     ss::future<insert_result> project_ids(stored_schema schema);
 
+    ///\brief Insert or update a schema and its subject version.
+    ///
+    /// With stage = stage_defs::yes (startup topic replay), the definition
+    /// is not canonicalized; it is staged on its owning shard and moved
+    /// into the store by finalize_staged().
     ss::future<bool> upsert(
       seq_marker marker,
       subject_schema schema,
       schema_id id,
       schema_version version,
-      is_deleted deleted);
+      is_deleted deleted,
+      stage_defs stage = stage_defs::no);
+
+    ///\brief Canonicalize all definitions staged by upsert(...,
+    /// stage_defs::yes), once per distinct schema id, and move them into
+    /// the store. Definitions that fail to parse are stored raw and
+    /// marked, matching the eager replay path.
+    ///
+    /// Because references resolve at the end of the topic rather than at
+    /// each record's offset, a schema whose reference target is
+    /// permanently deleted later in the topic is kept raw, where the
+    /// eager path stored it canonicalized; both forms serve the original
+    /// definition.
+    ss::future<> finalize_staged();
 
     // This function will try to compile all marked schemas.
     // It should be called every time new schemas are loaded from
@@ -259,6 +277,10 @@ private:
     ss::future<bool> upsert_schema(
       context_schema_id id, schema_definition def, bool mark_schema);
     ss::future<> delete_schema(context_schema_id id);
+
+    ///\brief Finalize the definitions staged on one shard; runs on that
+    /// shard, sequentially.
+    ss::future<> finalize_staged_local(store& s);
 
     ss::future<bool> upsert_subject(
       seq_marker marker,

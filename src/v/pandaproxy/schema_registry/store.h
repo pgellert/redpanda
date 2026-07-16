@@ -17,6 +17,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_map.h"
 #include "config/configuration.h"
+#include "container/chunked_hash_map.h"
 #include "container/chunked_vector.h"
 #include "metrics/metrics.h"
 #include "metrics/prometheus_sanitize.h"
@@ -82,10 +83,18 @@ public:
     }
 
     ///\brief Return a schema definition by id.
+    ///
+    /// During staged replay the definition may still be in the staging
+    /// area; serve it from there so reference resolution works while
+    /// finalization is in progress. Outside replay the staging area is
+    /// empty.
     result<schema_definition>
     get_schema_definition(const context_schema_id& id) const {
         auto it = _schemas.find(id);
         if (it == _schemas.end()) {
+            if (auto s_it = _staged_defs.find(id); s_it != _staged_defs.end()) {
+                return {s_it->second.share()};
+            }
             return not_found(id.id);
         }
         return {it->second.definition.share()};
@@ -854,6 +863,7 @@ public:
     }
 
     void delete_schema(const context_schema_id& id) {
+        _staged_defs.erase(id);
         auto it = _schemas.find(id);
         if (it != _schemas.end()) {
             auto ctx_it = _context_stores.find(id.ctx);
@@ -868,6 +878,39 @@ public:
     // This function returns and unmarkes all marked schemas.
     chunked_vector<context_schema_id> extract_marked_schemas() {
         return std::exchange(_marked_schemas, {});
+    }
+
+    ///\brief Stage a raw schema definition during replay; it is
+    /// canonicalized and moved into the store by
+    /// sharded_store::finalize_staged(). Last write wins, matching
+    /// upsert_schema.
+    void stage_schema(context_schema_id id, schema_definition def) {
+        _staged_defs.insert_or_assign(std::move(id), std::move(def));
+    }
+
+    ///\brief Ids of all staged schema definitions (replay only).
+    chunked_vector<context_schema_id> staged_schema_ids() const {
+        chunked_vector<context_schema_id> ids;
+        ids.reserve(_staged_defs.size());
+        for (const auto& [id, _] : _staged_defs) {
+            ids.push_back(id);
+        }
+        return ids;
+    }
+
+    ///\brief Return a staged schema definition, if id is staged.
+    std::optional<schema_definition>
+    staged_schema(const context_schema_id& id) const {
+        auto it = _staged_defs.find(id);
+        if (it == _staged_defs.end()) {
+            return std::nullopt;
+        }
+        return it->second.share();
+    }
+
+    ///\brief Remove a staged definition; returns false if id was not staged.
+    bool erase_staged(const context_schema_id& id) {
+        return _staged_defs.erase(id) > 0;
     }
 
     struct insert_subject_result {
@@ -1321,6 +1364,7 @@ private:
     // NOTE: sharded_store shards data into multiple store instances, so some
     // fields are only present on certain shards.
     // _schemas: sharded by (context, schema_id)
+    // _staged_defs: sharded by (context, schema_id)
     // _subjects: sharded by (context, subject)
     // _marked_schemas: sharded by (context, schema_id)
     // context_store:
@@ -1337,6 +1381,9 @@ private:
     // still.
 
     schema_map _schemas;
+    // Raw definitions staged during replay, keyed like _schemas; empty
+    // outside replay finalization.
+    chunked_hash_map<context_schema_id, schema_definition> _staged_defs;
     subject_map _subjects;
     chunked_vector<context_schema_id> _marked_schemas;
     context_store_map _context_stores;

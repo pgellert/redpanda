@@ -37,6 +37,9 @@ using permanent_delete = ss::bool_class<struct delete_tag>;
 using include_deleted = ss::bool_class<struct include_deleted_tag>;
 using is_deleted = ss::bool_class<struct is_deleted_tag>;
 using default_to_global = ss::bool_class<struct default_to_global_tag>;
+///\brief Stage definitions during replay instead of canonicalizing them
+/// eagerly; see sharded_store::finalize_staged().
+using stage_defs = ss::bool_class<struct stage_defs_tag>;
 using force = ss::bool_class<struct force_tag>;
 using normalize = ss::bool_class<struct normalize_tag>;
 using verbose = ss::bool_class<struct verbose_tag>;
